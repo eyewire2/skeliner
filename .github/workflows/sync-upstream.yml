@@ -22,5 +22,7 @@ jobs:
         run: |
           git remote add upstream https://github.com/berenslab/skeliner.git || git remote set-url upstream https://github.com/berenslab/skeliner.git
           git fetch upstream
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-edit upstream/main
           git push origin main
