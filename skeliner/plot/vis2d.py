@@ -848,7 +848,10 @@ def details(
             node_comp = node_comp[keep_skel]
             node_colors = lut[node_comp]
         else:
-            node_colors = "red"  # simple fallback
+            # Keep fallback colors per-node so downstream slicing never
+            # turns a color string (e.g. "red") into an invalid one ("ed").
+            fallback = mcolors.to_rgba("red")
+            node_colors = np.repeat([fallback], xy_skel.shape[0], axis=0)
 
         slicing = 0 if skel.soma.verts is None else 1
         ax.scatter(
