@@ -1,94 +1,155 @@
 """skeliner.pre – mesh preprocessing utilities."""
 
+from collections import defaultdict
+
 import igraph as ig
 import numpy as np
 import trimesh
+from scipy.spatial import KDTree
 
 __all__ = [
     "remove_avocados",
 ]
 
 
-def _outer_shell_faces(
+def _outward_dot(
     mesh: trimesh.Trimesh,
-    main_face_idx: np.ndarray,
+    radius: float,
 ) -> np.ndarray:
-    """Return indices of faces belonging to the smooth outer shell.
+    """Per-face outward score: dot(face_normal, direction_from_local_COM).
 
-    Builds a face-adjacency graph over the main vertex-component faces
-    and cuts edges where neighbouring normals are sharply opposing
-    (dot < 0).  The largest resulting component is the outer shell.
+    For each face, finds all vertices within *radius* of its centroid,
+    computes their center of mass, and dots the face normal against
+    the direction from that COM to the face centroid.
+
+    Surface faces point outward (positive), internal faces point
+    inward (negative).
+
+    Returns
+    -------
+    np.ndarray
+        (nFaces,) float64 array of outward dot products.
     """
-    normals = mesh.face_normals
-    face_adj = mesh.face_adjacency
+    verts = mesh.vertices
+    face_centers = mesh.triangles_center
+    face_normals = mesh.face_normals
+    vtree = KDTree(verts)
 
-    # restrict to adjacencies within the main component
-    main_mask = np.zeros(len(mesh.faces), dtype=bool)
-    main_mask[main_face_idx] = True
-    in_main = main_mask[face_adj[:, 0]] & main_mask[face_adj[:, 1]]
-    main_adj = face_adj[in_main]
+    outward_dots = np.zeros(len(mesh.faces), dtype=np.float64)
+    for fi in range(len(mesh.faces)):
+        fc = face_centers[fi]
+        idx = vtree.query_ball_point(fc, radius)
+        if len(idx) < 4:
+            continue
+        local_com = verts[idx].mean(axis=0)
+        outward_dir = fc - local_com
+        norm = np.linalg.norm(outward_dir)
+        if norm < 1e-10:
+            continue
+        outward_dir /= norm
+        outward_dots[fi] = np.dot(face_normals[fi], outward_dir)
 
-    # cut at sharp normal transitions
-    adj_dots = np.einsum(
-        "ij,ij->i",
-        normals[main_adj[:, 0]],
-        normals[main_adj[:, 1]],
-    )
-    smooth = adj_dots >= 0.0
+    return outward_dots
 
-    # remap to [0, n_main)
-    n_main = len(main_face_idx)
-    face_remap = np.full(len(mesh.faces), -1, dtype=np.intp)
-    face_remap[main_face_idx] = np.arange(n_main)
 
-    smooth_adj = main_adj[smooth]
-    remapped = np.stack(
-        [face_remap[smooth_adj[:, 0]], face_remap[smooth_adj[:, 1]]], axis=1
-    )
-    fg = ig.Graph(n=n_main, edges=remapped.tolist(), directed=False)
-    face_comps = fg.components()
-    shell_local = max(face_comps, key=len)
+def _filter_small_clusters(
+    mesh: trimesh.Trimesh,
+    face_mask: np.ndarray,
+    min_cluster_size: int,
+) -> np.ndarray:
+    """Remove connected components of flagged faces below a size threshold.
 
-    return main_face_idx[list(shell_local)]
+    Parameters
+    ----------
+    mesh
+        The mesh.
+    face_mask
+        Boolean mask (nFaces,) — True for faces to consider.
+    min_cluster_size
+        Clusters with fewer faces than this are dropped.
+
+    Returns
+    -------
+    np.ndarray
+        Filtered boolean mask.
+    """
+    flagged = set(int(fi) for fi in np.where(face_mask)[0])
+    if not flagged:
+        return face_mask
+
+    # Build face adjacency restricted to flagged faces
+    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi in flagged:
+        f = mesh.faces[fi]
+        for i in range(3):
+            e = (min(int(f[i]), int(f[(i + 1) % 3])),
+                 max(int(f[i]), int(f[(i + 1) % 3])))
+            edge_to_faces[e].append(fi)
+
+    int_list = sorted(flagged)
+    int_remap = {fi: i for i, fi in enumerate(int_list)}
+    edges = set()
+    for fi in int_list:
+        f = mesh.faces[fi]
+        for i in range(3):
+            e = (min(int(f[i]), int(f[(i + 1) % 3])),
+                 max(int(f[i]), int(f[(i + 1) % 3])))
+            for nfi in edge_to_faces[e]:
+                if nfi != fi:
+                    a, b = int_remap[fi], int_remap[nfi]
+                    edges.add((min(a, b), max(a, b)))
+
+    g = ig.Graph(n=len(int_list), edges=list(edges), directed=False)
+    clusters = g.connected_components()
+
+    keep = set()
+    for cl in clusters:
+        if len(cl) >= min_cluster_size:
+            keep.update(int_list[i] for i in cl)
+
+    filtered = np.zeros(len(mesh.faces), dtype=bool)
+    for fi in keep:
+        filtered[fi] = True
+    return filtered
 
 
 def remove_avocados(
     mesh: trimesh.Trimesh,
     *,
-    normal_offset: float = 5.0,
-    winding_threshold: float = 0.5,
+    radius: float = 500.0,
+    min_cluster_size: int = 5,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Remove internal mesh fragments ("avocado" artifacts) from a neuron mesh.
 
     Organelle membranes (mitochondria, ER, etc.) often appear as
-    disconnected or semi-connected components sitting *inside* the
+    connected or semi-connected components sitting *inside* the
     neuron body.  They bias skeleton-node positions and radius estimates
     and should be removed before skeletonisation.
 
     The algorithm works in three steps:
 
-    1. **Identify the outer shell** – extract the main vertex-connected
-       component, then cut its face-adjacency graph at sharp normal
-       transitions (dot < 0) to isolate the smooth outer surface.
-    2. **Winding-number classification** – evaluate the generalised
-       winding number (via ``igl.fast_winding_number``) of the outer
-       shell at points offset slightly outward *and* inward from every
-       face centroid.  Faces whose **both** offsets lie inside the shell
-       (winding number > *winding_threshold*) are internal membranes.
+    1. **Local outward scoring** – for each face, compute the dot product
+       between its normal and the direction from the local center of mass
+       (vertices within *radius*) to the face centroid.  Surface faces
+       point outward (positive), internal faces point inward (negative).
+    2. **Cluster filtering** – discard isolated small groups of flagged
+       faces (< *min_cluster_size*) to avoid removing surface faces at
+       local concavities.
     3. **Face removal** – flagged faces are dropped and unreferenced
        vertices are cleaned up.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
-        Input neuron mesh (may have multiple connected components).
-    normal_offset : float, default 5.0
-        Distance (in mesh units, typically nm) to offset query points
-        along the face normal on each side.
-    winding_threshold : float, default 0.5
-        Winding-number threshold above which a query point is considered
-        inside the outer shell.
+        Input neuron mesh.
+    radius : float, default 500.0
+        Radius (in mesh units, typically nm) for the local center-of-mass
+        neighbourhood.  Should be large enough to capture local geometry
+        but not so large that fine neurite branches are averaged away.
+    min_cluster_size : int, default 5
+        Connected components of internal faces smaller than this are
+        kept (assumed to be noise).
     verbose : bool, default False
         Print summary statistics.
 
@@ -97,55 +158,29 @@ def remove_avocados(
     trimesh.Trimesh
         Cleaned mesh with internal fragments removed.
     """
-    import igl
-
-    V = mesh.vertices.astype(np.float64)
-    F = mesh.faces.astype(np.int64)
-    centroids = mesh.triangles_center.astype(np.float64)
-    normals = mesh.face_normals.astype(np.float64)
-    n_faces = len(F)
+    n_faces = len(mesh.faces)
 
     # ------------------------------------------------------------------
-    # Step 1 – find the outer shell
+    # Step 1 – local outward scoring
     # ------------------------------------------------------------------
-    edges = [(int(a), int(b)) for a, b in mesh.edges_unique]
-    g = ig.Graph(n=len(V), edges=edges, directed=False)
-    comps = g.components()
-    main_comp = max(comps, key=len)
-    main_set = set(main_comp)
-    main_face_mask = np.all(np.isin(F, list(main_set)), axis=1)
-    main_face_idx = np.where(main_face_mask)[0]
-
-    shell_face_idx = _outer_shell_faces(mesh, main_face_idx)
-    shell_F = F[shell_face_idx]
+    outward_dots = _outward_dot(mesh, radius)
+    avocado_raw = outward_dots < 0
 
     if verbose:
         print(
-            f"[skeliner.pre] Outer shell: {len(shell_face_idx):,} faces "
-            f"(of {n_faces:,} total)"
+            f"[skeliner.pre] Raw internal faces: {avocado_raw.sum():,} "
+            f"({100 * avocado_raw.mean():.1f}% of {n_faces:,})"
         )
 
     # ------------------------------------------------------------------
-    # Step 2 – winding-number classification
+    # Step 2 – cluster filtering
     # ------------------------------------------------------------------
-    query_out = centroids + normal_offset * normals
-    query_in = centroids - normal_offset * normals
-
-    wn_out = igl.fast_winding_number(V, shell_F, query_out)
-    wn_in = igl.fast_winding_number(V, shell_F, query_in)
-
-    # A face is an avocado if BOTH sides are inside the outer shell
-    avocado = (wn_out > winding_threshold) & (wn_in > winding_threshold)
-
-    # Never remove outer-shell faces (guard against rare edge cases)
-    shell_mask = np.zeros(n_faces, dtype=bool)
-    shell_mask[shell_face_idx] = True
-    avocado &= ~shell_mask
+    avocado = _filter_small_clusters(mesh, avocado_raw, min_cluster_size)
 
     if verbose:
         print(
-            f"[skeliner.pre] Avocado faces: {avocado.sum():,} "
-            f"({100 * avocado.mean():.1f}%)"
+            f"[skeliner.pre] After cluster filter (>= {min_cluster_size}): "
+            f"{avocado.sum():,} faces"
         )
 
     if not avocado.any():
