@@ -9,3 +9,11 @@ __all__ = [
     "view3d",
     "view_contacts",
 ]
+
+
+def view(mesh_path, **kwargs):
+    """Launch interactive mesh viewer. Lazy import to avoid heavy deps."""
+    from .viewer import view as _view
+
+    return _view(mesh_path, **kwargs)
+

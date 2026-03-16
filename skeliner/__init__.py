@@ -1,6 +1,6 @@
 from importlib.metadata import PackageNotFoundError, version
 
-from . import batch, dx, io, pair, plot, post
+from . import batch, dx, io, pair, plot, post, pre
 from .dataclass import Skeleton, register_skeleton_methods
 from .plot.vis2d import projection as plot2d
 from .plot.vis2d import threeviews as plot3v
@@ -26,5 +26,6 @@ __all__ = [
     "batch",
     "post",
     "pair",
+    "pre",
     "plot",
 ]

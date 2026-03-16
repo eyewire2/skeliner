@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Skeliner Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; overflow: hidden; font-family: monospace; color: #ccc; }
+  #canvas-container { width: 100vw; height: 100vh; }
+  #info {
+    position: absolute; top: 10px; left: 10px;
+    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
+    font-size: 12px; line-height: 1.6; pointer-events: none;
+    max-width: 400px;
+  }
+  #info .label { color: #888; }
+  #info .value { color: #eee; }
+  #controls {
+    position: absolute; bottom: 10px; left: 10px;
+    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
+    font-size: 12px;
+  }
+  #controls label { margin-right: 12px; cursor: pointer; }
+  #controls input[type=range] { width: 120px; vertical-align: middle; }
+  #loading {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 18px; color: #666;
+  }
+  #selection-info {
+    position: absolute; top: 10px; right: 10px;
+    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
+    font-size: 12px; line-height: 1.6; max-width: 300px;
+  }
+</style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+<div id="loading">Loading mesh...</div>
+
+<div id="info">
+  <div><span class="label">Vertices: </span><span class="value" id="nVerts">-</span></div>
+  <div><span class="label">Faces: </span><span class="value" id="nFaces">-</span></div>
+  <div><span class="label">Camera: </span><span class="value" id="camPos">-</span></div>
+  <div><span class="label">Visible faces: </span><span class="value" id="visCount">-</span></div>
+</div>
+
+<div id="controls">
+  <label>Clip plane: <input type="range" id="clipSlider" min="0" max="100" value="100"></label>
+  <label><input type="checkbox" id="wireToggle"> Wireframe</label>
+  <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="30"></label>
+</div>
+
+<div id="selection-info">
+  <div><span class="label">Click a face to select</span></div>
+  <div id="selDetail"></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Globals ──────────────────────────────────────────────────────────
+let scene, camera, renderer, controls, meshObj, wireframeObj;
+let clipPlane, meshGeometry;
+let faceWindingNumbers = null;
+let ws = null;
+let stateDebounceTimer = null;
+const STATE_DEBOUNCE_MS = 300;
+
+// Annotation overlays: highlighted face groups
+let annotationMeshes = [];
+
+// ── Init ─────────────────────────────────────────────────────────────
+async function init() {
+  // Scene
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0f1a);
+
+  // Camera
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
+  camera.position.set(0, 0, 500);
+
+  // Renderer
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.localClippingEnabled = true;
+  document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+  // Clipping plane
+  clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 99999);
+
+  // Controls
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.1;
+  controls.addEventListener('change', scheduleStateUpdate);
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+  const dl1 = new THREE.DirectionalLight(0xffffff, 0.8);
+  dl1.position.set(1, 1, 1);
+  scene.add(dl1);
+  const dl2 = new THREE.DirectionalLight(0xffffff, 0.3);
+  dl2.position.set(-1, -0.5, -1);
+  scene.add(dl2);
+
+  // Load mesh
+  const resp = await fetch('/mesh');
+  const data = await resp.json();
+  buildMesh(data);
+
+  document.getElementById('loading').style.display = 'none';
+
+  // Controls
+  setupControls();
+
+  // Click to select (left click)
+  renderer.domElement.addEventListener('click', onClickSelect);
+
+  // Right-click or Ctrl+click to recenter (same as vis3d.py)
+  renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+  renderer.domElement.addEventListener('pointerdown', onRecenter);
+
+  // WebSocket
+  connectWebSocket();
+
+  // Resize
+  window.addEventListener('resize', onResize);
+
+  // Render loop
+  animate();
+}
+
+// ── Build mesh from server data ──────────────────────────────────────
+function buildMesh(data) {
+  const { vertices, faces, nVertices, nFaces, faceWindingNumbers: fwn } = data;
+
+  document.getElementById('nVerts').textContent = nVertices.toLocaleString();
+  document.getElementById('nFaces').textContent = nFaces.toLocaleString();
+
+  faceWindingNumbers = fwn ? new Float32Array(fwn) : null;
+
+  // Geometry (non-indexed so we can colour per-face)
+  meshGeometry = new THREE.BufferGeometry();
+  const positions = new Float32Array(nFaces * 9);
+  const colors = new Float32Array(nFaces * 9);
+
+  const verts = new Float32Array(vertices);
+
+  for (let i = 0; i < nFaces; i++) {
+    const a = faces[i * 3], b = faces[i * 3 + 1], c = faces[i * 3 + 2];
+    positions[i * 9 + 0] = verts[a * 3];
+    positions[i * 9 + 1] = verts[a * 3 + 1];
+    positions[i * 9 + 2] = verts[a * 3 + 2];
+    positions[i * 9 + 3] = verts[b * 3];
+    positions[i * 9 + 4] = verts[b * 3 + 1];
+    positions[i * 9 + 5] = verts[b * 3 + 2];
+    positions[i * 9 + 6] = verts[c * 3];
+    positions[i * 9 + 7] = verts[c * 3 + 1];
+    positions[i * 9 + 8] = verts[c * 3 + 2];
+
+    // Color by winding number
+    const wn = faceWindingNumbers ? faceWindingNumbers[i] : 0;
+    const [r, g, bl] = wnToColor(wn);
+    for (let v = 0; v < 3; v++) {
+      colors[i * 9 + v * 3 + 0] = r;
+      colors[i * 9 + v * 3 + 1] = g;
+      colors[i * 9 + v * 3 + 2] = bl;
+    }
+  }
+
+  meshGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  meshGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  meshGeometry.computeVertexNormals();
+
+  const material = new THREE.MeshPhongMaterial({
+    vertexColors: true,
+    side: THREE.DoubleSide,
+    clippingPlanes: [clipPlane],
+    shininess: 30,
+    transparent: true,
+    opacity: 0.3,
+    depthWrite: false,
+  });
+
+  meshObj = new THREE.Mesh(meshGeometry, material);
+  scene.add(meshObj);
+
+  // Wireframe overlay (hidden by default)
+  const wireMat = new THREE.MeshBasicMaterial({
+    wireframe: true,
+    color: 0x333333,
+    transparent: true,
+    opacity: 0.15,
+    clippingPlanes: [clipPlane],
+  });
+  wireframeObj = new THREE.Mesh(meshGeometry, wireMat);
+  wireframeObj.visible = false;
+  scene.add(wireframeObj);
+
+  // Fit camera to mesh bounding box
+  meshGeometry.computeBoundingSphere();
+  const bs = meshGeometry.boundingSphere;
+  camera.position.set(bs.center.x, bs.center.y, bs.center.z + bs.radius * 2);
+  controls.target.copy(bs.center);
+  controls.update();
+
+  // Set clip plane range
+  const clipSlider = document.getElementById('clipSlider');
+  clipSlider._bsRadius = bs.radius;
+  clipSlider._bsCenter = bs.center.z;
+}
+
+// ── Winding number → RGB colour ──────────────────────────────────────
+function wnToColor(wn) {
+  // 0.0 (outside) → blue/teal, 0.5 (surface) → white, 1.0+ (deep inside) → red/orange
+  const t = Math.min(Math.max(wn, 0), 1.5);
+
+  if (t < 0.3) {
+    // Outside: dark blue → teal
+    const u = t / 0.3;
+    return [0.05 + 0.1 * u, 0.1 + 0.4 * u, 0.3 + 0.3 * u];
+  } else if (t < 0.6) {
+    // Near surface: teal → light grey
+    const u = (t - 0.3) / 0.3;
+    return [0.15 + 0.65 * u, 0.5 + 0.3 * u, 0.6 - 0.0 * u];
+  } else if (t < 1.0) {
+    // Inside: light → warm orange
+    const u = (t - 0.6) / 0.4;
+    return [0.8 + 0.2 * u, 0.8 - 0.4 * u, 0.6 - 0.5 * u];
+  } else {
+    // Deep inside (wn > 1, multiple overlaps): orange → red
+    const u = Math.min((t - 1.0) / 0.5, 1.0);
+    return [1.0, 0.4 - 0.3 * u, 0.1 - 0.1 * u];
+  }
+}
+
+// ── Controls ─────────────────────────────────────────────────────────
+function setupControls() {
+  const clipSlider = document.getElementById('clipSlider');
+  clipSlider.addEventListener('input', () => {
+    const pct = parseInt(clipSlider.value);
+    const r = clipSlider._bsRadius || 500;
+    const cz = clipSlider._bsCenter || 0;
+    // 100 = no clipping, 0 = clip at centre
+    const dist = (pct / 100) * r * 2;
+    clipPlane.constant = cz - r + dist;
+    scheduleStateUpdate();
+  });
+
+  document.getElementById('wireToggle').addEventListener('change', (e) => {
+    if (wireframeObj) wireframeObj.visible = e.target.checked;
+  });
+
+  document.getElementById('opacitySlider').addEventListener('input', (e) => {
+    const val = parseInt(e.target.value) / 100;
+    if (meshObj) {
+      meshObj.material.transparent = val < 1.0;
+      meshObj.material.opacity = val;
+      meshObj.material.depthWrite = val >= 1.0;
+      meshObj.material.needsUpdate = true;
+    }
+  });
+}
+
+// ── Click selection ──────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+function onClickSelect(event) {
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+  if (!meshObj) return;
+
+  const hits = raycaster.intersectObject(meshObj);
+  if (hits.length === 0) return;
+
+  const hit = hits[0];
+  const faceIndex = hit.faceIndex;
+  const point = hit.point;
+  const wn = faceWindingNumbers ? faceWindingNumbers[faceIndex] : null;
+
+  const selInfo = {
+    faceIndex,
+    point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)],
+    windingNumber: wn !== null ? wn.toFixed(4) : null,
+  };
+
+  document.getElementById('selDetail').innerHTML =
+    `<div>Face: <b>${faceIndex}</b></div>` +
+    `<div>WN: <b>${wn !== null ? wn.toFixed(4) : '-'}</b></div>` +
+    `<div>Pos: ${selInfo.point.join(', ')}</div>`;
+
+  // Send selection to server
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'selection', payload: selInfo }));
+  }
+}
+
+// ── Right-click / Ctrl+click to recenter ─────────────────────────
+let pointerDownPos = null;
+function onRecenter(event) {
+  // Right-click (button 2) or Ctrl+left-click (button 0)
+  const isRight = event.button === 2;
+  const isCtrlLeft = event.button === 0 && (event.ctrlKey || event.metaKey);
+  if (!isRight && !isCtrlLeft) return;
+
+  // Record position to distinguish click from drag
+  pointerDownPos = { x: event.clientX, y: event.clientY };
+
+  const onUp = (upEvent) => {
+    renderer.domElement.removeEventListener('pointerup', onUp);
+    if (!pointerDownPos) return;
+    const dx = upEvent.clientX - pointerDownPos.x;
+    const dy = upEvent.clientY - pointerDownPos.y;
+    // Only recenter if it was a click, not a drag
+    if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+
+    mouse.x = (upEvent.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+    if (!meshObj) return;
+
+    const hits = raycaster.intersectObject(meshObj);
+    if (hits.length === 0) return;
+
+    // Same logic as vis3d._add_recenter_controls:
+    // Move focal point to picked point, keep camera-to-target offset
+    const pickPoint = hits[0].point;
+    const offset = camera.position.clone().sub(controls.target);
+    controls.target.copy(pickPoint);
+    camera.position.copy(pickPoint).add(offset);
+    controls.update();
+    scheduleStateUpdate();
+  };
+
+  renderer.domElement.addEventListener('pointerup', onUp);
+}
+
+// ── Visible face computation ─────────────────────────────────────────
+function computeVisibleFaceCount() {
+  // Approximate: count faces whose centroid is in the camera frustum
+  // and not clipped. Full occlusion testing is too expensive per-frame.
+  if (!meshGeometry) return 0;
+
+  const frustum = new THREE.Frustum();
+  const projScreenMatrix = new THREE.Matrix4();
+  projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  frustum.setFromProjectionMatrix(projScreenMatrix);
+
+  const pos = meshGeometry.getAttribute('position');
+  const nFaces = pos.count / 3;
+  let visible = 0;
+  const centroid = new THREE.Vector3();
+
+  // Sample every Nth face for performance
+  const step = Math.max(1, Math.floor(nFaces / 10000));
+  let sampled = 0;
+
+  for (let i = 0; i < nFaces; i += step) {
+    const base = i * 9;
+    centroid.set(
+      (pos.array[base] + pos.array[base + 3] + pos.array[base + 6]) / 3,
+      (pos.array[base + 1] + pos.array[base + 4] + pos.array[base + 7]) / 3,
+      (pos.array[base + 2] + pos.array[base + 5] + pos.array[base + 8]) / 3,
+    );
+
+    if (frustum.containsPoint(centroid) && clipPlane.distanceToPoint(centroid) >= 0) {
+      visible++;
+    }
+    sampled++;
+  }
+
+  // Extrapolate
+  return Math.round((visible / sampled) * nFaces);
+}
+
+// ── State updates ────────────────────────────────────────────────────
+function scheduleStateUpdate() {
+  if (stateDebounceTimer) clearTimeout(stateDebounceTimer);
+  stateDebounceTimer = setTimeout(sendStateUpdate, STATE_DEBOUNCE_MS);
+}
+
+function sendStateUpdate() {
+  const visCount = computeVisibleFaceCount();
+  document.getElementById('visCount').textContent = visCount.toLocaleString();
+  document.getElementById('camPos').textContent =
+    `(${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)})`;
+
+  const state = {
+    camera: {
+      position: camera.position.toArray(),
+      target: controls.target.toArray(),
+      up: camera.up.toArray(),
+      fov: camera.fov,
+      near: camera.near,
+      far: camera.far,
+    },
+    clipPlane: {
+      normal: [clipPlane.normal.x, clipPlane.normal.y, clipPlane.normal.z],
+      constant: clipPlane.constant,
+    },
+    visibleFaceCount: visCount,
+  };
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'state_update', payload: state }));
+  }
+}
+
+// ── Annotations (from Claude) ────────────────────────────────────────
+function applyAnnotations(annotations) {
+  // Remove old annotation meshes
+  for (const m of annotationMeshes) {
+    scene.remove(m);
+    m.geometry.dispose();
+    m.material.dispose();
+  }
+  annotationMeshes = [];
+
+  if (!annotations || !annotations.highlights) return;
+
+  // annotations.highlights: [ { faces: [1,2,3], color: [r,g,b], label: "..." }, ... ]
+  const posAttr = meshGeometry.getAttribute('position');
+
+  for (const group of annotations.highlights) {
+    const faceIndices = group.faces || [];
+    if (faceIndices.length === 0) continue;
+
+    const color = group.color || [1, 0, 0];
+    const positions = new Float32Array(faceIndices.length * 9);
+
+    for (let j = 0; j < faceIndices.length; j++) {
+      const fi = faceIndices[j];
+      const base = fi * 9;
+      for (let k = 0; k < 9; k++) {
+        positions[j * 9 + k] = posAttr.array[base + k];
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.computeVertexNormals();
+
+    const mat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(color[0], color[1], color[2]),
+      side: THREE.DoubleSide,
+      clippingPlanes: [clipPlane],
+      transparent: true,
+      opacity: 0.9,
+      depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+    });
+
+    const highlightMesh = new THREE.Mesh(geo, mat);
+    scene.add(highlightMesh);
+    annotationMeshes.push(highlightMesh);
+  }
+}
+
+// ── WebSocket ────────────────────────────────────────────────────────
+function connectWebSocket() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === 'annotations') {
+      applyAnnotations(msg.payload);
+    }
+  };
+
+  ws.onclose = () => {
+    // Reconnect after 2 seconds
+    setTimeout(connectWebSocket, 2000);
+  };
+}
+
+// ── Resize / Animate ─────────────────────────────────────────────────
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// ── Start ────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
