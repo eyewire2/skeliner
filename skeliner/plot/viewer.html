@@ -52,8 +52,9 @@
 </div>
 
 <div id="selection-info">
-  <div><span class="label">Click a face to select</span></div>
+  <div><span class="label">Click: select | Shift+click: highlight</span></div>
   <div id="selDetail"></div>
+  <div><span class="label">Highlighted: </span><span class="value" id="hlCount">0</span> <button id="hlClear" style="font-size:11px;cursor:pointer;">Clear</button></div>
 </div>
 
 <script type="importmap">
@@ -79,6 +80,10 @@ const STATE_DEBOUNCE_MS = 300;
 
 // Annotation overlays: highlighted face groups
 let annotationMeshes = [];
+
+// Manual highlight: shift+click to add faces, stored and synced
+let manualHighlightFaces = new Set();
+let manualHighlightMesh = null;
 
 // ── Init ─────────────────────────────────────────────────────────────
 async function init() {
@@ -125,8 +130,15 @@ async function init() {
   // Controls
   setupControls();
 
-  // Click to select (left click)
+  // Click to select (left click), shift+click to highlight
   renderer.domElement.addEventListener('click', onClickSelect);
+
+  // Clear highlight button
+  document.getElementById('hlClear').addEventListener('click', () => {
+    manualHighlightFaces.clear();
+    rebuildManualHighlight();
+    syncManualHighlight();
+  });
 
   // Right-click or Ctrl+click to recenter (same as vis3d.py)
   renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -293,6 +305,18 @@ function onClickSelect(event) {
   const point = hit.point;
   const wn = faceWindingNumbers ? faceWindingNumbers[faceIndex] : null;
 
+  // Shift+click: toggle face in manual highlight
+  if (event.shiftKey) {
+    if (manualHighlightFaces.has(faceIndex)) {
+      manualHighlightFaces.delete(faceIndex);
+    } else {
+      manualHighlightFaces.add(faceIndex);
+    }
+    rebuildManualHighlight();
+    syncManualHighlight();
+    return;
+  }
+
   const selInfo = {
     faceIndex,
     point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)],
@@ -312,6 +336,63 @@ function onClickSelect(event) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(selInfo),
+    }).catch(() => {});
+  }
+}
+
+// ── Manual highlight ─────────────────────────────────────────────────
+function rebuildManualHighlight() {
+  // Remove old
+  if (manualHighlightMesh) {
+    scene.remove(manualHighlightMesh);
+    manualHighlightMesh.geometry.dispose();
+    manualHighlightMesh.material.dispose();
+    manualHighlightMesh = null;
+  }
+
+  const faces = Array.from(manualHighlightFaces);
+  document.getElementById('hlCount').textContent = faces.length;
+  if (faces.length === 0) return;
+
+  const posAttr = meshGeometry.getAttribute('position');
+  const positions = new Float32Array(faces.length * 9);
+  for (let j = 0; j < faces.length; j++) {
+    const base = faces[j] * 9;
+    for (let k = 0; k < 9; k++) {
+      positions[j * 9 + k] = posAttr.array[base + k];
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshPhongMaterial({
+    color: new THREE.Color(1, 0.8, 0),
+    side: THREE.DoubleSide,
+    clippingPlanes: [clipPlane],
+    transparent: true,
+    opacity: 0.9,
+    depthTest: true,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+  });
+
+  manualHighlightMesh = new THREE.Mesh(geo, mat);
+  scene.add(manualHighlightMesh);
+}
+
+function syncManualHighlight() {
+  const payload = {
+    manualHighlight: Array.from(manualHighlightFaces),
+  };
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'manual_highlight', payload }));
+  } else {
+    fetch('/update_selection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     }).catch(() => {});
   }
 }
@@ -420,6 +501,10 @@ function sendStateUpdate() {
       normal: [clipPlane.normal.x, clipPlane.normal.y, clipPlane.normal.z],
       constant: clipPlane.constant,
     },
+    ui: {
+      opacity: meshObj ? meshObj.material.opacity : 1.0,
+      wireframe: wireframeObj ? wireframeObj.visible : false,
+    },
     visibleFaceCount: visCount,
   };
 
@@ -520,6 +605,9 @@ function connectWebSocket() {
       applyAnnotations(msg.payload);
     } else if (msg.type === 'camera_command') {
       applyCameraCommand(msg.payload);
+    } else if (msg.type === 'reload') {
+      console.log('[skeliner] viewer.html changed, reloading...');
+      window.location.reload();
     }
   };
 

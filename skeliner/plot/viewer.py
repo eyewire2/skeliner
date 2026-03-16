@@ -96,6 +96,15 @@ def _create_app(mesh_path: str | Path):
     if not camera_cmd_path.exists():
         camera_cmd_path.write_text("{}", encoding="utf-8")
 
+    # Write initial state with mesh metadata
+    state_path.write_text(json.dumps({
+        "mesh": {
+            "path": str(mesh_path.resolve()),
+            "nVertices": len(mesh.vertices),
+            "nFaces": len(mesh.faces),
+        },
+    }, indent=2), encoding="utf-8")
+
     connected_clients: list[WebSocket] = []
 
     # ── Routes ────────────────────────────────────────────────────────
@@ -118,7 +127,11 @@ def _create_app(mesh_path: str | Path):
 
     async def post_state(request):
         body = await request.json()
-        state_path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+        current = {}
+        if state_path.exists():
+            current = json.loads(state_path.read_text(encoding="utf-8"))
+        current.update(body)
+        state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
         return JSONResponse({"ok": True})
 
     async def post_selection(request):
@@ -139,14 +152,26 @@ def _create_app(mesh_path: str | Path):
                 msg = json.loads(data)
 
                 if msg.get("type") == "state_update":
+                    current = {}
+                    if state_path.exists():
+                        current = json.loads(state_path.read_text(encoding="utf-8"))
+                    current.update(msg["payload"])
                     state_path.write_text(
-                        json.dumps(msg["payload"], indent=2), encoding="utf-8"
+                        json.dumps(current, indent=2), encoding="utf-8"
                     )
                 elif msg.get("type") == "selection":
                     current = {}
                     if state_path.exists():
                         current = json.loads(state_path.read_text(encoding="utf-8"))
                     current["selection"] = msg["payload"]
+                    state_path.write_text(
+                        json.dumps(current, indent=2), encoding="utf-8"
+                    )
+                elif msg.get("type") == "manual_highlight":
+                    current = {}
+                    if state_path.exists():
+                        current = json.loads(state_path.read_text(encoding="utf-8"))
+                    current["manualHighlight"] = msg["payload"].get("manualHighlight", [])
                     state_path.write_text(
                         json.dumps(current, indent=2), encoding="utf-8"
                     )
@@ -157,11 +182,15 @@ def _create_app(mesh_path: str | Path):
 
     # ── File watcher (annotations + camera commands → push to browser) ─
 
+    html_path = Path(__file__).parent / "viewer.html"
+
     async def file_watcher():
         last_ann_mtime = 0.0
         last_cam_mtime = 0.0
+        last_html_mtime = html_path.stat().st_mtime if html_path.exists() else 0.0
         while True:
             await asyncio.sleep(0.5)
+            # Watch annotations
             try:
                 mtime = annotations_path.stat().st_mtime
                 if mtime > last_ann_mtime:
@@ -177,6 +206,7 @@ def _create_app(mesh_path: str | Path):
                             pass
             except FileNotFoundError:
                 pass
+            # Watch camera commands
             try:
                 mtime = camera_cmd_path.stat().st_mtime
                 if mtime > last_cam_mtime:
@@ -192,6 +222,18 @@ def _create_app(mesh_path: str | Path):
                                 }))
                             except Exception:
                                 pass
+            except FileNotFoundError:
+                pass
+            # Watch viewer.html for hot reload
+            try:
+                mtime = html_path.stat().st_mtime
+                if mtime > last_html_mtime:
+                    last_html_mtime = mtime
+                    for ws in connected_clients:
+                        try:
+                            await ws.send_text(json.dumps({"type": "reload"}))
+                        except Exception:
+                            pass
             except FileNotFoundError:
                 pass
 
