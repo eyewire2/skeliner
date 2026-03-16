@@ -47,8 +47,8 @@
 
 <div id="controls">
   <label>Clip plane: <input type="range" id="clipSlider" min="0" max="100" value="100"></label>
-  <label><input type="checkbox" id="wireToggle"> Wireframe</label>
-  <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="30"></label>
+  <label><input type="checkbox" id="wireToggle" checked> Wireframe</label>
+  <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50"></label>
 </div>
 
 <div id="selection-info">
@@ -91,7 +91,7 @@ async function init() {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0a0f1a);
 
-  // Camera
+  // Camera (near/far updated after mesh load)
   camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
   camera.position.set(0, 0, 500);
 
@@ -202,7 +202,7 @@ function buildMesh(data) {
     clippingPlanes: [clipPlane],
     shininess: 30,
     transparent: true,
-    opacity: 0.3,
+    opacity: 0.5,
     depthWrite: false,
   });
 
@@ -218,12 +218,15 @@ function buildMesh(data) {
     clippingPlanes: [clipPlane],
   });
   wireframeObj = new THREE.Mesh(meshGeometry, wireMat);
-  wireframeObj.visible = false;
+  wireframeObj.visible = true;
   scene.add(wireframeObj);
 
-  // Fit camera to mesh bounding box
+  // Fit camera to mesh bounding box, auto-scale clipping planes
   meshGeometry.computeBoundingSphere();
   const bs = meshGeometry.boundingSphere;
+  camera.near = bs.radius * 0.001;
+  camera.far = bs.radius * 10;
+  camera.updateProjectionMatrix();
   camera.position.set(bs.center.x, bs.center.y, bs.center.z + bs.radius * 2);
   controls.target.copy(bs.center);
   controls.update();

@@ -116,7 +116,8 @@ def _filter_small_clusters(
 def remove_avocados(
     mesh: trimesh.Trimesh,
     *,
-    radius: float = 500.0,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
     min_cluster_size: int = 5,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
@@ -127,7 +128,7 @@ def remove_avocados(
     neuron body.  They bias skeleton-node positions and radius estimates
     and should be removed before skeletonisation.
 
-    The algorithm works in three steps:
+    The algorithm works in four steps:
 
     1. **Local outward scoring** – for each face, compute the dot product
        between its normal and the direction from the local center of mass
@@ -138,15 +139,19 @@ def remove_avocados(
        local concavities.
     3. **Face removal** – flagged faces are dropped and unreferenced
        vertices are cleaned up.
+    4. **Fragment removal** – drop small disconnected components.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Input neuron mesh.
-    radius : float, default 500.0
+    radius : float or None, default None
         Radius (in mesh units, typically nm) for the local center-of-mass
-        neighbourhood.  Should be large enough to capture local geometry
-        but not so large that fine neurite branches are averaged away.
+        neighbourhood.  If None, automatically set to
+        ``radius_multiplier * median_edge_length``.
+    radius_multiplier : float, default 5.0
+        Multiplier for automatic radius computation.  Only used when
+        *radius* is None.
     min_cluster_size : int, default 5
         Connected components of internal faces smaller than this are
         kept (assumed to be noise).
@@ -159,6 +164,18 @@ def remove_avocados(
         Cleaned mesh with internal fragments removed.
     """
     n_faces = len(mesh.faces)
+
+    # ------------------------------------------------------------------
+    # Step 0 – auto-compute radius from mesh edge lengths
+    # ------------------------------------------------------------------
+    if radius is None:
+        median_edge = float(np.median(mesh.edges_unique_length))
+        radius = radius_multiplier * median_edge
+        if verbose:
+            print(
+                f"[skeliner.pre] Auto radius: {radius:.1f} "
+                f"({radius_multiplier}x median edge {median_edge:.1f})"
+            )
 
     # ------------------------------------------------------------------
     # Step 1 – local outward scoring
