@@ -49,6 +49,7 @@
   <label>Clip plane: <input type="range" id="clipSlider" min="0" max="100" value="100"></label>
   <label><input type="checkbox" id="wireToggle" checked> Wireframe</label>
   <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50"></label>
+  <button id="detectBtn" style="font-size:11px;cursor:pointer;margin-left:8px;">Detect Avocados (A)</button>
 </div>
 
 <div id="selection-info">
@@ -143,6 +144,14 @@ async function init() {
   // Right-click or Ctrl+click to recenter (same as vis3d.py)
   renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
   renderer.domElement.addEventListener('pointerdown', onRecenter);
+
+  // Detect avocados button + "A" shortcut
+  document.getElementById('detectBtn').addEventListener('click', runDetectAvocados);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'a' && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.target === document.body) {
+      runDetectAvocados();
+    }
+  });
 
   // WebSocket
   connectWebSocket();
@@ -383,6 +392,23 @@ function rebuildManualHighlight() {
 
   manualHighlightMesh = new THREE.Mesh(geo, mat);
   scene.add(manualHighlightMesh);
+}
+
+// ── Detect avocados ──────────────────────────────────────────────────
+async function runDetectAvocados() {
+  const btn = document.getElementById('detectBtn');
+  btn.textContent = 'Detecting...';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/detect_avocados', { method: 'POST' });
+    const data = await resp.json();
+    btn.textContent = `Avocados: ${data.nFaces} (A)`;
+  } catch (e) {
+    btn.textContent = 'Error (A)';
+    console.error('[skeliner] detect_avocados failed:', e);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function syncManualHighlight() {
