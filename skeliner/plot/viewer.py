@@ -68,7 +68,7 @@ def _get_viewer_html() -> str:
     return html_path.read_text(encoding="utf-8")
 
 
-def _create_app(mesh_path: str | Path):
+def _create_app(mesh_path: str | Path, port: int = 8777):
     """Create the Starlette app."""
     from starlette.applications import Starlette
     from starlette.responses import HTMLResponse, JSONResponse
@@ -87,9 +87,11 @@ def _create_app(mesh_path: str | Path):
     buffers["faceWindingNumbers"] = face_wn.tolist()
 
     _ensure_state_dir()
-    state_path = _STATE_DIR / "state.json"
-    annotations_path = _STATE_DIR / "annotations.json"
-    camera_cmd_path = _STATE_DIR / "camera.json"
+    port_dir = _STATE_DIR / str(port)
+    port_dir.mkdir(parents=True, exist_ok=True)
+    state_path = port_dir / "state.json"
+    annotations_path = port_dir / "annotations.json"
+    camera_cmd_path = port_dir / "camera.json"
 
     if not annotations_path.exists():
         annotations_path.write_text("{}", encoding="utf-8")
@@ -293,14 +295,15 @@ def view(
             "  pip install uvicorn[standard]"
         )
 
-    app = _create_app(mesh_path)
+    app = _create_app(mesh_path, port=port)
 
+    port_dir = _STATE_DIR / str(port)
     url = f"http://{host}:{port}"
     print(f"\nSkeliner Viewer")
     print(f"  URL:          {url}")
-    print(f"  State file:   {_STATE_DIR / 'state.json'}")
-    print(f"  Annotations:  {_STATE_DIR / 'annotations.json'}")
-    print(f"  Camera cmd:   {_STATE_DIR / 'camera.json'}")
+    print(f"  State file:   {port_dir / 'state.json'}")
+    print(f"  Annotations:  {port_dir / 'annotations.json'}")
+    print(f"  Camera cmd:   {port_dir / 'camera.json'}")
     print()
 
     if not no_browser:

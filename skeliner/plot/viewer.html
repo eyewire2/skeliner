@@ -156,6 +156,11 @@ async function init() {
   // WebSocket
   connectWebSocket();
 
+  // Load existing annotations on startup
+  fetch('/annotations').then(r => r.json()).then(ann => {
+    if (ann && ann.highlights) applyAnnotations(ann);
+  }).catch(() => {});
+
   // Resize
   window.addEventListener('resize', onResize);
 
