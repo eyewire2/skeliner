@@ -307,6 +307,12 @@ function onClickSelect(event) {
   // Send selection to server
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'selection', payload: selInfo }));
+  } else {
+    fetch('/update_selection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(selInfo),
+    }).catch(() => {});
   }
 }
 
@@ -419,6 +425,12 @@ function sendStateUpdate() {
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'state_update', payload: state }));
+  } else {
+    fetch('/update_state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(state),
+    }).catch(() => {});
   }
 }
 
@@ -473,20 +485,50 @@ function applyAnnotations(annotations) {
   }
 }
 
+// ── Camera commands (from Claude) ────────────────────────────────────
+function applyCameraCommand(cmd) {
+  // cmd: { position: [x,y,z], target: [x,y,z], up: [x,y,z] }
+  if (cmd.position) {
+    camera.position.fromArray(cmd.position);
+  }
+  if (cmd.target) {
+    controls.target.fromArray(cmd.target);
+  }
+  if (cmd.up) {
+    camera.up.fromArray(cmd.up);
+  }
+  if (cmd.fov) {
+    camera.fov = cmd.fov;
+    camera.updateProjectionMatrix();
+  }
+  controls.update();
+  scheduleStateUpdate();
+}
+
 // ── WebSocket ────────────────────────────────────────────────────────
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
+  ws.onopen = () => {
+    console.log('[skeliner] WebSocket connected');
+  };
+
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === 'annotations') {
       applyAnnotations(msg.payload);
+    } else if (msg.type === 'camera_command') {
+      applyCameraCommand(msg.payload);
     }
   };
 
+  ws.onerror = (err) => {
+    console.error('[skeliner] WebSocket error:', err);
+  };
+
   ws.onclose = () => {
-    // Reconnect after 2 seconds
+    console.log('[skeliner] WebSocket closed, reconnecting in 2s...');
     setTimeout(connectWebSocket, 2000);
   };
 }

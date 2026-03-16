@@ -27,12 +27,7 @@ def main():
     if args.command == "view":
         from skeliner.plot.viewer import view
 
-        if args.no_browser:
-            import skeliner.plot.viewer as _v
-            # Monkey-patch to skip browser open
-            _v.webbrowser = type("_", (), {"open": staticmethod(lambda *a: None)})()
-
-        view(args.mesh, host=args.host, port=args.port)
+        view(args.mesh, host=args.host, port=args.port, no_browser=args.no_browser)
     else:
         parser.print_help()
         sys.exit(1)
