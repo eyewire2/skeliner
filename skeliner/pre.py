@@ -200,60 +200,75 @@ def remove_avocados(
             f"{avocado.sum():,} faces"
         )
 
+    # ------------------------------------------------------------------
+    # Step 3 – flag internal disconnected fragments
+    #          (reuse outward_dots from step 1, no recomputation)
+    # ------------------------------------------------------------------
+    edge_list = set()
+    for face in mesh.faces:
+        for i in range(3):
+            a, b = int(face[i]), int(face[(i + 1) % 3])
+            edge_list.add((min(a, b), max(a, b)))
+
+    g = ig.Graph(n=len(mesh.vertices), edges=list(edge_list), directed=False)
+    comps = g.connected_components()
+    main_ci = max(range(len(comps)), key=lambda i: len(comps[i]))
+
+    n_internal_frags = 0
+    n_internal_frag_faces = 0
+    n_kept_frags = 0
+
+    if len(comps) > 1:
+        # Map each vertex to its component
+        vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
+        for ci, cl in enumerate(comps):
+            for v in cl:
+                vert_comp[v] = ci
+
+        # Assign each face to its component (by first vertex)
+        face_comp = vert_comp[mesh.faces[:, 0]]
+
+        for ci in range(len(comps)):
+            if ci == main_ci:
+                continue
+            comp_face_mask = face_comp == ci
+            comp_face_idx = np.where(comp_face_mask)[0]
+            if len(comp_face_idx) == 0:
+                continue
+            mean_dot = outward_dots[comp_face_idx].mean()
+            if mean_dot < 0:
+                # Internal fragment — flag for removal
+                avocado[comp_face_idx] = True
+                n_internal_frags += 1
+                n_internal_frag_faces += len(comp_face_idx)
+            else:
+                n_kept_frags += 1
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Fragments: {n_internal_frags:,} internal "
+            f"({n_internal_frag_faces:,} faces removed), "
+            f"{n_kept_frags:,} external (kept)"
+        )
+
+    # ------------------------------------------------------------------
+    # Step 4 – remove all flagged faces (avocados + internal fragments)
+    # ------------------------------------------------------------------
     if not avocado.any():
         if verbose:
             print("[skeliner.pre] Nothing to remove")
         return mesh
 
-    # ------------------------------------------------------------------
-    # Step 3 – remove flagged faces
-    # ------------------------------------------------------------------
     keep = ~avocado
     clean = mesh.submesh([np.where(keep)[0]], append=True)
     clean.remove_unreferenced_vertices()
 
     if verbose:
         print(
-            f"[skeliner.pre] After avocado removal: {len(clean.vertices):,} verts, "
+            f"[skeliner.pre] Result: {len(clean.vertices):,} verts, "
             f"{len(clean.faces):,} faces "
             f"(removed {avocado.sum():,} faces, "
             f"{len(mesh.vertices) - len(clean.vertices):,} verts)"
         )
-
-    # ------------------------------------------------------------------
-    # Step 4 – drop small disconnected components (fragments)
-    # ------------------------------------------------------------------
-    edges = set()
-    for face in clean.faces:
-        for i in range(3):
-            a, b = int(face[i]), int(face[(i + 1) % 3])
-            edges.add((min(a, b), max(a, b)))
-
-    g = ig.Graph(n=len(clean.vertices), edges=list(edges), directed=False)
-    comps = g.connected_components()
-    main_comp = set(max(comps, key=len))
-
-    if len(comps) > 1:
-        # Keep only faces whose vertices are all in the main component
-        main_face_mask = np.array([
-            all(int(v) in main_comp for v in face)
-            for face in clean.faces
-        ])
-        n_fragment_faces = (~main_face_mask).sum()
-        n_fragments = len(comps) - 1
-
-        if n_fragment_faces > 0:
-            clean = clean.submesh(
-                [np.where(main_face_mask)[0]], append=True
-            )
-            clean.remove_unreferenced_vertices()
-
-            if verbose:
-                print(
-                    f"[skeliner.pre] Removed {n_fragments:,} small fragments "
-                    f"({n_fragment_faces:,} faces). "
-                    f"Result: {len(clean.vertices):,} verts, "
-                    f"{len(clean.faces):,} faces"
-                )
 
     return clean
