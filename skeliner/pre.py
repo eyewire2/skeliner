@@ -299,7 +299,10 @@ def _fill_single_hole(
         rbf_pts = bnd_2d
         rbf_vals = bnd_h
 
-    rbf = RBFInterpolator(rbf_pts, rbf_vals, kernel="thin_plate_spline")
+    try:
+        rbf = RBFInterpolator(rbf_pts, rbf_vals, kernel="thin_plate_spline")
+    except np.linalg.LinAlgError:
+        rbf = None
 
     # ── Ear-clip triangulation in 2D ──────────────────────────────────
     tri_list = _ear_clip_2d(bnd_2d)
@@ -363,7 +366,17 @@ def _fill_single_hole(
     # ── Map new 2D points → 3D via RBF height ────────────────────────
     if n_new > 0:
         new_2d = pts_arr[n_bnd:]
-        new_h = np.clip(rbf(new_2d), bnd_h.min(), bnd_h.max())
+        if rbf is not None:
+            new_h = np.clip(rbf(new_2d), bnd_h.min(), bnd_h.max())
+        else:
+            # Fallback: inverse-distance weighted interpolation from boundary
+            dists = np.linalg.norm(
+                new_2d[:, np.newaxis, :] - bnd_2d[np.newaxis, :, :], axis=2
+            )
+            weights = 1.0 / np.maximum(dists, 1e-10) ** 2
+            new_h = (weights * bnd_h[np.newaxis, :]).sum(axis=1) / weights.sum(
+                axis=1
+            )
         new_3d = (
             centroid_3d
             + new_2d[:, 0:1] * u_ax
@@ -403,6 +416,7 @@ def _fill_single_hole(
 def fill_holes(
     mesh: trimesh.Trimesh,
     *,
+    max_perimeter_mult: float = 50.0,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Fill holes in the mesh with curvature-aware tessellation.
@@ -425,6 +439,10 @@ def fill_holes(
     ----------
     mesh : trimesh.Trimesh
         Input mesh (typically after ``remove_avocados``).
+    max_perimeter_mult : float, default 50.0
+        Skip holes whose perimeter exceeds this multiple of the median
+        edge length.  Very large holes are usually artifacts, not
+        real gaps to fill.
     verbose : bool, default False
         Print progress.
 
@@ -438,14 +456,31 @@ def fill_holes(
         return mesh
 
     target_edge = float(np.median(mesh.edges_unique_length))
+    max_perimeter = max_perimeter_mult * target_edge
     if verbose:
-        print(f"[skeliner.pre] Target edge length: {target_edge:.1f}")
+        print(f"[skeliner.pre] Target edge length: {target_edge:.1f}, "
+              f"max hole perimeter: {max_perimeter:.0f}")
 
     new_verts: list[np.ndarray] = []
     new_faces: list[np.ndarray] = []
     offset = len(mesh.vertices)
+    n_skipped = 0
 
     for i, loop in enumerate(loops):
+        pts = mesh.vertices[loop]
+        perimeter = sum(
+            np.linalg.norm(pts[(j + 1) % len(pts)] - pts[j])
+            for j in range(len(pts))
+        )
+        if perimeter > max_perimeter:
+            if verbose:
+                print(
+                    f"  Hole {i}: {len(loop)} bnd verts, "
+                    f"perimeter={perimeter:.0f} — skipped (too large)"
+                )
+            n_skipped += 1
+            continue
+
         nv, nf = _fill_single_hole(mesh, loop, target_edge, offset)
         if verbose:
             print(
@@ -468,6 +503,7 @@ def fill_holes(
         print(
             f"[skeliner.pre] Result: {len(result.vertices):,} verts, "
             f"{len(result.faces):,} faces"
+            + (f" ({n_skipped} holes skipped)" if n_skipped else "")
         )
     return result
 
