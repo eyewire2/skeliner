@@ -72,7 +72,6 @@
   <label><input type="checkbox" id="tubeToggle"> Tubes</label>
   <label style="margin-left:8px;">Pick: <select id="pickTarget" style="font-size:11px;">
     <option value="mesh">Mesh</option>
-    <option value="skeleton">Skeleton</option>
   </select></label>
   <button id="detectBtn" style="font-size:11px;cursor:pointer;margin-left:8px;">Detect Organelles (A)</button>
 </div>
@@ -408,7 +407,15 @@ function buildSkeleton(data) {
     color: baseColor, data,
   };
 
-  activeSkelName = name;
+  // Add to pick dropdown if not already there
+  const pickSelect = document.getElementById('pickTarget');
+  if (!pickSelect.querySelector(`option[value="skel:${name}"]`)) {
+    const opt = document.createElement('option');
+    opt.value = `skel:${name}`;
+    opt.textContent = name;
+    pickSelect.appendChild(opt);
+  }
+
   if (!meshObj) fitCamera();
   updateLoadedPanel();
 }
@@ -494,20 +501,19 @@ function onClickSelect(event) {
 
   const pickTarget = document.getElementById('pickTarget').value;
 
-  if (pickTarget === 'skeleton') {
-    // Find closest node across all skeletons
+  if (pickTarget.startsWith('skel:')) {
+    const targetSkelName = pickTarget.slice(5);
+    const sg = skelGroups[targetSkelName];
+    if (!sg || !sg.nodePoints) return;
+
     const camDist = camera.position.distanceTo(controls.target);
     raycaster.params.Points.threshold = camDist * 0.02;
-    let bestHit = null, bestSkelName = null, bestDist = Infinity;
-    for (const [sname, sg] of Object.entries(skelGroups)) {
-      if (!sg || !sg.nodePoints) continue;
-      const hits = raycaster.intersectObject(sg.nodePoints);
-      if (hits.length > 0 && hits[0].distance < bestDist) {
-        bestHit = hits[0]; bestSkelName = sname; bestDist = hits[0].distance;
-      }
-    }
-    if (!bestHit) return;
-    const skelNodeRadii = skelGroups[bestSkelName].radii;
+    const hits = raycaster.intersectObject(sg.nodePoints);
+    if (hits.length === 0) return;
+
+    const bestHit = hits[0];
+    const bestSkelName = targetSkelName;
+    const skelNodeRadii = sg.radii;
     const skelColor = skelGroups[bestSkelName].color;
 
     const nodeIndex = bestHit.index;
@@ -819,6 +825,8 @@ function connectWebSocket() {
       if (sname && skelGroups[sname]) {
         scene.remove(skelGroups[sname].group);
         delete skelGroups[sname];
+        const opt = document.querySelector(`#pickTarget option[value="skel:${sname}"]`);
+        if (opt) opt.remove();
       }
       updateLoadedPanel();
       if (Object.keys(skelGroups).length === 0 && !meshObj) document.getElementById('empty-hint').style.display = 'block';
@@ -826,6 +834,7 @@ function connectWebSocket() {
     else if (msg.type === 'all_skeletons_removed') {
       for (const sg of Object.values(skelGroups)) scene.remove(sg.group);
       for (const k of Object.keys(skelGroups)) delete skelGroups[k];
+      document.querySelectorAll('#pickTarget option[value^="skel:"]').forEach(o => o.remove());
       updateLoadedPanel();
       if (!meshObj) document.getElementById('empty-hint').style.display = 'block';
     }
