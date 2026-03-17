@@ -271,8 +271,30 @@ def _fill_single_hole(
         nrb_centered = verts[sorted(nearby)] - centroid_3d
         nrb_2d = nrb_centered @ np.column_stack([u_ax, v_ax])
         nrb_h = nrb_centered @ n_ax
-        rbf_pts = np.vstack([bnd_2d, nrb_2d])
-        rbf_vals = np.concatenate([bnd_h, nrb_h])
+        # Filter: keep only nearby vertices that project OUTSIDE the
+        # boundary polygon in 2D.  Vertices from the opposite side of
+        # a tube project inside and cause RBF overshoot (spikes).
+        n_poly = len(bnd_2d)
+        inside = np.zeros(len(nrb_2d), dtype=bool)
+        px, py = nrb_2d[:, 0], nrb_2d[:, 1]
+        j = n_poly - 1
+        for ii in range(n_poly):
+            xi, yi = bnd_2d[ii]
+            xj, yj = bnd_2d[j]
+            cond = ((yi > py) != (yj > py)) & (
+                px < (xj - xi) * (py - yi) / (yj - yi + 1e-30) + xi
+            )
+            inside ^= cond
+            j = ii
+        outside = ~inside
+        nrb_2d = nrb_2d[outside]
+        nrb_h = nrb_h[outside]
+        if len(nrb_2d) > 0:
+            rbf_pts = np.vstack([bnd_2d, nrb_2d])
+            rbf_vals = np.concatenate([bnd_h, nrb_h])
+        else:
+            rbf_pts = bnd_2d
+            rbf_vals = bnd_h
     else:
         rbf_pts = bnd_2d
         rbf_vals = bnd_h

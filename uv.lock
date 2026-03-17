@@ -1513,27 +1513,6 @@ wheels = [
 ]
 
 [[package]]
-name = "libigl"
-version = "2.6.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b9/2d/595f3ba33701b2354723821e38745674ae9b21ec79d18d7757dbe2e893c3/libigl-2.6.2.tar.gz", hash = "sha256:5da0c5d889a66e3e90eefe6b7f0e7239ade6ac94353585f1b5b086bb1372599e", size = 41219283, upload-time = "2026-03-05T17:28:03.963Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/58/fa57aa9e918106f260286a2af435009308c92dc188e6b1885a660b1d1fb1/libigl-2.6.2-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:03232eca6b1c80750ce46e2383ace7bd9327ab908f37ea2131e44bf47f98dab5", size = 11265403, upload-time = "2026-03-05T17:27:38.977Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/93/05fe266780933da5f7ed6852b23700f9bda844e2dc542e10ddfa921465cd/libigl-2.6.2-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b40c9bd612390ba9c0af14fcdc9c089eb160a86a3a34f95db6988b371ffded7a", size = 12143758, upload-time = "2026-03-05T17:27:41.591Z" },
-    { url = "https://files.pythonhosted.org/packages/31/d6/026f3e289b33460653a5b96f35537048fc51a244644bbab336c50d711d7e/libigl-2.6.2-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c5f881f9a2be09a356112aa87225ff7e22f4acb51dedca1d3ffface73274205f", size = 12828669, upload-time = "2026-03-05T17:27:43.912Z" },
-    { url = "https://files.pythonhosted.org/packages/3d/37/610399df8a8c56e5e1d4dfaf844269d30ae0114c14a3957c031699b81ebc/libigl-2.6.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:38b4cf389d99354d46bff365a756d5f07cea866a862d2c2183fbd03ddb0e57bd", size = 11265030, upload-time = "2026-03-05T17:27:46.001Z" },
-    { url = "https://files.pythonhosted.org/packages/20/00/8ce186b7c401af1248720accebbbf0e3b1434507d8b39b282e7f36a7fcd7/libigl-2.6.2-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6df98eeb49ec4bc18564ed6f8d4870988232db21054407426582984bc3e85d69", size = 12828150, upload-time = "2026-03-05T17:27:47.994Z" },
-    { url = "https://files.pythonhosted.org/packages/98/99/99422c55a722afea4cd25c8d6c2fd5f432be564a12cfa18a2aae7160abff/libigl-2.6.2-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:9b477b584277def1fbf99c05a9ca59c96ad09f6e6572ac58b88ac73c7f3f7ac9", size = 11257225, upload-time = "2026-03-05T17:27:50.124Z" },
-    { url = "https://files.pythonhosted.org/packages/e1/9f/3c6994d112759d25b00007384651157dabf955c61a62050de4fadea794f2/libigl-2.6.2-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e92dac380ec1f81d87a6f5423b2de228e106f90edb9c14033984210c23b32854", size = 12820764, upload-time = "2026-03-05T17:27:52.08Z" },
-]
-
-[[package]]
 name = "markdown-it-py"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3256,7 +3235,6 @@ dependencies = [
     { name = "igraph" },
     { name = "jupyter" },
     { name = "jupyterlab" },
-    { name = "libigl" },
     { name = "matplotlib" },
     { name = "notebook" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -3294,7 +3272,6 @@ requires-dist = [
     { name = "ipykernel", marker = "extra == 'dev'", specifier = ">=7.1.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "jupyterlab", specifier = ">=4.4.10" },
-    { name = "libigl", specifier = ">=2.5.0" },
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "maturin", marker = "extra == 'dev'" },
     { name = "notebook", specifier = ">=7.4.7" },
