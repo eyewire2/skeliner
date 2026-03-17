@@ -1,12 +1,17 @@
 """
-Interactive mesh viewer for skeliner.
+Interactive mesh & skeleton viewer for skeliner.
 
 Usage:
-    skeliner view path/to/mesh.obj
+    skeliner view                        # empty viewer, drag & drop files
+    skeliner view path/to/mesh.obj       # pre-load a mesh
 
-Launches a local web server with a Three.js viewer. Camera state and
-visible face/vertex IDs are written to a JSON state file that can be
-read (and written) by external tools (e.g. Claude).
+Launches a local web server with a Three.js viewer. Supports:
+  - Mesh files: .obj, .ply, .stl (always in nm)
+  - Skeleton files: .swc (always in µm → converted to nm),
+                    .npz (unit from metadata)
+
+State files are written to /tmp/skeliner_view/<port>/ for
+communication with external tools (e.g. Claude).
 """
 
 from __future__ import annotations
@@ -27,6 +32,8 @@ _STATE_DIR = Path(os.environ.get("SKELINER_VIEW_STATE_DIR", "/tmp/skeliner_view"
 def _ensure_state_dir():
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# ── Mesh helpers ──────────────────────────────────────────────────────
 
 def _mesh_to_buffers(mesh: trimesh.Trimesh) -> dict[str, Any]:
     verts = np.asarray(mesh.vertices, dtype=np.float32)
@@ -63,29 +70,111 @@ def _compute_face_winding(mesh: trimesh.Trimesh, offset: float = 5.0) -> np.ndar
     return score
 
 
+# ── Skeleton helpers ──────────────────────────────────────────────────
+
+def _skeleton_to_buffers(skel, centroid: np.ndarray) -> dict[str, Any]:
+    """Convert a Skeleton to line-segment buffers for Three.js.
+
+    Coordinates are shifted by the same centroid as the mesh so they
+    overlay correctly.
+    """
+    nodes = np.asarray(skel.nodes, dtype=np.float32) - centroid
+    edges = np.asarray(skel.edges, dtype=np.int32)
+    radii = np.asarray(skel.r, dtype=np.float32)
+
+    # Line segments: pairs of (x,y,z) for each edge
+    positions = np.empty((len(edges) * 2, 3), dtype=np.float32)
+    positions[0::2] = nodes[edges[:, 0]]
+    positions[1::2] = nodes[edges[:, 1]]
+
+    # Per-edge radius (average of endpoints)
+    edge_radii = (radii[edges[:, 0]] + radii[edges[:, 1]]) / 2.0
+
+    return {
+        "nodes": nodes.ravel().tolist(),
+        "edges": edges.ravel().tolist(),
+        "positions": positions.ravel().tolist(),
+        "radii": radii.tolist(),
+        "edgeRadii": edge_radii.tolist(),
+        "nNodes": len(nodes),
+        "nEdges": len(edges),
+    }
+
+
+def _load_skeleton_as_nm(path: Path) -> Any:
+    """Load a skeleton file and convert to nm."""
+    from skeliner.io import load_swc, load_npz
+
+    suffix = path.suffix.lower()
+    if suffix == ".swc":
+        skel = load_swc(path)
+        # SWC is always in µm → convert to nm
+        skel.nodes *= 1000.0
+        for k in skel.radii:
+            skel.radii[k] *= 1000.0
+        skel.soma.center *= 1000.0
+        skel.soma.axes *= 1000.0
+        return skel
+    elif suffix == ".npz":
+        skel = load_npz(path)
+        unit = skel.meta.get("unit", "nm")
+        if unit in ("um", "µm", "μm", "micron", "micrometer"):
+            skel.nodes *= 1000.0
+            for k in skel.radii:
+                skel.radii[k] *= 1000.0
+            skel.soma.center *= 1000.0
+            skel.soma.axes *= 1000.0
+        return skel
+    else:
+        raise ValueError(f"Unsupported skeleton format: {suffix}")
+
+
 def _get_viewer_html() -> str:
     html_path = Path(__file__).parent / "viewer.html"
     return html_path.read_text(encoding="utf-8")
 
 
-def _create_app(mesh_path: str | Path, port: int = 8777):
+# ── Server ────────────────────────────────────────────────────────────
+
+def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     """Create the Starlette app."""
     from starlette.applications import Starlette
     from starlette.responses import HTMLResponse, JSONResponse
     from starlette.routing import Route, WebSocketRoute
     from starlette.websockets import WebSocket
 
-    mesh_path = Path(mesh_path)
-    mesh = trimesh.load_mesh(str(mesh_path), process=False)
+    # ── Shared mutable state ──────────────────────────────────────────
+    # These are modified by upload/remove endpoints
+    mesh_state: dict[str, Any] = {
+        "mesh": None,           # trimesh object
+        "buffers": None,        # JSON-serialisable mesh data
+        "path": None,           # source file path
+        "centroid": np.zeros(3, dtype=np.float32),
+    }
+    skeleton_state: dict[str, Any] = {
+        "skeleton": None,       # Skeleton object
+        "buffers": None,        # JSON-serialisable skeleton data
+        "path": None,
+    }
 
-    print(f"Loaded mesh: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
-    print("Computing face winding numbers...")
-    face_wn = _compute_face_winding(mesh)
-    print(f"Winding number range: [{face_wn.min():.3f}, {face_wn.max():.3f}]")
+    # Pre-load mesh if path given
+    if mesh_path is not None:
+        mesh_path = Path(mesh_path)
+        mesh = trimesh.load_mesh(str(mesh_path), process=False)
+        print(f"Loaded mesh: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
+        print("Computing face winding numbers...")
+        face_wn = _compute_face_winding(mesh)
+        print(f"Winding number range: [{face_wn.min():.3f}, {face_wn.max():.3f}]")
 
-    buffers = _mesh_to_buffers(mesh)
-    buffers["faceWindingNumbers"] = face_wn.tolist()
+        buffers = _mesh_to_buffers(mesh)
+        buffers["faceWindingNumbers"] = face_wn.tolist()
 
+        mesh_state["mesh"] = mesh
+        mesh_state["buffers"] = buffers
+        mesh_state["path"] = str(mesh_path.resolve())
+        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+
+    # ── State files ───────────────────────────────────────────────────
     _ensure_state_dir()
     port_dir = _STATE_DIR / str(port)
     port_dir.mkdir(parents=True, exist_ok=True)
@@ -98,16 +187,26 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
     if not camera_cmd_path.exists():
         camera_cmd_path.write_text("{}", encoding="utf-8")
 
-    # Write initial state with mesh metadata
-    state_path.write_text(json.dumps({
-        "mesh": {
-            "path": str(mesh_path.resolve()),
-            "nVertices": len(mesh.vertices),
-            "nFaces": len(mesh.faces),
-        },
-    }, indent=2), encoding="utf-8")
+    # Write initial state
+    initial = {}
+    if mesh_state["mesh"] is not None:
+        initial["mesh"] = {
+            "path": mesh_state["path"],
+            "nVertices": len(mesh_state["mesh"].vertices),
+            "nFaces": len(mesh_state["mesh"].faces),
+        }
+    state_path.write_text(json.dumps(initial, indent=2), encoding="utf-8")
 
     connected_clients: list[WebSocket] = []
+
+    # ── Broadcast helper ──────────────────────────────────────────────
+    async def broadcast(msg: dict):
+        data = json.dumps(msg)
+        for ws in connected_clients:
+            try:
+                await ws.send_text(data)
+            except Exception:
+                pass
 
     # ── Routes ────────────────────────────────────────────────────────
 
@@ -115,7 +214,14 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
         return HTMLResponse(_get_viewer_html())
 
     async def get_mesh(request):
-        return JSONResponse(buffers)
+        if mesh_state["buffers"] is None:
+            return JSONResponse(None)
+        return JSONResponse(mesh_state["buffers"])
+
+    async def get_skeleton(request):
+        if skeleton_state["buffers"] is None:
+            return JSONResponse(None)
+        return JSONResponse(skeleton_state["buffers"])
 
     async def get_state(request):
         if state_path.exists():
@@ -126,6 +232,118 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
         if annotations_path.exists():
             return JSONResponse(json.loads(annotations_path.read_text(encoding="utf-8")))
         return JSONResponse({})
+
+    async def get_loaded(request):
+        """Return what's currently loaded."""
+        result = {"mesh": None, "skeleton": None}
+        if mesh_state["path"]:
+            result["mesh"] = {
+                "path": mesh_state["path"],
+                "nVertices": len(mesh_state["mesh"].vertices),
+                "nFaces": len(mesh_state["mesh"].faces),
+            }
+        if skeleton_state["path"]:
+            result["skeleton"] = {
+                "path": skeleton_state["path"],
+                "nNodes": skeleton_state["buffers"]["nNodes"],
+                "nEdges": skeleton_state["buffers"]["nEdges"],
+            }
+        return JSONResponse(result)
+
+    async def upload_file(request):
+        """Handle file upload (mesh or skeleton)."""
+        form = await request.form()
+        upload = form["file"]
+        filename = upload.filename
+        content = await upload.read()
+        suffix = Path(filename).suffix.lower()
+
+        # Save to temp
+        tmp_path = port_dir / filename
+        tmp_path.write_bytes(content)
+
+        try:
+            if suffix in (".obj", ".ply", ".stl"):
+                mesh = trimesh.load_mesh(str(tmp_path), process=False)
+                print(f"Uploaded mesh: {len(mesh.vertices):,} verts, {len(mesh.faces):,} faces")
+                face_wn = _compute_face_winding(mesh)
+                buffers = _mesh_to_buffers(mesh)
+                buffers["faceWindingNumbers"] = face_wn.tolist()
+
+                mesh_state["mesh"] = mesh
+                mesh_state["buffers"] = buffers
+                mesh_state["path"] = str(tmp_path.resolve())
+                mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+
+                # Re-compute skeleton buffers if skeleton exists (centroid changed)
+                if skeleton_state["skeleton"] is not None:
+                    skeleton_state["buffers"] = _skeleton_to_buffers(
+                        skeleton_state["skeleton"], mesh_state["centroid"]
+                    )
+
+                # Update state file
+                current = {}
+                if state_path.exists():
+                    current = json.loads(state_path.read_text(encoding="utf-8"))
+                current["mesh"] = {
+                    "path": mesh_state["path"],
+                    "nVertices": len(mesh.vertices),
+                    "nFaces": len(mesh.faces),
+                }
+                state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+
+                await broadcast({"type": "mesh_loaded", "payload": buffers})
+                if skeleton_state["buffers"]:
+                    await broadcast({"type": "skeleton_loaded", "payload": skeleton_state["buffers"]})
+
+                return JSONResponse({"ok": True, "type": "mesh", "name": filename})
+
+            elif suffix in (".swc", ".npz"):
+                skel = _load_skeleton_as_nm(tmp_path)
+                print(f"Uploaded skeleton: {len(skel.nodes):,} nodes, {len(skel.edges):,} edges")
+
+                skeleton_state["skeleton"] = skel
+                skeleton_state["path"] = str(tmp_path.resolve())
+                skeleton_state["buffers"] = _skeleton_to_buffers(
+                    skel, mesh_state["centroid"]
+                )
+
+                await broadcast({"type": "skeleton_loaded", "payload": skeleton_state["buffers"]})
+                return JSONResponse({"ok": True, "type": "skeleton", "name": filename})
+
+            else:
+                return JSONResponse({"ok": False, "error": f"Unsupported format: {suffix}"}, status_code=400)
+
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    async def remove_item(request):
+        """Remove mesh or skeleton."""
+        body = await request.json()
+        item_type = body.get("type")
+
+        if item_type == "mesh":
+            mesh_state["mesh"] = None
+            mesh_state["buffers"] = None
+            mesh_state["path"] = None
+            mesh_state["centroid"] = np.zeros(3, dtype=np.float32)
+            # Re-center skeleton if it exists
+            if skeleton_state["skeleton"] is not None:
+                skeleton_state["buffers"] = _skeleton_to_buffers(
+                    skeleton_state["skeleton"], mesh_state["centroid"]
+                )
+                await broadcast({"type": "skeleton_loaded", "payload": skeleton_state["buffers"]})
+            await broadcast({"type": "mesh_removed"})
+            return JSONResponse({"ok": True})
+
+        elif item_type == "skeleton":
+            skeleton_state["skeleton"] = None
+            skeleton_state["buffers"] = None
+            skeleton_state["path"] = None
+            await broadcast({"type": "skeleton_removed"})
+            return JSONResponse({"ok": True})
+
+        return JSONResponse({"ok": False, "error": "Unknown type"}, status_code=400)
 
     async def post_state(request):
         body = await request.json()
@@ -147,8 +365,11 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
 
     async def detect_avocados(request):
         """Run avocado detection and write results to annotations."""
-        import asyncio
+        if mesh_state["mesh"] is None:
+            return JSONResponse({"ok": False, "error": "No mesh loaded"}, status_code=400)
+
         from skeliner.pre import _outward_dot, _filter_small_clusters
+        mesh = mesh_state["mesh"]
 
         def _run():
             median_edge = float(np.median(mesh.edges_unique_length))
@@ -203,7 +424,7 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
         finally:
             connected_clients.remove(ws)
 
-    # ── File watcher (annotations + camera commands → push to browser) ─
+    # ── File watcher ──────────────────────────────────────────────────
 
     html_path = Path(__file__).parent / "viewer.html"
 
@@ -213,23 +434,17 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
         last_html_mtime = html_path.stat().st_mtime if html_path.exists() else 0.0
         while True:
             await asyncio.sleep(0.5)
-            # Watch annotations
             try:
                 mtime = annotations_path.stat().st_mtime
                 if mtime > last_ann_mtime:
                     last_ann_mtime = mtime
                     content = annotations_path.read_text(encoding="utf-8")
-                    for ws in connected_clients:
-                        try:
-                            await ws.send_text(json.dumps({
-                                "type": "annotations",
-                                "payload": json.loads(content),
-                            }))
-                        except Exception:
-                            pass
+                    await broadcast({
+                        "type": "annotations",
+                        "payload": json.loads(content),
+                    })
             except FileNotFoundError:
                 pass
-            # Watch camera commands
             try:
                 mtime = camera_cmd_path.stat().st_mtime
                 if mtime > last_cam_mtime:
@@ -237,26 +452,17 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
                     content = camera_cmd_path.read_text(encoding="utf-8")
                     parsed = json.loads(content)
                     if parsed:
-                        for ws in connected_clients:
-                            try:
-                                await ws.send_text(json.dumps({
-                                    "type": "camera_command",
-                                    "payload": parsed,
-                                }))
-                            except Exception:
-                                pass
+                        await broadcast({
+                            "type": "camera_command",
+                            "payload": parsed,
+                        })
             except FileNotFoundError:
                 pass
-            # Watch viewer.html for hot reload
             try:
                 mtime = html_path.stat().st_mtime
                 if mtime > last_html_mtime:
                     last_html_mtime = mtime
-                    for ws in connected_clients:
-                        try:
-                            await ws.send_text(json.dumps({"type": "reload"}))
-                        except Exception:
-                            pass
+                    await broadcast({"type": "reload"})
             except FileNotFoundError:
                 pass
 
@@ -267,7 +473,12 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
         routes=[
             Route("/", index),
             Route("/mesh", get_mesh),
+            Route("/skeleton", get_skeleton),
+            Route("/loaded", get_loaded),
             Route("/state", get_state, methods=["GET"]),
+            Route("/annotations", get_annotations, methods=["GET"]),
+            Route("/upload", upload_file, methods=["POST"]),
+            Route("/remove", remove_item, methods=["POST"]),
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),
             Route("/detect_avocados", detect_avocados, methods=["POST"]),
@@ -280,13 +491,13 @@ def _create_app(mesh_path: str | Path, port: int = 8777):
 
 
 def view(
-    mesh_path: str | Path,
+    mesh_path: str | Path | None = None,
     *,
     host: str = "127.0.0.1",
     port: int = 8777,
     no_browser: bool = False,
 ):
-    """Launch the interactive mesh viewer."""
+    """Launch the interactive viewer."""
     try:
         import uvicorn
     except ImportError:

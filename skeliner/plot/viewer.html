@@ -22,25 +22,42 @@
   }
   #controls label { margin-right: 12px; cursor: pointer; }
   #controls input[type=range] { width: 120px; vertical-align: middle; }
-  #loading {
-    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    font-size: 18px; color: #666;
-  }
   #selection-info {
     position: absolute; top: 10px; right: 10px;
     background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
     font-size: 12px; line-height: 1.6; max-width: 300px;
+  }
+  #loaded-panel {
+    position: absolute; top: 120px; right: 10px;
+    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
+    font-size: 12px; line-height: 1.8; max-width: 300px;
+  }
+  #loaded-panel .item { display: flex; justify-content: space-between; align-items: center; }
+  #loaded-panel .item button { font-size: 10px; cursor: pointer; margin-left: 8px; }
+  #loaded-panel .item .name { color: #adf; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #drop-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+    background: rgba(0, 120, 255, 0.15); border: 3px dashed rgba(0, 120, 255, 0.6);
+    z-index: 999; pointer-events: none;
+    justify-content: center; align-items: center;
+    font-size: 24px; color: #4af;
+  }
+  #empty-hint {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 16px; color: #555; text-align: center; line-height: 2;
   }
 </style>
 </head>
 <body>
 
 <div id="canvas-container"></div>
-<div id="loading">Loading mesh...</div>
+<div id="empty-hint">Drop mesh (.obj, .ply) or skeleton (.swc, .npz) here</div>
+<div id="drop-overlay">Drop file to load</div>
 
 <div id="info">
   <div><span class="label">Vertices: </span><span class="value" id="nVerts">-</span></div>
   <div><span class="label">Faces: </span><span class="value" id="nFaces">-</span></div>
+  <div><span class="label">Skel nodes: </span><span class="value" id="nNodes">-</span></div>
   <div><span class="label">Camera: </span><span class="value" id="camPos">-</span></div>
   <div><span class="label">Visible faces: </span><span class="value" id="visCount">-</span></div>
 </div>
@@ -58,6 +75,18 @@
   <div><span class="label">Highlighted: </span><span class="value" id="hlCount">0</span> <button id="hlClear" style="font-size:11px;cursor:pointer;">Clear</button></div>
 </div>
 
+<div id="loaded-panel">
+  <div style="color:#888;margin-bottom:4px;">Loaded:</div>
+  <div id="loadedMesh" class="item" style="display:none;">
+    <span class="name" id="meshName">-</span>
+    <button id="removeMesh">x</button>
+  </div>
+  <div id="loadedSkel" class="item" style="display:none;">
+    <span class="name" id="skelName">-</span>
+    <button id="removeSkel">x</button>
+  </div>
+</div>
+
 <script type="importmap">
 {
   "imports": {
@@ -72,47 +101,39 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ── Globals ──────────────────────────────────────────────────────────
-let scene, camera, renderer, controls, meshObj, wireframeObj;
-let clipPlane, meshGeometry;
+let scene, camera, renderer, controls;
+let meshObj, wireframeObj, meshGeometry, clipPlane;
+let skelGroup = null;
 let faceWindingNumbers = null;
 let ws = null;
 let stateDebounceTimer = null;
 const STATE_DEBOUNCE_MS = 300;
 
-// Annotation overlays: highlighted face groups
 let annotationMeshes = [];
-
-// Manual highlight: shift+click to add faces, stored and synced
 let manualHighlightFaces = new Set();
 let manualHighlightMesh = null;
 
 // ── Init ─────────────────────────────────────────────────────────────
 async function init() {
-  // Scene
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0a0f1a);
 
-  // Camera (near/far updated after mesh load)
   camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
   camera.position.set(0, 0, 500);
 
-  // Renderer
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.localClippingEnabled = true;
   document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-  // Clipping plane
   clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 99999);
 
-  // Controls
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.1;
   controls.addEventListener('change', scheduleStateUpdate);
 
-  // Lights
   scene.add(new THREE.AmbientLight(0xffffff, 0.4));
   const dl1 = new THREE.DirectionalLight(0xffffff, 0.8);
   dl1.position.set(1, 1, 1);
@@ -121,31 +142,35 @@ async function init() {
   dl2.position.set(-1, -0.5, -1);
   scene.add(dl2);
 
-  // Load mesh
-  const resp = await fetch('/mesh');
-  const data = await resp.json();
-  buildMesh(data);
+  // Try loading pre-loaded mesh
+  const meshResp = await fetch('/mesh');
+  const meshData = await meshResp.json();
+  if (meshData) {
+    buildMesh(meshData);
+    document.getElementById('empty-hint').style.display = 'none';
+  }
 
-  document.getElementById('loading').style.display = 'none';
+  // Try loading pre-loaded skeleton
+  const skelResp = await fetch('/skeleton');
+  const skelData = await skelResp.json();
+  if (skelData) buildSkeleton(skelData);
 
-  // Controls
+  // Update loaded panel
+  updateLoadedPanel();
+
   setupControls();
+  setupDragDrop();
 
-  // Click to select (left click), shift+click to highlight
   renderer.domElement.addEventListener('click', onClickSelect);
-
-  // Clear highlight button
   document.getElementById('hlClear').addEventListener('click', () => {
     manualHighlightFaces.clear();
     rebuildManualHighlight();
     syncManualHighlight();
   });
 
-  // Right-click or Ctrl+click to recenter (same as vis3d.py)
   renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
   renderer.domElement.addEventListener('pointerdown', onRecenter);
 
-  // Detect avocados button + "A" shortcut
   document.getElementById('detectBtn').addEventListener('click', runDetectAvocados);
   window.addEventListener('keydown', (e) => {
     if (e.key === 'a' && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.target === document.body) {
@@ -153,54 +178,122 @@ async function init() {
     }
   });
 
-  // WebSocket
+  document.getElementById('removeMesh').addEventListener('click', () => removeItem('mesh'));
+  document.getElementById('removeSkel').addEventListener('click', () => removeItem('skeleton'));
+
   connectWebSocket();
 
-  // Load existing annotations on startup
   fetch('/annotations').then(r => r.json()).then(ann => {
     if (ann && ann.highlights) applyAnnotations(ann);
   }).catch(() => {});
 
-  // Resize
   window.addEventListener('resize', onResize);
-
-  // Render loop
   animate();
 }
 
-// ── Build mesh from server data ──────────────────────────────────────
+// ── Loaded panel ─────────────────────────────────────────────────────
+async function updateLoadedPanel() {
+  try {
+    const resp = await fetch('/loaded');
+    const data = await resp.json();
+    const meshEl = document.getElementById('loadedMesh');
+    const skelEl = document.getElementById('loadedSkel');
+    if (data.mesh) {
+      meshEl.style.display = 'flex';
+      document.getElementById('meshName').textContent =
+        data.mesh.path.split('/').pop() + ` (${data.mesh.nVertices.toLocaleString()}v)`;
+    } else {
+      meshEl.style.display = 'none';
+    }
+    if (data.skeleton) {
+      skelEl.style.display = 'flex';
+      document.getElementById('skelName').textContent =
+        data.skeleton.path.split('/').pop() + ` (${data.skeleton.nNodes.toLocaleString()}n)`;
+    } else {
+      skelEl.style.display = 'none';
+    }
+  } catch (e) {}
+}
+
+async function removeItem(type) {
+  await fetch('/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type }),
+  });
+  // Server broadcasts removal via WebSocket
+}
+
+// ── Drag & Drop ──────────────────────────────────────────────────────
+function setupDragDrop() {
+  const overlay = document.getElementById('drop-overlay');
+  let dragCounter = 0;
+
+  document.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dragCounter++;
+    overlay.style.display = 'flex';
+  });
+  document.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) { overlay.style.display = 'none'; dragCounter = 0; }
+  });
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    overlay.style.display = 'none';
+
+    for (const file of e.dataTransfer.files) {
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const resp = await fetch('/upload', { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (data.ok) {
+          console.log(`[skeliner] Loaded ${data.type}: ${data.name}`);
+        } else {
+          console.error(`[skeliner] Upload failed: ${data.error}`);
+        }
+      } catch (err) {
+        console.error('[skeliner] Upload error:', err);
+      }
+    }
+  });
+}
+
+// ── Build mesh ───────────────────────────────────────────────────────
 function buildMesh(data) {
+  // Remove old mesh
+  if (meshObj) { scene.remove(meshObj); meshObj.geometry.dispose(); meshObj.material.dispose(); meshObj = null; }
+  if (wireframeObj) { scene.remove(wireframeObj); wireframeObj.geometry.dispose(); wireframeObj.material.dispose(); wireframeObj = null; }
+  meshGeometry = null;
+
   const { vertices, faces, nVertices, nFaces, faceWindingNumbers: fwn } = data;
 
   document.getElementById('nVerts').textContent = nVertices.toLocaleString();
   document.getElementById('nFaces').textContent = nFaces.toLocaleString();
+  document.getElementById('empty-hint').style.display = 'none';
 
   faceWindingNumbers = fwn ? new Float32Array(fwn) : null;
 
-  // Geometry (non-indexed so we can colour per-face)
   meshGeometry = new THREE.BufferGeometry();
   const positions = new Float32Array(nFaces * 9);
   const colors = new Float32Array(nFaces * 9);
-
   const verts = new Float32Array(vertices);
 
   for (let i = 0; i < nFaces; i++) {
     const a = faces[i * 3], b = faces[i * 3 + 1], c = faces[i * 3 + 2];
-    positions[i * 9 + 0] = verts[a * 3];
-    positions[i * 9 + 1] = verts[a * 3 + 1];
-    positions[i * 9 + 2] = verts[a * 3 + 2];
-    positions[i * 9 + 3] = verts[b * 3];
-    positions[i * 9 + 4] = verts[b * 3 + 1];
-    positions[i * 9 + 5] = verts[b * 3 + 2];
-    positions[i * 9 + 6] = verts[c * 3];
-    positions[i * 9 + 7] = verts[c * 3 + 1];
-    positions[i * 9 + 8] = verts[c * 3 + 2];
-
-    // Color by winding number
+    for (let k = 0; k < 3; k++) {
+      positions[i * 9 + k] = verts[a * 3 + k];
+      positions[i * 9 + 3 + k] = verts[b * 3 + k];
+      positions[i * 9 + 6 + k] = verts[c * 3 + k];
+    }
     const wn = faceWindingNumbers ? faceWindingNumbers[i] : 0;
     const [r, g, bl] = wnToColor(wn);
     for (let v = 0; v < 3; v++) {
-      colors[i * 9 + v * 3 + 0] = r;
+      colors[i * 9 + v * 3] = r;
       colors[i * 9 + v * 3 + 1] = g;
       colors[i * 9 + v * 3 + 2] = bl;
     }
@@ -210,88 +303,112 @@ function buildMesh(data) {
   meshGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   meshGeometry.computeVertexNormals();
 
-  const material = new THREE.MeshPhongMaterial({
-    vertexColors: true,
-    side: THREE.DoubleSide,
-    clippingPlanes: [clipPlane],
-    shininess: 30,
-    transparent: true,
-    opacity: 0.5,
-    depthWrite: false,
-  });
-
-  meshObj = new THREE.Mesh(meshGeometry, material);
+  meshObj = new THREE.Mesh(meshGeometry, new THREE.MeshPhongMaterial({
+    vertexColors: true, side: THREE.DoubleSide, clippingPlanes: [clipPlane],
+    shininess: 30, transparent: true, opacity: 0.5, depthWrite: false,
+  }));
   scene.add(meshObj);
 
-  // Wireframe overlay (hidden by default)
-  const wireMat = new THREE.MeshBasicMaterial({
-    wireframe: true,
-    color: 0x333333,
-    transparent: true,
-    opacity: 0.15,
+  wireframeObj = new THREE.Mesh(meshGeometry, new THREE.MeshBasicMaterial({
+    wireframe: true, color: 0x333333, transparent: true, opacity: 0.15,
     clippingPlanes: [clipPlane],
-  });
-  wireframeObj = new THREE.Mesh(meshGeometry, wireMat);
-  wireframeObj.visible = true;
+  }));
+  wireframeObj.visible = document.getElementById('wireToggle').checked;
   scene.add(wireframeObj);
 
-  // Fit camera to mesh bounding box, auto-scale clipping planes
-  meshGeometry.computeBoundingSphere();
-  const bs = meshGeometry.boundingSphere;
-  camera.near = bs.radius * 0.001;
-  camera.far = bs.radius * 10;
+  fitCamera();
+}
+
+// ── Build skeleton ───────────────────────────────────────────────────
+function buildSkeleton(data) {
+  // Remove old skeleton
+  if (skelGroup) { scene.remove(skelGroup); skelGroup = null; }
+
+  const { positions, nNodes, nEdges, edgeRadii } = data;
+  if (!positions || nEdges === 0) return;
+
+  document.getElementById('nNodes').textContent = nNodes.toLocaleString();
+  document.getElementById('empty-hint').style.display = 'none';
+
+  skelGroup = new THREE.Group();
+
+  // Line segments with per-edge color based on radius
+  const geo = new THREE.BufferGeometry();
+  const posArr = new Float32Array(positions);
+  geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+
+  // Color by radius (teal-amber ramp)
+  const rArr = new Float32Array(edgeRadii);
+  const rMin = Math.min(...rArr), rMax = Math.max(...rArr);
+  const colorArr = new Float32Array(nEdges * 6); // 2 verts per edge, RGB each
+  for (let i = 0; i < nEdges; i++) {
+    const t = rMax > rMin ? (rArr[i] - rMin) / (rMax - rMin) : 0.5;
+    const r = 0.0 + t * 1.0;
+    const g = 0.6 - t * 0.2;
+    const b = 0.8 - t * 0.6;
+    colorArr[i * 6] = r; colorArr[i * 6 + 1] = g; colorArr[i * 6 + 2] = b;
+    colorArr[i * 6 + 3] = r; colorArr[i * 6 + 4] = g; colorArr[i * 6 + 5] = b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colorArr, 3));
+
+  const mat = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 });
+  const lines = new THREE.LineSegments(geo, mat);
+  skelGroup.add(lines);
+  scene.add(skelGroup);
+
+  if (!meshObj) fitCamera();
+}
+
+// ── Fit camera ───────────────────────────────────────────────────────
+function fitCamera() {
+  // Find bounding sphere from whatever is loaded
+  let box = new THREE.Box3();
+  if (meshGeometry) {
+    meshGeometry.computeBoundingBox();
+    box.union(meshGeometry.boundingBox);
+  }
+  if (skelGroup) {
+    const skelBox = new THREE.Box3().setFromObject(skelGroup);
+    box.union(skelBox);
+  }
+  if (box.isEmpty()) return;
+
+  const sphere = new THREE.Sphere();
+  box.getBoundingSphere(sphere);
+
+  camera.near = sphere.radius * 0.001;
+  camera.far = sphere.radius * 10;
   camera.updateProjectionMatrix();
-  camera.position.set(bs.center.x, bs.center.y, bs.center.z + bs.radius * 2);
-  controls.target.copy(bs.center);
+  camera.position.set(sphere.center.x, sphere.center.y, sphere.center.z + sphere.radius * 2);
+  controls.target.copy(sphere.center);
   controls.update();
 
-  // Set clip plane range
   const clipSlider = document.getElementById('clipSlider');
-  clipSlider._bsRadius = bs.radius;
-  clipSlider._bsCenter = bs.center.z;
+  clipSlider._bsRadius = sphere.radius;
+  clipSlider._bsCenter = sphere.center.z;
 }
 
 // ── Winding number → RGB colour ──────────────────────────────────────
 function wnToColor(wn) {
-  // 0.0 (outside) → blue/teal, 0.5 (surface) → white, 1.0+ (deep inside) → red/orange
   const t = Math.min(Math.max(wn, 0), 1.5);
-
-  if (t < 0.3) {
-    // Outside: dark blue → teal
-    const u = t / 0.3;
-    return [0.05 + 0.1 * u, 0.1 + 0.4 * u, 0.3 + 0.3 * u];
-  } else if (t < 0.6) {
-    // Near surface: teal → light grey
-    const u = (t - 0.3) / 0.3;
-    return [0.15 + 0.65 * u, 0.5 + 0.3 * u, 0.6 - 0.0 * u];
-  } else if (t < 1.0) {
-    // Inside: light → warm orange
-    const u = (t - 0.6) / 0.4;
-    return [0.8 + 0.2 * u, 0.8 - 0.4 * u, 0.6 - 0.5 * u];
-  } else {
-    // Deep inside (wn > 1, multiple overlaps): orange → red
-    const u = Math.min((t - 1.0) / 0.5, 1.0);
-    return [1.0, 0.4 - 0.3 * u, 0.1 - 0.1 * u];
-  }
+  if (t < 0.3) { const u = t / 0.3; return [0.05 + 0.1 * u, 0.1 + 0.4 * u, 0.3 + 0.3 * u]; }
+  else if (t < 0.6) { const u = (t - 0.3) / 0.3; return [0.15 + 0.65 * u, 0.5 + 0.3 * u, 0.6]; }
+  else if (t < 1.0) { const u = (t - 0.6) / 0.4; return [0.8 + 0.2 * u, 0.8 - 0.4 * u, 0.6 - 0.5 * u]; }
+  else { const u = Math.min((t - 1.0) / 0.5, 1.0); return [1.0, 0.4 - 0.3 * u, 0.1 - 0.1 * u]; }
 }
 
 // ── Controls ─────────────────────────────────────────────────────────
 function setupControls() {
-  const clipSlider = document.getElementById('clipSlider');
-  clipSlider.addEventListener('input', () => {
-    const pct = parseInt(clipSlider.value);
-    const r = clipSlider._bsRadius || 500;
-    const cz = clipSlider._bsCenter || 0;
-    // 100 = no clipping, 0 = clip at centre
-    const dist = (pct / 100) * r * 2;
-    clipPlane.constant = cz - r + dist;
+  document.getElementById('clipSlider').addEventListener('input', (e) => {
+    const pct = parseInt(e.target.value);
+    const r = e.target._bsRadius || 500;
+    const cz = e.target._bsCenter || 0;
+    clipPlane.constant = cz - r + (pct / 100) * r * 2;
     scheduleStateUpdate();
   });
-
   document.getElementById('wireToggle').addEventListener('change', (e) => {
     if (wireframeObj) wireframeObj.visible = e.target.checked;
   });
-
   document.getElementById('opacitySlider').addEventListener('input', (e) => {
     const val = parseInt(e.target.value) / 100;
     if (meshObj) {
@@ -310,7 +427,6 @@ const mouse = new THREE.Vector2();
 function onClickSelect(event) {
   mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-
   raycaster.setFromCamera(mouse, camera);
   if (!meshObj) return;
 
@@ -322,145 +438,76 @@ function onClickSelect(event) {
   const point = hit.point;
   const wn = faceWindingNumbers ? faceWindingNumbers[faceIndex] : null;
 
-  // Shift+click: toggle face in manual highlight
   if (event.shiftKey) {
-    if (manualHighlightFaces.has(faceIndex)) {
-      manualHighlightFaces.delete(faceIndex);
-    } else {
-      manualHighlightFaces.add(faceIndex);
-    }
+    if (manualHighlightFaces.has(faceIndex)) manualHighlightFaces.delete(faceIndex);
+    else manualHighlightFaces.add(faceIndex);
     rebuildManualHighlight();
     syncManualHighlight();
     return;
   }
 
-  const selInfo = {
-    faceIndex,
-    point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)],
-    windingNumber: wn !== null ? wn.toFixed(4) : null,
-  };
-
+  const selInfo = { faceIndex, point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)], windingNumber: wn !== null ? wn.toFixed(4) : null };
   document.getElementById('selDetail').innerHTML =
-    `<div>Face: <b>${faceIndex}</b></div>` +
-    `<div>WN: <b>${wn !== null ? wn.toFixed(4) : '-'}</b></div>` +
-    `<div>Pos: ${selInfo.point.join(', ')}</div>`;
+    `<div>Face: <b>${faceIndex}</b></div><div>WN: <b>${wn !== null ? wn.toFixed(4) : '-'}</b></div><div>Pos: ${selInfo.point.join(', ')}</div>`;
 
-  // Send selection to server
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'selection', payload: selInfo }));
-  } else {
-    fetch('/update_selection', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(selInfo),
-    }).catch(() => {});
-  }
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'selection', payload: selInfo }));
+  else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selInfo) }).catch(() => {});
 }
 
 // ── Manual highlight ─────────────────────────────────────────────────
 function rebuildManualHighlight() {
-  // Remove old
-  if (manualHighlightMesh) {
-    scene.remove(manualHighlightMesh);
-    manualHighlightMesh.geometry.dispose();
-    manualHighlightMesh.material.dispose();
-    manualHighlightMesh = null;
-  }
-
+  if (manualHighlightMesh) { scene.remove(manualHighlightMesh); manualHighlightMesh.geometry.dispose(); manualHighlightMesh.material.dispose(); manualHighlightMesh = null; }
   const faces = Array.from(manualHighlightFaces);
   document.getElementById('hlCount').textContent = faces.length;
-  if (faces.length === 0) return;
+  if (faces.length === 0 || !meshGeometry) return;
 
   const posAttr = meshGeometry.getAttribute('position');
   const positions = new Float32Array(faces.length * 9);
-  for (let j = 0; j < faces.length; j++) {
-    const base = faces[j] * 9;
-    for (let k = 0; k < 9; k++) {
-      positions[j * 9 + k] = posAttr.array[base + k];
-    }
-  }
+  for (let j = 0; j < faces.length; j++) { const base = faces[j] * 9; for (let k = 0; k < 9; k++) positions[j * 9 + k] = posAttr.array[base + k]; }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.computeVertexNormals();
-
-  const mat = new THREE.MeshPhongMaterial({
-    color: new THREE.Color(1, 0.8, 0),
-    side: THREE.DoubleSide,
-    clippingPlanes: [clipPlane],
-    transparent: true,
-    opacity: 0.9,
-    depthTest: true,
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-  });
-
-  manualHighlightMesh = new THREE.Mesh(geo, mat);
+  manualHighlightMesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    color: new THREE.Color(1, 0.8, 0), side: THREE.DoubleSide, clippingPlanes: [clipPlane],
+    transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2,
+  }));
   scene.add(manualHighlightMesh);
 }
 
-// ── Detect avocados ──────────────────────────────────────────────────
 async function runDetectAvocados() {
   const btn = document.getElementById('detectBtn');
-  btn.textContent = 'Detecting...';
-  btn.disabled = true;
+  btn.textContent = 'Detecting...'; btn.disabled = true;
   try {
     const resp = await fetch('/detect_avocados', { method: 'POST' });
     const data = await resp.json();
-    btn.textContent = `Avocados: ${data.nFaces} (A)`;
-  } catch (e) {
-    btn.textContent = 'Error (A)';
-    console.error('[skeliner] detect_avocados failed:', e);
-  } finally {
-    btn.disabled = false;
-  }
+    btn.textContent = data.ok ? `Avocados: ${data.nFaces} (A)` : 'Error (A)';
+  } catch (e) { btn.textContent = 'Error (A)'; } finally { btn.disabled = false; }
 }
 
 function syncManualHighlight() {
-  const payload = {
-    manualHighlight: Array.from(manualHighlightFaces),
-  };
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'manual_highlight', payload }));
-  } else {
-    fetch('/update_selection', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-  }
+  const payload = { manualHighlight: Array.from(manualHighlightFaces) };
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'manual_highlight', payload }));
+  else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
 }
 
 // ── Right-click / Ctrl+click to recenter ─────────────────────────
 let pointerDownPos = null;
 function onRecenter(event) {
-  // Right-click (button 2) or Ctrl+left-click (button 0)
   const isRight = event.button === 2;
   const isCtrlLeft = event.button === 0 && (event.ctrlKey || event.metaKey);
   if (!isRight && !isCtrlLeft) return;
-
-  // Record position to distinguish click from drag
   pointerDownPos = { x: event.clientX, y: event.clientY };
-
   const onUp = (upEvent) => {
     renderer.domElement.removeEventListener('pointerup', onUp);
     if (!pointerDownPos) return;
-    const dx = upEvent.clientX - pointerDownPos.x;
-    const dy = upEvent.clientY - pointerDownPos.y;
-    // Only recenter if it was a click, not a drag
-    if (Math.sqrt(dx * dx + dy * dy) > 5) return;
-
+    if (Math.sqrt((upEvent.clientX - pointerDownPos.x)**2 + (upEvent.clientY - pointerDownPos.y)**2) > 5) return;
     mouse.x = (upEvent.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
-
     raycaster.setFromCamera(mouse, camera);
     if (!meshObj) return;
-
     const hits = raycaster.intersectObject(meshObj);
     if (hits.length === 0) return;
-
-    // Same logic as vis3d._add_recenter_controls:
-    // Move focal point to picked point, keep camera-to-target offset
     const pickPoint = hits[0].point;
     const offset = camera.position.clone().sub(controls.target);
     controls.target.copy(pickPoint);
@@ -468,207 +515,111 @@ function onRecenter(event) {
     controls.update();
     scheduleStateUpdate();
   };
-
   renderer.domElement.addEventListener('pointerup', onUp);
 }
 
 // ── Visible face computation ─────────────────────────────────────────
 function computeVisibleFaceCount() {
-  // Approximate: count faces whose centroid is in the camera frustum
-  // and not clipped. Full occlusion testing is too expensive per-frame.
   if (!meshGeometry) return 0;
-
   const frustum = new THREE.Frustum();
-  const projScreenMatrix = new THREE.Matrix4();
-  projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-  frustum.setFromProjectionMatrix(projScreenMatrix);
-
+  const m = new THREE.Matrix4();
+  m.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  frustum.setFromProjectionMatrix(m);
   const pos = meshGeometry.getAttribute('position');
   const nFaces = pos.count / 3;
   let visible = 0;
-  const centroid = new THREE.Vector3();
-
-  // Sample every Nth face for performance
+  const c = new THREE.Vector3();
   const step = Math.max(1, Math.floor(nFaces / 10000));
   let sampled = 0;
-
   for (let i = 0; i < nFaces; i += step) {
-    const base = i * 9;
-    centroid.set(
-      (pos.array[base] + pos.array[base + 3] + pos.array[base + 6]) / 3,
-      (pos.array[base + 1] + pos.array[base + 4] + pos.array[base + 7]) / 3,
-      (pos.array[base + 2] + pos.array[base + 5] + pos.array[base + 8]) / 3,
-    );
-
-    if (frustum.containsPoint(centroid) && clipPlane.distanceToPoint(centroid) >= 0) {
-      visible++;
-    }
+    const b = i * 9;
+    c.set((pos.array[b]+pos.array[b+3]+pos.array[b+6])/3, (pos.array[b+1]+pos.array[b+4]+pos.array[b+7])/3, (pos.array[b+2]+pos.array[b+5]+pos.array[b+8])/3);
+    if (frustum.containsPoint(c) && clipPlane.distanceToPoint(c) >= 0) visible++;
     sampled++;
   }
-
-  // Extrapolate
   return Math.round((visible / sampled) * nFaces);
 }
 
 // ── State updates ────────────────────────────────────────────────────
-function scheduleStateUpdate() {
-  if (stateDebounceTimer) clearTimeout(stateDebounceTimer);
-  stateDebounceTimer = setTimeout(sendStateUpdate, STATE_DEBOUNCE_MS);
-}
+function scheduleStateUpdate() { if (stateDebounceTimer) clearTimeout(stateDebounceTimer); stateDebounceTimer = setTimeout(sendStateUpdate, STATE_DEBOUNCE_MS); }
 
 function sendStateUpdate() {
   const visCount = computeVisibleFaceCount();
   document.getElementById('visCount').textContent = visCount.toLocaleString();
-  document.getElementById('camPos').textContent =
-    `(${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)})`;
-
+  document.getElementById('camPos').textContent = `(${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)})`;
   const state = {
-    camera: {
-      position: camera.position.toArray(),
-      target: controls.target.toArray(),
-      up: camera.up.toArray(),
-      fov: camera.fov,
-      near: camera.near,
-      far: camera.far,
-    },
-    clipPlane: {
-      normal: [clipPlane.normal.x, clipPlane.normal.y, clipPlane.normal.z],
-      constant: clipPlane.constant,
-    },
-    ui: {
-      opacity: meshObj ? meshObj.material.opacity : 1.0,
-      wireframe: wireframeObj ? wireframeObj.visible : false,
-    },
+    camera: { position: camera.position.toArray(), target: controls.target.toArray(), up: camera.up.toArray(), fov: camera.fov, near: camera.near, far: camera.far },
+    clipPlane: { normal: [clipPlane.normal.x, clipPlane.normal.y, clipPlane.normal.z], constant: clipPlane.constant },
+    ui: { opacity: meshObj ? meshObj.material.opacity : 1.0, wireframe: wireframeObj ? wireframeObj.visible : false },
     visibleFaceCount: visCount,
   };
-
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'state_update', payload: state }));
-  } else {
-    fetch('/update_state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(state),
-    }).catch(() => {});
-  }
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'state_update', payload: state }));
+  else fetch('/update_state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state) }).catch(() => {});
 }
 
-// ── Annotations (from Claude) ────────────────────────────────────────
+// ── Annotations ──────────────────────────────────────────────────────
 function applyAnnotations(annotations) {
-  // Remove old annotation meshes
-  for (const m of annotationMeshes) {
-    scene.remove(m);
-    m.geometry.dispose();
-    m.material.dispose();
-  }
+  for (const m of annotationMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
   annotationMeshes = [];
-
-  if (!annotations || !annotations.highlights) return;
-
-  // annotations.highlights: [ { faces: [1,2,3], color: [r,g,b], label: "..." }, ... ]
+  if (!annotations || !annotations.highlights || !meshGeometry) return;
   const posAttr = meshGeometry.getAttribute('position');
-
   for (const group of annotations.highlights) {
-    const faceIndices = group.faces || [];
-    if (faceIndices.length === 0) continue;
-
+    const fi = group.faces || []; if (fi.length === 0) continue;
     const color = group.color || [1, 0, 0];
-    const positions = new Float32Array(faceIndices.length * 9);
-
-    for (let j = 0; j < faceIndices.length; j++) {
-      const fi = faceIndices[j];
-      const base = fi * 9;
-      for (let k = 0; k < 9; k++) {
-        positions[j * 9 + k] = posAttr.array[base + k];
-      }
-    }
-
+    const pos = new Float32Array(fi.length * 9);
+    for (let j = 0; j < fi.length; j++) { const base = fi[j] * 9; for (let k = 0; k < 9; k++) pos[j * 9 + k] = posAttr.array[base + k]; }
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.computeVertexNormals();
-
-    const mat = new THREE.MeshPhongMaterial({
-      color: new THREE.Color(color[0], color[1], color[2]),
-      side: THREE.DoubleSide,
-      clippingPlanes: [clipPlane],
-      transparent: true,
-      opacity: 0.9,
-      depthTest: true,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-    });
-
-    const highlightMesh = new THREE.Mesh(geo, mat);
-    scene.add(highlightMesh);
-    annotationMeshes.push(highlightMesh);
+    const mat = new THREE.MeshPhongMaterial({ color: new THREE.Color(color[0], color[1], color[2]), side: THREE.DoubleSide, clippingPlanes: [clipPlane], transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -1 });
+    const hlm = new THREE.Mesh(geo, mat);
+    scene.add(hlm); annotationMeshes.push(hlm);
   }
 }
 
-// ── Camera commands (from Claude) ────────────────────────────────────
 function applyCameraCommand(cmd) {
-  // cmd: { position: [x,y,z], target: [x,y,z], up: [x,y,z] }
-  if (cmd.position) {
-    camera.position.fromArray(cmd.position);
-  }
-  if (cmd.target) {
-    controls.target.fromArray(cmd.target);
-  }
-  if (cmd.up) {
-    camera.up.fromArray(cmd.up);
-  }
-  if (cmd.fov) {
-    camera.fov = cmd.fov;
-    camera.updateProjectionMatrix();
-  }
-  controls.update();
-  scheduleStateUpdate();
+  if (cmd.position) camera.position.fromArray(cmd.position);
+  if (cmd.target) controls.target.fromArray(cmd.target);
+  if (cmd.up) camera.up.fromArray(cmd.up);
+  if (cmd.fov) { camera.fov = cmd.fov; camera.updateProjectionMatrix(); }
+  controls.update(); scheduleStateUpdate();
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-
-  ws.onopen = () => {
-    console.log('[skeliner] WebSocket connected');
-  };
-
+  ws.onopen = () => console.log('[skeliner] WebSocket connected');
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'annotations') {
-      applyAnnotations(msg.payload);
-    } else if (msg.type === 'camera_command') {
-      applyCameraCommand(msg.payload);
-    } else if (msg.type === 'reload') {
-      console.log('[skeliner] viewer.html changed, reloading...');
-      window.location.reload();
+    if (msg.type === 'annotations') applyAnnotations(msg.payload);
+    else if (msg.type === 'camera_command') applyCameraCommand(msg.payload);
+    else if (msg.type === 'reload') window.location.reload();
+    else if (msg.type === 'mesh_loaded') { buildMesh(msg.payload); updateLoadedPanel(); }
+    else if (msg.type === 'skeleton_loaded') { buildSkeleton(msg.payload); updateLoadedPanel(); }
+    else if (msg.type === 'mesh_removed') {
+      if (meshObj) { scene.remove(meshObj); meshObj.geometry.dispose(); meshObj.material.dispose(); meshObj = null; }
+      if (wireframeObj) { scene.remove(wireframeObj); wireframeObj.geometry.dispose(); wireframeObj.material.dispose(); wireframeObj = null; }
+      meshGeometry = null; faceWindingNumbers = null;
+      document.getElementById('nVerts').textContent = '-';
+      document.getElementById('nFaces').textContent = '-';
+      updateLoadedPanel();
+      if (!skelGroup) document.getElementById('empty-hint').style.display = 'block';
+    }
+    else if (msg.type === 'skeleton_removed') {
+      if (skelGroup) { scene.remove(skelGroup); skelGroup = null; }
+      document.getElementById('nNodes').textContent = '-';
+      updateLoadedPanel();
+      if (!meshObj) document.getElementById('empty-hint').style.display = 'block';
     }
   };
-
-  ws.onerror = (err) => {
-    console.error('[skeliner] WebSocket error:', err);
-  };
-
-  ws.onclose = () => {
-    console.log('[skeliner] WebSocket closed, reconnecting in 2s...');
-    setTimeout(connectWebSocket, 2000);
-  };
+  ws.onerror = (err) => console.error('[skeliner] WebSocket error:', err);
+  ws.onclose = () => { console.log('[skeliner] WebSocket closed, reconnecting in 2s...'); setTimeout(connectWebSocket, 2000); };
 }
 
-// ── Resize / Animate ─────────────────────────────────────────────────
-function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-}
+function onResize() { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
+function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
 
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
-}
-
-// ── Start ────────────────────────────────────────────────────────────
 init();
 </script>
 </body>
