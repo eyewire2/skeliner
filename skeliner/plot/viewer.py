@@ -363,8 +363,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
         return JSONResponse({"ok": True})
 
-    async def detect_avocados(request):
-        """Run avocado detection and write results to annotations."""
+    async def detect_organelles(request):
+        """Run organelle detection and write results to annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse({"ok": False, "error": "No mesh loaded"}, status_code=400)
 
@@ -375,14 +375,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             median_edge = float(np.median(mesh.edges_unique_length))
             radius = 5.0 * median_edge
             dots = _outward_dot(mesh, radius=radius)
-            avocado = _filter_small_clusters(mesh, dots < 0, min_cluster_size=5)
-            return [int(fi) for fi in np.where(avocado)[0]]
+            organelle = _filter_small_clusters(mesh, dots < 0, min_cluster_size=5)
+            return [int(fi) for fi in np.where(organelle)[0]]
 
         loop = asyncio.get_event_loop()
         faces = await loop.run_in_executor(None, _run)
 
         ann = {"highlights": [
-            {"faces": faces, "color": [1, 0.15, 0.15], "label": "avocado"},
+            {"faces": faces, "color": [1, 0.15, 0.15], "label": "organelle"},
         ]}
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nFaces": len(faces)})
@@ -481,7 +481,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove", remove_item, methods=["POST"]),
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),
-            Route("/detect_avocados", detect_avocados, methods=["POST"]),
+            Route("/detect_organelles", detect_organelles, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],
         on_startup=[on_startup],

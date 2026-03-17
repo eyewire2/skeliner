@@ -11,8 +11,9 @@ __all__ = [
     "ensure_watertight",
     "fill_holes",
     "find_holes",
-    "remove_avocados",
+    "remove_organelles",
     "remove_fragments",
+    "remove_nucleus",
 ]
 
 
@@ -429,36 +430,136 @@ def _fill_single_hole(
     return new_3d, remapped
 
 
+def _fill_advancing_front(
+    loop: list[int],
+    vertices: np.ndarray,
+    face_normals: np.ndarray,
+    vert_to_faces: list[list[int]] | None = None,
+) -> np.ndarray:
+    """Fill a boundary loop using advancing front.
+
+    Repeatedly picks the sharpest angle on the boundary and closes it
+    with a triangle. No new vertices are created — only existing
+    boundary vertices are used.
+
+    Returns (M, 3) int array of new faces.
+    """
+    n = len(loop)
+    if n < 3:
+        return np.empty((0, 3), dtype=np.int64)
+    if n == 3:
+        tri = np.array([[loop[0], loop[1], loop[2]]], dtype=np.int64)
+        # Orient consistently with neighbors
+        if vert_to_faces is not None:
+            ref_fi = []
+            for vi in loop[:1]:
+                ref_fi.extend(vert_to_faces[vi][:5])
+            if ref_fi:
+                ref_n = face_normals[ref_fi].mean(axis=0)
+                v0, v1, v2 = vertices[loop[0]], vertices[loop[1]], vertices[loop[2]]
+                tri_n = np.cross(v1 - v0, v2 - v0)
+                if np.dot(tri_n, ref_n) < 0:
+                    tri = tri[:, ::-1]
+        return tri
+
+    # Determine consistent winding from adjacent mesh faces
+    flip = False
+    if vert_to_faces is not None:
+        ref_fi = []
+        for vi in loop[:3]:
+            ref_fi.extend(vert_to_faces[vi][:5])
+        if ref_fi:
+            ref_n = face_normals[ref_fi].mean(axis=0)
+            v0, v1, v2 = vertices[loop[0]], vertices[loop[1]], vertices[loop[2]]
+            tri_n = np.cross(v1 - v0, v2 - v0)
+            if np.dot(tri_n, ref_n) < 0:
+                flip = True
+
+    # Work with a mutable list of boundary vertex indices
+    bnd = list(loop)
+    new_faces = []
+
+    for _ in range(n * 2):  # safety limit
+        m = len(bnd)
+        if m < 3:
+            break
+        if m == 3:
+            if flip:
+                new_faces.append([bnd[0], bnd[2], bnd[1]])
+            else:
+                new_faces.append([bnd[0], bnd[1], bnd[2]])
+            break
+
+        # Find the ear with the smallest interior angle
+        # (sharpest corner = best triangle to close)
+        best_i = -1
+        best_angle = float("inf")
+
+        for i in range(m):
+            p = vertices[bnd[(i - 1) % m]]
+            c = vertices[bnd[i]]
+            n_pt = vertices[bnd[(i + 1) % m]]
+
+            e1 = p - c
+            e2 = n_pt - c
+            len1 = np.linalg.norm(e1)
+            len2 = np.linalg.norm(e2)
+            if len1 < 1e-10 or len2 < 1e-10:
+                best_i = i
+                best_angle = 0
+                break
+            cos_a = np.dot(e1, e2) / (len1 * len2)
+            cos_a = np.clip(cos_a, -1, 1)
+            angle = np.arccos(cos_a)
+
+            if angle < best_angle:
+                best_angle = angle
+                best_i = i
+
+        if best_i < 0:
+            break
+
+        # Create triangle at this ear
+        prev_i = (best_i - 1) % m
+        next_i = (best_i + 1) % m
+        if flip:
+            new_faces.append([bnd[prev_i], bnd[next_i], bnd[best_i]])
+        else:
+            new_faces.append([bnd[prev_i], bnd[best_i], bnd[next_i]])
+
+        # Remove the vertex from the boundary
+        bnd.pop(best_i)
+
+    if not new_faces:
+        return np.empty((0, 3), dtype=np.int64)
+    return np.array(new_faces, dtype=np.int64)
+
+
 def fill_holes(
     mesh: trimesh.Trimesh,
     *,
-    max_perimeter_mult: float = 50.0,
+    method: str = "advancing_front",
+    max_perimeter_mult: float | None = None,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
-    """Fill holes in the mesh with curvature-aware tessellation.
-
-    New faces match the local edge-length statistics and follow the
-    surface curvature (via RBF interpolation of nearby geometry)
-    rather than spanning the hole with oversized flat faces.
-
-    Algorithm:
-
-    1. **find_holes** – detect boundary loops in the main component.
-    2. **Ear-clip** each loop projected to its best-fit 2D plane.
-    3. **Refine** — centroid-split faces whose longest edge exceeds
-       1.5x the mesh median edge length.
-    4. **RBF lift** – position new interior vertices on an RBF surface
-       fitted to boundary + nearby mesh vertices, so the fill follows
-       local curvature.
+    """Fill holes in the mesh.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
-        Input mesh (typically after ``remove_avocados``).
-    max_perimeter_mult : float, default 50.0
+        Input mesh (typically after ``remove_organelles``).
+    method : str, default "advancing_front"
+        Filling method:
+        - ``"advancing_front"`` — fast, closes boundary edges one by one
+          by picking the sharpest angle. No new vertices. Works for all
+          hole sizes.
+        - ``"rbf"`` — projects to 2D, ear-clips, refines, lifts with RBF.
+          Better surface quality for small planar holes but slow and fails
+          for large curved holes.
+    max_perimeter_mult : float or None
         Skip holes whose perimeter exceeds this multiple of the median
-        edge length.  Very large holes are usually artifacts, not
-        real gaps to fill.
+        edge length.  ``None`` = no limit (fill all holes).
+        Default ``None`` for advancing_front, ``50.0`` for rbf.
     verbose : bool, default False
         Print progress.
 
@@ -472,13 +573,21 @@ def fill_holes(
         return mesh
 
     target_edge = float(np.median(mesh.edges_unique_length))
-    max_perimeter = max_perimeter_mult * target_edge
-    if verbose:
-        print(f"[skeliner.pre] Target edge length: {target_edge:.1f}, "
-              f"max hole perimeter: {max_perimeter:.0f}")
 
-    # Pre-build shared structures once
-    vtree = KDTree(mesh.vertices)
+    # Default max_perimeter depends on method
+    if max_perimeter_mult is None:
+        if method == "rbf":
+            max_perimeter_mult = 50.0
+        # advancing_front: no limit
+    max_perimeter = (max_perimeter_mult * target_edge
+                     if max_perimeter_mult is not None else float("inf"))
+
+    if verbose:
+        print(f"[skeliner.pre] Method: {method}, target edge: {target_edge:.1f}"
+              + (f", max perimeter: {max_perimeter:.0f}"
+                 if max_perimeter < float("inf") else ", no perimeter limit"))
+
+    # Pre-build vert_to_faces for orientation
     vert_to_faces: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
     for fi, face in enumerate(mesh.faces):
         for v in face:
@@ -501,26 +610,47 @@ def fill_holes(
         print(f"[skeliner.pre] Filling {len(valid_loops)} holes"
               + (f" (skipped {n_skipped} too large)" if n_skipped else ""))
 
-    # Fill holes sequentially (offset depends on previous holes)
-    # but with shared KDTree + vert_to_faces (the main speedup)
-    new_verts: list[np.ndarray] = []
-    new_faces: list[np.ndarray] = []
-    offset = len(mesh.vertices)
+    if method == "advancing_front":
+        new_faces: list[np.ndarray] = []
+        for loop in valid_loops:
+            nf = _fill_advancing_front(
+                loop, mesh.vertices, mesh.face_normals, vert_to_faces
+            )
+            if len(nf):
+                new_faces.append(nf)
 
-    for loop in valid_loops:
-        nv, nf = _fill_single_hole(mesh, loop, target_edge, offset, vtree, vert_to_faces)
-        new_verts.append(nv)
-        new_faces.append(nf)
-        offset += len(nv)
+        if not new_faces:
+            return mesh
 
-    v_parts = [mesh.vertices] + [v for v in new_verts if len(v) > 0]
-    f_parts = [mesh.faces] + [f for f in new_faces if len(f) > 0]
+        all_faces = np.vstack([mesh.faces] + new_faces)
+        result = trimesh.Trimesh(
+            vertices=mesh.vertices, faces=all_faces, process=False
+        )
 
-    result = trimesh.Trimesh(
-        vertices=np.vstack(v_parts),
-        faces=np.vstack(f_parts),
-        process=False,
-    )
+    elif method == "rbf":
+        vtree = KDTree(mesh.vertices)
+        new_verts: list[np.ndarray] = []
+        new_face_list: list[np.ndarray] = []
+        offset = len(mesh.vertices)
+
+        for loop in valid_loops:
+            nv, nf = _fill_single_hole(
+                mesh, loop, target_edge, offset, vtree, vert_to_faces
+            )
+            new_verts.append(nv)
+            new_face_list.append(nf)
+            offset += len(nv)
+
+        v_parts = [mesh.vertices] + [v for v in new_verts if len(v) > 0]
+        f_parts = [mesh.faces] + [f for f in new_face_list if len(f) > 0]
+        result = trimesh.Trimesh(
+            vertices=np.vstack(v_parts),
+            faces=np.vstack(f_parts),
+            process=False,
+        )
+    else:
+        raise ValueError(f"Unknown method: {method!r}. Use 'advancing_front' or 'rbf'.")
+
     if verbose:
         print(
             f"[skeliner.pre] Result: {len(result.vertices):,} verts, "
@@ -643,7 +773,7 @@ def ensure_watertight(
     Parameters
     ----------
     mesh : trimesh.Trimesh
-        Input mesh (typically after ``remove_avocados``).
+        Input mesh (typically after ``remove_organelles``).
     verbose : bool, default False
         Print progress.
 
@@ -655,7 +785,17 @@ def ensure_watertight(
     result = remove_fragments(mesh, verbose=verbose)
     result = _remove_fins(result, verbose=verbose)
     result = remove_fragments(result, verbose=verbose)
-    result = fill_holes(result, verbose=verbose)
+
+    # Fill holes iteratively — filling can create new small holes
+    for iteration in range(10):
+        prev_faces = len(result.faces)
+        result = fill_holes(result, verbose=verbose)
+        result = _remove_fins(result, verbose=verbose)
+        if len(result.faces) == prev_faces:
+            break
+        if verbose:
+            print(f"[skeliner.pre] Iteration {iteration + 1}: "
+                  f"{len(result.faces):,} faces")
 
     if verbose:
         wt = result.is_watertight
@@ -765,7 +905,7 @@ def _filter_small_clusters(
     return filtered
 
 
-def remove_avocados(
+def remove_organelles(
     mesh: trimesh.Trimesh,
     *,
     radius: float | None = None,
@@ -773,25 +913,15 @@ def remove_avocados(
     min_cluster_size: int = 5,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
-    """Remove internal mesh fragments ("avocado" artifacts) from a neuron mesh.
+    """Remove internal mesh fragments (organelle membranes) from a neuron mesh.
 
     Organelle membranes (mitochondria, ER, etc.) often appear as
     connected or semi-connected components sitting *inside* the
     neuron body.  They bias skeleton-node positions and radius estimates
     and should be removed before skeletonisation.
 
-    The algorithm works in four steps:
-
-    1. **Local outward scoring** – for each face, compute the dot product
-       between its normal and the direction from the local center of mass
-       (vertices within *radius*) to the face centroid.  Surface faces
-       point outward (positive), internal faces point inward (negative).
-    2. **Cluster filtering** – discard isolated small groups of flagged
-       faces (< *min_cluster_size*) to avoid removing surface faces at
-       local concavities.
-    3. **Face removal** – flagged faces are dropped and unreferenced
-       vertices are cleaned up.
-    4. **Fragment removal** – drop small disconnected components.
+    Note: this does NOT remove the nucleus membrane inside the soma.
+    Use :func:`remove_nucleus` after skeletonisation for that.
 
     Parameters
     ----------
@@ -833,23 +963,23 @@ def remove_avocados(
     # Step 1 – local outward scoring
     # ------------------------------------------------------------------
     outward_dots = _outward_dot(mesh, radius)
-    avocado_raw = outward_dots < 0
+    organelle_raw = outward_dots < 0
 
     if verbose:
         print(
-            f"[skeliner.pre] Raw internal faces: {avocado_raw.sum():,} "
-            f"({100 * avocado_raw.mean():.1f}% of {n_faces:,})"
+            f"[skeliner.pre] Raw internal faces: {organelle_raw.sum():,} "
+            f"({100 * organelle_raw.mean():.1f}% of {n_faces:,})"
         )
 
     # ------------------------------------------------------------------
     # Step 2 – cluster filtering
     # ------------------------------------------------------------------
-    avocado = _filter_small_clusters(mesh, avocado_raw, min_cluster_size)
+    organelle = _filter_small_clusters(mesh, organelle_raw, min_cluster_size)
 
     if verbose:
         print(
             f"[skeliner.pre] After cluster filter (>= {min_cluster_size}): "
-            f"{avocado.sum():,} faces"
+            f"{organelle.sum():,} faces"
         )
 
     # ------------------------------------------------------------------
@@ -890,7 +1020,7 @@ def remove_avocados(
             mean_dot = outward_dots[comp_face_idx].mean()
             if mean_dot < 0:
                 # Internal fragment — flag for removal
-                avocado[comp_face_idx] = True
+                organelle[comp_face_idx] = True
                 n_internal_frags += 1
                 n_internal_frag_faces += len(comp_face_idx)
             else:
@@ -904,14 +1034,14 @@ def remove_avocados(
         )
 
     # ------------------------------------------------------------------
-    # Step 4 – remove all flagged faces (avocados + internal fragments)
+    # Step 4 – remove all flagged faces (organelles + internal fragments)
     # ------------------------------------------------------------------
-    if not avocado.any():
+    if not organelle.any():
         if verbose:
             print("[skeliner.pre] Nothing to remove")
         return mesh
 
-    keep = ~avocado
+    keep = ~organelle
     clean = mesh.submesh([np.where(keep)[0]], append=True)
     clean.remove_unreferenced_vertices()
 
@@ -919,8 +1049,156 @@ def remove_avocados(
         print(
             f"[skeliner.pre] Result: {len(clean.vertices):,} verts, "
             f"{len(clean.faces):,} faces "
-            f"(removed {avocado.sum():,} faces, "
+            f"(removed {organelle.sum():,} faces, "
             f"{len(mesh.vertices) - len(clean.vertices):,} verts)"
+        )
+
+    return clean
+
+
+def remove_nucleus(
+    mesh: trimesh.Trimesh,
+    skeleton,
+    *,
+    soma_inside_frac: float = 0.9,
+    min_nucleus_faces: int = 100,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove the nucleus membrane from inside the soma.
+
+    Uses the soma ellipsoid from a skeleton to identify the nucleus —
+    a large internal shell inside the soma that ``remove_organelles``
+    cannot detect because it resembles a normal surface.
+
+    Algorithm:
+
+    1. Find faces inside the soma ellipsoid.
+    2. Classify each face as outward-facing or inward-facing relative
+       to the soma center.
+    3. Cut the face-adjacency graph at outward/inward transitions.
+    4. The largest inward-facing component is the nucleus — remove it
+       along with any other inward components above *min_nucleus_faces*.
+
+    Intended pipeline::
+
+        clean = pre.remove_organelles(raw_mesh)
+        skel = skeliner.skeletonize(clean)
+        final = pre.remove_nucleus(clean, skel)
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh (typically after ``remove_organelles``).
+    skeleton : Skeleton
+        Skeleton with soma detection (from ``skeletonize``).
+    soma_inside_frac : float, default 0.9
+        Scale factor for the soma ellipsoid boundary test.
+    min_nucleus_faces : int, default 100
+        Only remove inward components with at least this many faces.
+    verbose : bool, default False
+        Print summary.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with nucleus membrane removed.
+    """
+    soma = skeleton.soma
+    if soma is None:
+        if verbose:
+            print("[skeliner.pre] No soma detected — skipping nucleus removal")
+        return mesh
+
+    centroids = mesh.triangles_center
+    normals = mesh.face_normals
+    n_faces = len(mesh.faces)
+
+    # Step 1: faces inside soma ellipsoid
+    inside = soma.contains(centroids, inside_frac=soma_inside_frac)
+    inside_idx = np.where(inside)[0]
+
+    if len(inside_idx) == 0:
+        if verbose:
+            print("[skeliner.pre] No faces inside soma ellipsoid")
+        return mesh
+
+    # Step 2: classify outward vs inward relative to soma center
+    dir_from_soma = centroids[inside] - soma.center
+    nrm = np.linalg.norm(dir_from_soma, axis=1, keepdims=True)
+    dir_from_soma /= np.maximum(nrm, 1e-10)
+    soma_dots = np.einsum("ij,ij->i", normals[inside], dir_from_soma)
+    is_outward = soma_dots >= 0
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Faces inside soma: {len(inside_idx):,} "
+            f"(outward: {is_outward.sum():,}, inward: {(~is_outward).sum():,})"
+        )
+
+    # Step 3: build face graph inside soma, cut at outward/inward transitions
+    inside_set = set(int(fi) for fi in inside_idx)
+    fi_remap = {int(fi): i for i, fi in enumerate(inside_idx)}
+
+    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi in inside_idx:
+        face = mesh.faces[fi]
+        for i in range(3):
+            e = (min(int(face[i]), int(face[(i + 1) % 3])),
+                 max(int(face[i]), int(face[(i + 1) % 3])))
+            edge_to_faces[e].append(int(fi))
+
+    edges: set[tuple[int, int]] = set()
+    for fi in inside_idx:
+        fi_int = int(fi)
+        local_i = fi_remap[fi_int]
+        face = mesh.faces[fi]
+        for i in range(3):
+            e = (min(int(face[i]), int(face[(i + 1) % 3])),
+                 max(int(face[i]), int(face[(i + 1) % 3])))
+            for nfi in edge_to_faces[e]:
+                if nfi != fi_int and nfi in inside_set:
+                    local_j = fi_remap[nfi]
+                    if is_outward[local_i] == is_outward[local_j]:
+                        a, b = min(local_i, local_j), max(local_i, local_j)
+                        edges.add((a, b))
+
+    g = ig.Graph(n=len(inside_idx), edges=list(edges), directed=False)
+    comps = g.connected_components()
+
+    # Step 4: collect large inward components = nucleus
+    nucleus_mask = np.zeros(n_faces, dtype=bool)
+    n_nucleus_comps = 0
+
+    for cl in comps:
+        if is_outward[cl[0]]:
+            continue
+        if len(cl) < min_nucleus_faces:
+            continue
+        for i in cl:
+            nucleus_mask[int(inside_idx[i])] = True
+        n_nucleus_comps += 1
+
+    n_nucleus = int(nucleus_mask.sum())
+    if verbose:
+        print(
+            f"[skeliner.pre] Nucleus: {n_nucleus_comps} component(s), "
+            f"{n_nucleus:,} faces"
+        )
+
+    if n_nucleus == 0:
+        if verbose:
+            print("[skeliner.pre] No nucleus found")
+        return mesh
+
+    keep = ~nucleus_mask
+    clean = mesh.submesh([np.where(keep)[0]], append=True)
+    clean.remove_unreferenced_vertices()
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Result: {len(clean.vertices):,} verts, "
+            f"{len(clean.faces):,} faces "
+            f"(removed {n_nucleus:,} nucleus faces)"
         )
 
     return clean

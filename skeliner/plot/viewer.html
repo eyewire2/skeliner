@@ -67,7 +67,7 @@
   <label><input type="checkbox" id="wireToggle" checked> Wireframe</label>
   <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50"></label>
   <label><input type="checkbox" id="tubeToggle"> Tubes</label>
-  <button id="detectBtn" style="font-size:11px;cursor:pointer;margin-left:8px;">Detect Avocados (A)</button>
+  <button id="detectBtn" style="font-size:11px;cursor:pointer;margin-left:8px;">Detect Organelles (A)</button>
 </div>
 
 <div id="selection-info">
@@ -172,10 +172,10 @@ async function init() {
   renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
   renderer.domElement.addEventListener('pointerdown', onRecenter);
 
-  document.getElementById('detectBtn').addEventListener('click', runDetectAvocados);
+  document.getElementById('detectBtn').addEventListener('click', runDetectOrganelles);
   window.addEventListener('keydown', (e) => {
     if (e.key === 'a' && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.target === document.body) {
-      runDetectAvocados();
+      runDetectOrganelles();
     }
   });
 
@@ -545,13 +545,13 @@ function rebuildManualHighlight() {
   scene.add(manualHighlightMesh);
 }
 
-async function runDetectAvocados() {
+async function runDetectOrganelles() {
   const btn = document.getElementById('detectBtn');
   btn.textContent = 'Detecting...'; btn.disabled = true;
   try {
-    const resp = await fetch('/detect_avocados', { method: 'POST' });
+    const resp = await fetch('/detect_organelles', { method: 'POST' });
     const data = await resp.json();
-    btn.textContent = data.ok ? `Avocados: ${data.nFaces} (A)` : 'Error (A)';
+    btn.textContent = data.ok ? `Organelles: ${data.nFaces} (A)` : 'Error (A)';
   } catch (e) { btn.textContent = 'Error (A)'; } finally { btn.disabled = false; }
 }
 
