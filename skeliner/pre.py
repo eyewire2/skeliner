@@ -511,44 +511,52 @@ def fill_holes(
 def remove_fragments(
     mesh: trimesh.Trimesh,
     *,
+    min_faces: int = 3,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
-    """Remove faces not edge-connected to the main surface component.
+    """Remove tiny face clusters connected to the mesh by at most a vertex.
 
-    Floating fragments — isolated faces or tiny clusters connected to
-    the main mesh by at most a single vertex — are stripped.  This is
-    useful after ``remove_avocados`` to clean up debris.
+    A "fragment" is a small edge-connected component — faces that share
+    no edge with the main surface, only a vertex at most.  Proper
+    disconnected components (e.g. neurite pieces with many faces) are
+    kept.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Input mesh.
+    min_faces : int, default 3
+        Edge-connected components with fewer faces than this are removed.
     verbose : bool, default False
         Print summary.
 
     Returns
     -------
     trimesh.Trimesh
-        Mesh with only the main edge-adjacency component retained.
+        Mesh with tiny fragments removed.
     """
     labels, main = _face_edge_components(mesh)
-    keep_mask = labels == main
-    n_removed = int((~keep_mask).sum())
 
-    if n_removed == 0:
+    # Count faces per component
+    comp_ids, counts = np.unique(labels, return_counts=True)
+    small_comps = set(int(c) for c, n in zip(comp_ids, counts) if n < min_faces and c != main)
+
+    if not small_comps:
         if verbose:
             print("[skeliner.pre] No fragments to remove")
         return mesh
+
+    keep_mask = np.array([int(labels[fi]) not in small_comps for fi in range(len(mesh.faces))])
+    n_removed = int((~keep_mask).sum())
 
     clean = mesh.submesh([np.where(keep_mask)[0]], append=True)
     clean.remove_unreferenced_vertices()
 
     if verbose:
         print(
-            f"[skeliner.pre] Removed {n_removed} fragment faces "
-            f"({len(mesh.vertices) - len(clean.vertices)} verts), "
-            f"result: {len(clean.vertices):,} verts, "
-            f"{len(clean.faces):,} faces"
+            f"[skeliner.pre] Removed {len(small_comps)} fragments "
+            f"({n_removed} faces, "
+            f"{len(mesh.vertices) - len(clean.vertices)} verts)"
         )
     return clean
 
