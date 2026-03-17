@@ -363,7 +363,7 @@ def _fill_single_hole(
     # ── Map new 2D points → 3D via RBF height ────────────────────────
     if n_new > 0:
         new_2d = pts_arr[n_bnd:]
-        new_h = rbf(new_2d)
+        new_h = np.clip(rbf(new_2d), bnd_h.min(), bnd_h.max())
         new_3d = (
             centroid_3d
             + new_2d[:, 0:1] * u_ax
