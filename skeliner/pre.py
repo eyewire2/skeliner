@@ -8,9 +8,11 @@ import trimesh
 from scipy.spatial import KDTree
 
 __all__ = [
+    "ensure_watertight",
     "fill_holes",
     "find_holes",
     "remove_avocados",
+    "remove_fragments",
 ]
 
 
@@ -445,6 +447,132 @@ def fill_holes(
             f"[skeliner.pre] Result: {len(result.vertices):,} verts, "
             f"{len(result.faces):,} faces"
         )
+    return result
+
+
+def remove_fragments(
+    mesh: trimesh.Trimesh,
+    *,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove faces not edge-connected to the main surface component.
+
+    Floating fragments — isolated faces or tiny clusters connected to
+    the main mesh by at most a single vertex — are stripped.  This is
+    useful after ``remove_avocados`` to clean up debris.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    verbose : bool, default False
+        Print summary.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with only the main edge-adjacency component retained.
+    """
+    labels, main = _face_edge_components(mesh)
+    keep_mask = labels == main
+    n_removed = int((~keep_mask).sum())
+
+    if n_removed == 0:
+        if verbose:
+            print("[skeliner.pre] No fragments to remove")
+        return mesh
+
+    clean = mesh.submesh([np.where(keep_mask)[0]], append=True)
+    clean.remove_unreferenced_vertices()
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Removed {n_removed} fragment faces "
+            f"({len(mesh.vertices) - len(clean.vertices)} verts), "
+            f"result: {len(clean.vertices):,} verts, "
+            f"{len(clean.faces):,} faces"
+        )
+    return clean
+
+
+def _remove_fins(
+    mesh: trimesh.Trimesh,
+    *,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove "fin" faces — faces with 2+ boundary edges.
+
+    These are peninsula faces hanging off the surface by a single edge.
+    They cause non-manifold edges when holes are filled.  Iterates
+    until no more fins remain (removing a fin can expose new fins).
+    """
+    result = mesh
+    total_removed = 0
+
+    for _ in range(100):
+        edge_count: dict[tuple[int, int], int] = defaultdict(int)
+        for face in result.faces:
+            for i in range(3):
+                e = (min(int(face[i]), int(face[(i + 1) % 3])),
+                     max(int(face[i]), int(face[(i + 1) % 3])))
+                edge_count[e] += 1
+
+        fin_mask = np.zeros(len(result.faces), dtype=bool)
+        for fi, face in enumerate(result.faces):
+            n_bnd = 0
+            for i in range(3):
+                e = (min(int(face[i]), int(face[(i + 1) % 3])),
+                     max(int(face[i]), int(face[(i + 1) % 3])))
+                if edge_count[e] == 1:
+                    n_bnd += 1
+            if n_bnd >= 2:
+                fin_mask[fi] = True
+
+        n_fins = int(fin_mask.sum())
+        if n_fins == 0:
+            break
+
+        total_removed += n_fins
+        keep = ~fin_mask
+        result = result.submesh([np.where(keep)[0]], append=True)
+        result.remove_unreferenced_vertices()
+
+    if verbose and total_removed > 0:
+        print(f"[skeliner.pre] Removed {total_removed} fin faces")
+
+    return result
+
+
+def ensure_watertight(
+    mesh: trimesh.Trimesh,
+    *,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove fragments and fins, fill holes, and verify watertightness.
+
+    Chains ``remove_fragments`` → fin removal → ``fill_holes``.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh (typically after ``remove_avocados``).
+    verbose : bool, default False
+        Print progress.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Watertight mesh (or best-effort if non-manifold edges remain).
+    """
+    result = remove_fragments(mesh, verbose=verbose)
+    result = _remove_fins(result, verbose=verbose)
+    result = remove_fragments(result, verbose=verbose)
+    result = fill_holes(result, verbose=verbose)
+
+    if verbose:
+        wt = result.is_watertight
+        print(f"[skeliner.pre] Watertight: {wt}")
+
     return result
 
 
