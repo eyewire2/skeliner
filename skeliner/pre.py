@@ -238,6 +238,8 @@ def _fill_single_hole(
     loop: list[int],
     target_edge: float,
     vert_offset: int,
+    vtree: KDTree | None = None,
+    vert_to_faces: list[list[int]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fill one boundary loop with curvature-aware tessellation.
 
@@ -261,10 +263,11 @@ def _fill_single_hole(
     bnd_h = centered @ n_ax
 
     # ── RBF surface from boundary + nearby mesh vertices ──────────────
-    tree = KDTree(verts)
+    if vtree is None:
+        vtree = KDTree(verts)
     nearby: set[int] = set()
     for vi in loop:
-        nearby.update(tree.query_ball_point(verts[vi], 3.0 * target_edge))
+        nearby.update(vtree.query_ball_point(verts[vi], 3.0 * target_edge))
     nearby -= set(loop)
 
     if nearby:
@@ -394,17 +397,30 @@ def _fill_single_hole(
     remapped[~bnd_mask] = vert_offset + (faces_arr[~bnd_mask] - n_bnd)
 
     # ── Consistent face orientation ───────────────────────────────────
-    # Use local indices (before remapping) so vertex lookup is always valid
     local_v = np.vstack([boundary_pts, new_3d]) if n_new > 0 else boundary_pts
     tri_normals = np.cross(
         local_v[faces_arr[:, 1]] - local_v[faces_arr[:, 0]],
         local_v[faces_arr[:, 2]] - local_v[faces_arr[:, 0]],
     )
-    loop_set = set(loop)
-    adj_fi = [
-        fi for fi, face in enumerate(mesh.faces)
-        if set(int(v) for v in face) & loop_set
-    ]
+    # Find adjacent faces via vert_to_faces index (fast) or fallback
+    adj_fi: list[int] = []
+    if vert_to_faces is not None:
+        seen: set[int] = set()
+        for vi in loop:
+            for fi in vert_to_faces[vi]:
+                if fi not in seen:
+                    adj_fi.append(fi)
+                    seen.add(fi)
+                    if len(seen) > 50:  # enough for a good reference normal
+                        break
+            if len(seen) > 50:
+                break
+    else:
+        loop_set = set(loop)
+        adj_fi = [
+            fi for fi, face in enumerate(mesh.faces)
+            if set(int(v) for v in face) & loop_set
+        ]
     if adj_fi:
         ref_n = mesh.face_normals[adj_fi].mean(axis=0)
         if np.dot(tri_normals.mean(axis=0), ref_n) < 0:
@@ -461,32 +477,38 @@ def fill_holes(
         print(f"[skeliner.pre] Target edge length: {target_edge:.1f}, "
               f"max hole perimeter: {max_perimeter:.0f}")
 
+    # Pre-build shared structures once
+    vtree = KDTree(mesh.vertices)
+    vert_to_faces: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
+    for fi, face in enumerate(mesh.faces):
+        for v in face:
+            vert_to_faces[int(v)].append(fi)
+
+    # Filter loops by perimeter
+    valid_loops: list[list[int]] = []
+    n_skipped = 0
+    for loop in loops:
+        pts = mesh.vertices[loop]
+        perimeter = float(np.linalg.norm(
+            np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1
+        ).sum())
+        if perimeter > max_perimeter:
+            n_skipped += 1
+        else:
+            valid_loops.append(loop)
+
+    if verbose:
+        print(f"[skeliner.pre] Filling {len(valid_loops)} holes"
+              + (f" (skipped {n_skipped} too large)" if n_skipped else ""))
+
+    # Fill holes sequentially (offset depends on previous holes)
+    # but with shared KDTree + vert_to_faces (the main speedup)
     new_verts: list[np.ndarray] = []
     new_faces: list[np.ndarray] = []
     offset = len(mesh.vertices)
-    n_skipped = 0
 
-    for i, loop in enumerate(loops):
-        pts = mesh.vertices[loop]
-        perimeter = sum(
-            np.linalg.norm(pts[(j + 1) % len(pts)] - pts[j])
-            for j in range(len(pts))
-        )
-        if perimeter > max_perimeter:
-            if verbose:
-                print(
-                    f"  Hole {i}: {len(loop)} bnd verts, "
-                    f"perimeter={perimeter:.0f} — skipped (too large)"
-                )
-            n_skipped += 1
-            continue
-
-        nv, nf = _fill_single_hole(mesh, loop, target_edge, offset)
-        if verbose:
-            print(
-                f"  Hole {i}: {len(loop)} bnd verts "
-                f"→ +{len(nv)} verts, +{len(nf)} faces"
-            )
+    for loop in valid_loops:
+        nv, nf = _fill_single_hole(mesh, loop, target_edge, offset, vtree, vert_to_faces)
         new_verts.append(nv)
         new_faces.append(nf)
         offset += len(nv)
