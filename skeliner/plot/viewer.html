@@ -27,8 +27,11 @@
     background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
     font-size: 12px; line-height: 1.6; max-width: 300px;
   }
+  .hl-item { display: flex; justify-content: space-between; align-items: center; }
+  .hl-item button { font-size: 10px; cursor: pointer; margin-left: 8px; }
+  .hl-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
   #loaded-panel {
-    position: absolute; top: 120px; right: 10px;
+    position: absolute; bottom: 50px; right: 10px;
     background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
     font-size: 12px; line-height: 1.8; max-width: 300px;
   }
@@ -67,6 +70,10 @@
   <label><input type="checkbox" id="wireToggle" checked> Wireframe</label>
   <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50"></label>
   <label><input type="checkbox" id="tubeToggle"> Tubes</label>
+  <label style="margin-left:8px;">Pick: <select id="pickTarget" style="font-size:11px;">
+    <option value="mesh">Mesh</option>
+    <option value="skeleton">Skeleton</option>
+  </select></label>
   <button id="detectBtn" style="font-size:11px;cursor:pointer;margin-left:8px;">Detect Organelles (A)</button>
 </div>
 
@@ -74,6 +81,8 @@
   <div><span class="label">Click: select | Shift+click: highlight</span></div>
   <div id="selDetail"></div>
   <div><span class="label">Highlighted: </span><span class="value" id="hlCount">0</span> <button id="hlClear" style="font-size:11px;cursor:pointer;">Clear</button></div>
+  <div id="hlList" style="margin-top:4px;"></div>
+  <div id="hlClearAllRow" style="display:none;margin-top:2px;"><button id="hlClearAll" style="font-size:10px;cursor:pointer;">Clear All Annotations</button></div>
 </div>
 
 <div id="loaded-panel">
@@ -180,6 +189,7 @@ async function init() {
   });
 
   document.getElementById('removeMesh').addEventListener('click', () => removeItem('mesh'));
+  document.getElementById('hlClearAll').addEventListener('click', clearAllAnnotations);
   document.getElementById('removeSkel').addEventListener('click', () => removeItem('skeleton'));
 
   connectWebSocket();
@@ -324,6 +334,9 @@ function buildMesh(data) {
 let skelData = null;  // cached for toggle
 let skelLines = null;
 let skelTubes = null;
+let skelNodePoints = null;  // THREE.Points for clickable nodes
+let skelNodeRadii = null;   // cached for click info
+let selectedNodeMesh = null; // highlight sphere for selected node
 
 function radiusToColor(t) {
   // teal → amber ramp, t in [0,1]
@@ -332,40 +345,66 @@ function radiusToColor(t) {
 
 function buildSkeleton(data) {
   if (skelGroup) { scene.remove(skelGroup); skelGroup = null; }
-  skelLines = null; skelTubes = null;
+  skelLines = null; skelTubes = null; skelNodePoints = null;
   skelData = data;
 
-  const { positions, nNodes, nEdges, edgeRadii } = data;
-  if (!positions || nEdges === 0) return;
+  const { nodes, positions, nNodes, nEdges, edgeRadii, radii } = data;
+  if (!nodes || nNodes === 0) return;
 
   document.getElementById('nNodes').textContent = nNodes.toLocaleString();
   document.getElementById('empty-hint').style.display = 'none';
 
   skelGroup = new THREE.Group();
 
-  // ── Lines mode ─────────────────────────────────────────────────
-  const geo = new THREE.BufferGeometry();
-  const posArr = new Float32Array(positions);
-  geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  const nodesArr = new Float32Array(nodes);
+  const radiiArr = new Float32Array(radii);
+  skelNodeRadii = radiiArr;
+  const rMin = Math.min(...radiiArr), rMax = Math.max(...radiiArr);
 
-  const rArr = new Float32Array(edgeRadii);
-  const rMin = Math.min(...rArr), rMax = Math.max(...rArr);
-  const colorArr = new Float32Array(nEdges * 6);
-  for (let i = 0; i < nEdges; i++) {
-    const t = rMax > rMin ? (rArr[i] - rMin) / (rMax - rMin) : 0.5;
+  // ── Node points ────────────────────────────────────────────────
+  const nodeGeo = new THREE.BufferGeometry();
+  nodeGeo.setAttribute('position', new THREE.BufferAttribute(nodesArr, 3));
+
+  const nodeColors = new Float32Array(nNodes * 3);
+  for (let i = 0; i < nNodes; i++) {
+    const t = rMax > rMin ? (radiiArr[i] - rMin) / (rMax - rMin) : 0.5;
     const [r, g, b] = radiusToColor(t);
-    colorArr[i*6]=r; colorArr[i*6+1]=g; colorArr[i*6+2]=b;
-    colorArr[i*6+3]=r; colorArr[i*6+4]=g; colorArr[i*6+5]=b;
+    nodeColors[i*3] = r; nodeColors[i*3+1] = g; nodeColors[i*3+2] = b;
   }
-  geo.setAttribute('color', new THREE.BufferAttribute(colorArr, 3));
-  skelLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 }));
-  skelGroup.add(skelLines);
+  nodeGeo.setAttribute('color', new THREE.BufferAttribute(nodeColors, 3));
+
+  const nodeMat = new THREE.PointsMaterial({
+    vertexColors: true, size: 5, sizeAttenuation: false,
+    depthTest: true, depthWrite: true,
+  });
+  skelNodePoints = new THREE.Points(nodeGeo, nodeMat);
+  skelGroup.add(skelNodePoints);
+
+  // ── Lines mode ─────────────────────────────────────────────────
+  if (nEdges > 0 && positions) {
+    const geo = new THREE.BufferGeometry();
+    const posArr = new Float32Array(positions);
+    geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+
+    const rArr = new Float32Array(edgeRadii);
+    const erMin = Math.min(...rArr), erMax = Math.max(...rArr);
+    const colorArr = new Float32Array(nEdges * 6);
+    for (let i = 0; i < nEdges; i++) {
+      const t = erMax > erMin ? (rArr[i] - erMin) / (erMax - erMin) : 0.5;
+      const [r, g, b] = radiusToColor(t);
+      colorArr[i*6]=r; colorArr[i*6+1]=g; colorArr[i*6+2]=b;
+      colorArr[i*6+3]=r; colorArr[i*6+4]=g; colorArr[i*6+5]=b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colorArr, 3));
+    skelLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 }));
+    skelGroup.add(skelLines);
+  }
 
   // ── Tubes mode (built lazily) ──────────────────────────────────
   const showTubes = document.getElementById('tubeToggle').checked;
   if (showTubes) {
     buildTubes();
-    skelLines.visible = false;
+    if (skelLines) skelLines.visible = false;
   }
 
   scene.add(skelGroup);
@@ -498,8 +537,55 @@ function onClickSelect(event) {
   mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
   raycaster.setFromCamera(mouse, camera);
-  if (!meshObj) return;
 
+  const pickTarget = document.getElementById('pickTarget').value;
+
+  if (pickTarget === 'skeleton') {
+    if (!skelNodePoints) return;
+    const camDist = camera.position.distanceTo(controls.target);
+    raycaster.params.Points.threshold = camDist * 0.02;
+    const nodeHits = raycaster.intersectObject(skelNodePoints);
+    if (nodeHits.length === 0) return;
+
+    const nodeIndex = nodeHits[0].index;
+    const point = nodeHits[0].point;
+    const radius = skelNodeRadii ? skelNodeRadii[nodeIndex] : null;
+
+    // Click same node again → deselect
+    if (selectedNodeMesh && selectedNodeMesh.userData.nodeIndex === nodeIndex) {
+      scene.remove(selectedNodeMesh); selectedNodeMesh.geometry.dispose(); selectedNodeMesh.material.dispose();
+      selectedNodeMesh = null;
+      document.getElementById('selDetail').innerHTML = '';
+      return;
+    }
+
+    const nodeInfo = {
+      nodeIndex,
+      point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)],
+      radius: radius !== null ? radius.toFixed(2) : null,
+    };
+    document.getElementById('selDetail').innerHTML =
+      `<div>Node: <b>${nodeIndex}</b></div>` +
+      `<div>Radius: <b>${radius !== null ? radius.toFixed(1) : '-'}</b></div>` +
+      `<div>Pos: ${nodeInfo.point.join(', ')}</div>`;
+
+    // Highlight selected node with a sphere
+    if (selectedNodeMesh) { scene.remove(selectedNodeMesh); selectedNodeMesh.geometry.dispose(); selectedNodeMesh.material.dispose(); }
+    const sphereR = radius !== null ? radius : 100;
+    const sphereGeo = new THREE.SphereGeometry(sphereR, 16, 12);
+    const sphereMat = new THREE.MeshPhongMaterial({ color: 0xff4444, transparent: true, opacity: 0.6, depthTest: true });
+    selectedNodeMesh = new THREE.Mesh(sphereGeo, sphereMat);
+    selectedNodeMesh.position.copy(point);
+    selectedNodeMesh.userData.nodeIndex = nodeIndex;
+    scene.add(selectedNodeMesh);
+
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'node_selection', payload: nodeInfo }));
+    else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nodeSelection: nodeInfo }) }).catch(() => {});
+    return;
+  }
+
+  // Mesh picking
+  if (!meshObj) return;
   const hits = raycaster.intersectObject(meshObj);
   if (hits.length === 0) return;
 
@@ -628,9 +714,13 @@ function sendStateUpdate() {
 }
 
 // ── Annotations ──────────────────────────────────────────────────────
+let currentAnnotations = null;  // cached for panel rebuild
+
 function applyAnnotations(annotations) {
   for (const m of annotationMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
   annotationMeshes = [];
+  currentAnnotations = annotations;
+  updateHighlightsPanel();
   if (!annotations || !annotations.highlights || !meshGeometry) return;
   const posAttr = meshGeometry.getAttribute('position');
   for (const group of annotations.highlights) {
@@ -645,6 +735,63 @@ function applyAnnotations(annotations) {
     const hlm = new THREE.Mesh(geo, mat);
     scene.add(hlm); annotationMeshes.push(hlm);
   }
+}
+
+function updateHighlightsPanel() {
+  const list = document.getElementById('hlList');
+  list.innerHTML = '';
+  const clearRow = document.getElementById('hlClearAllRow');
+  if (!currentAnnotations || !currentAnnotations.highlights || currentAnnotations.highlights.length === 0) {
+    clearRow.style.display = 'none';
+    return;
+  }
+  clearRow.style.display = 'block';
+  currentAnnotations.highlights.forEach((group, idx) => {
+    const n = (group.faces || []).length;
+    if (n === 0) return;
+    const color = group.color || [1, 0, 0];
+    const label = group.label || `Group ${idx}`;
+    const div = document.createElement('div');
+    div.className = 'hl-item';
+    const rgb = `rgb(${Math.round(color[0]*255)},${Math.round(color[1]*255)},${Math.round(color[2]*255)})`;
+    div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}"></span>${label} (${n.toLocaleString()})</span>`;
+    const btn = document.createElement('button');
+    btn.textContent = 'x';
+    btn.addEventListener('click', () => removeAnnotationGroup(idx));
+    div.appendChild(btn);
+    list.appendChild(div);
+  });
+}
+
+function removeAnnotationGroup(idx) {
+  if (!currentAnnotations || !currentAnnotations.highlights) return;
+  currentAnnotations.highlights.splice(idx, 1);
+  // Remove from scene
+  if (annotationMeshes[idx]) {
+    scene.remove(annotationMeshes[idx]);
+    annotationMeshes[idx].geometry.dispose();
+    annotationMeshes[idx].material.dispose();
+    annotationMeshes.splice(idx, 1);
+  }
+  updateHighlightsPanel();
+  // Sync to server
+  fetch('/update_annotations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(currentAnnotations),
+  }).catch(() => {});
+}
+
+function clearAllAnnotations() {
+  for (const m of annotationMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+  annotationMeshes = [];
+  currentAnnotations = { highlights: [] };
+  updateHighlightsPanel();
+  fetch('/update_annotations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(currentAnnotations),
+  }).catch(() => {});
 }
 
 function applyCameraCommand(cmd) {

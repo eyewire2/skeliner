@@ -108,12 +108,20 @@ def _load_skeleton_as_nm(path: Path) -> Any:
     suffix = path.suffix.lower()
     if suffix == ".swc":
         skel = load_swc(path)
-        # SWC is always in µm → convert to nm
-        skel.nodes *= 1000.0
-        for k in skel.radii:
-            skel.radii[k] *= 1000.0
-        skel.soma.center *= 1000.0
-        skel.soma.axes *= 1000.0
+        # Check if unit is in meta; if not, infer from coordinate magnitude
+        unit = skel.meta.get("unit", None)
+        if unit is None:
+            # Heuristic: if max coordinate > 10000, likely nm already
+            if skel.nodes.max() > 10000:
+                unit = "nm"
+            else:
+                unit = "um"
+        if unit in ("um", "µm", "μm", "micron", "micrometer"):
+            skel.nodes *= 1000.0
+            for k in skel.radii:
+                skel.radii[k] *= 1000.0
+            skel.soma.center *= 1000.0
+            skel.soma.axes *= 1000.0
         return skel
     elif suffix == ".npz":
         skel = load_npz(path)
@@ -345,6 +353,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         return JSONResponse({"ok": False, "error": "Unknown type"}, status_code=400)
 
+    async def update_annotations(request):
+        body = await request.json()
+        annotations_path.write_text(json.dumps(body), encoding="utf-8")
+        return JSONResponse({"ok": True})
+
     async def post_state(request):
         body = await request.json()
         current = {}
@@ -408,6 +421,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     if state_path.exists():
                         current = json.loads(state_path.read_text(encoding="utf-8"))
                     current["selection"] = msg["payload"]
+                    state_path.write_text(
+                        json.dumps(current, indent=2), encoding="utf-8"
+                    )
+                elif msg.get("type") == "node_selection":
+                    current = {}
+                    if state_path.exists():
+                        current = json.loads(state_path.read_text(encoding="utf-8"))
+                    current["nodeSelection"] = msg["payload"]
                     state_path.write_text(
                         json.dumps(current, indent=2), encoding="utf-8"
                     )
@@ -477,6 +498,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/loaded", get_loaded),
             Route("/state", get_state, methods=["GET"]),
             Route("/annotations", get_annotations, methods=["GET"]),
+            Route("/update_annotations", update_annotations, methods=["POST"]),
             Route("/upload", upload_file, methods=["POST"]),
             Route("/remove", remove_item, methods=["POST"]),
             Route("/update_state", post_state, methods=["POST"]),
