@@ -159,11 +159,15 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "path": None,           # source file path
         "centroid": np.zeros(3, dtype=np.float32),
     }
-    skeleton_state: dict[str, Any] = {
-        "skeleton": None,       # Skeleton object
-        "buffers": None,        # JSON-serialisable skeleton data
-        "path": None,
-    }
+    # Multiple skeletons, keyed by filename
+    skeleton_states: dict[str, dict[str, Any]] = {}
+    SKEL_COLORS = [
+        [1.0, 0.4, 0.1],   # orange
+        [0.2, 0.6, 1.0],   # blue
+        [0.1, 0.9, 0.4],   # green
+        [0.9, 0.2, 0.8],   # magenta
+        [1.0, 0.9, 0.1],   # yellow
+    ]
 
     # Pre-load mesh if path given
     if mesh_path is not None:
@@ -226,10 +230,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             return JSONResponse(None)
         return JSONResponse(mesh_state["buffers"])
 
-    async def get_skeleton(request):
-        if skeleton_state["buffers"] is None:
-            return JSONResponse(None)
-        return JSONResponse(skeleton_state["buffers"])
+    async def get_skeletons(request):
+        """Return all loaded skeletons."""
+        result = {}
+        for name, state in skeleton_states.items():
+            result[name] = state["buffers"]
+        return JSONResponse(result if result else None)
 
     async def get_state(request):
         if state_path.exists():
@@ -243,18 +249,19 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
     async def get_loaded(request):
         """Return what's currently loaded."""
-        result = {"mesh": None, "skeleton": None}
+        result = {"mesh": None, "skeletons": {}}
         if mesh_state["path"]:
             result["mesh"] = {
                 "path": mesh_state["path"],
                 "nVertices": len(mesh_state["mesh"].vertices),
                 "nFaces": len(mesh_state["mesh"].faces),
             }
-        if skeleton_state["path"]:
-            result["skeleton"] = {
-                "path": skeleton_state["path"],
-                "nNodes": skeleton_state["buffers"]["nNodes"],
-                "nEdges": skeleton_state["buffers"]["nEdges"],
+        for name, state in skeleton_states.items():
+            result["skeletons"][name] = {
+                "path": state["path"],
+                "nNodes": state["buffers"]["nNodes"],
+                "nEdges": state["buffers"]["nEdges"],
+                "color": state["color"],
             }
         return JSONResponse(result)
 
@@ -301,8 +308,15 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
 
                 await broadcast({"type": "mesh_loaded", "payload": buffers})
-                if skeleton_state["buffers"]:
-                    await broadcast({"type": "skeleton_loaded", "payload": skeleton_state["buffers"]})
+                # Re-send all skeletons (centroid changed)
+                for sname, sstate in skeleton_states.items():
+                    sstate["buffers"] = _skeleton_to_buffers(
+                        sstate["skeleton"], mesh_state["centroid"]
+                    )
+                    sstate["buffers"]["color"] = sstate["color"]
+                    await broadcast({"type": "skeleton_loaded", "payload": {
+                        "name": sname, **sstate["buffers"]
+                    }})
 
                 return JSONResponse({"ok": True, "type": "mesh", "name": filename})
 
@@ -310,13 +324,20 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 skel = _load_skeleton_as_nm(tmp_path)
                 print(f"Uploaded skeleton: {len(skel.nodes):,} nodes, {len(skel.edges):,} edges")
 
-                skeleton_state["skeleton"] = skel
-                skeleton_state["path"] = str(tmp_path.resolve())
-                skeleton_state["buffers"] = _skeleton_to_buffers(
-                    skel, mesh_state["centroid"]
-                )
+                color = SKEL_COLORS[len(skeleton_states) % len(SKEL_COLORS)]
+                buffers = _skeleton_to_buffers(skel, mesh_state["centroid"])
+                buffers["color"] = color
 
-                await broadcast({"type": "skeleton_loaded", "payload": skeleton_state["buffers"]})
+                skeleton_states[filename] = {
+                    "skeleton": skel,
+                    "path": str(tmp_path.resolve()),
+                    "buffers": buffers,
+                    "color": color,
+                }
+
+                await broadcast({"type": "skeleton_loaded", "payload": {
+                    "name": filename, **buffers
+                }})
                 return JSONResponse({"ok": True, "type": "skeleton", "name": filename})
 
             else:
@@ -335,20 +356,26 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             mesh_state["buffers"] = None
             mesh_state["path"] = None
             mesh_state["centroid"] = np.zeros(3, dtype=np.float32)
-            # Re-center skeleton if it exists
-            if skeleton_state["skeleton"] is not None:
-                skeleton_state["buffers"] = _skeleton_to_buffers(
-                    skeleton_state["skeleton"], mesh_state["centroid"]
+            for sname, sstate in skeleton_states.items():
+                sstate["buffers"] = _skeleton_to_buffers(
+                    sstate["skeleton"], mesh_state["centroid"]
                 )
-                await broadcast({"type": "skeleton_loaded", "payload": skeleton_state["buffers"]})
+                sstate["buffers"]["color"] = sstate["color"]
+                await broadcast({"type": "skeleton_loaded", "payload": {
+                    "name": sname, **sstate["buffers"]
+                }})
             await broadcast({"type": "mesh_removed"})
             return JSONResponse({"ok": True})
 
         elif item_type == "skeleton":
-            skeleton_state["skeleton"] = None
-            skeleton_state["buffers"] = None
-            skeleton_state["path"] = None
-            await broadcast({"type": "skeleton_removed"})
+            name = body.get("name")
+            if name and name in skeleton_states:
+                del skeleton_states[name]
+                await broadcast({"type": "skeleton_removed", "payload": {"name": name}})
+            else:
+                # Remove all skeletons
+                skeleton_states.clear()
+                await broadcast({"type": "all_skeletons_removed"})
             return JSONResponse({"ok": True})
 
         return JSONResponse({"ok": False, "error": "Unknown type"}, status_code=400)
@@ -494,7 +521,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         routes=[
             Route("/", index),
             Route("/mesh", get_mesh),
-            Route("/skeleton", get_skeleton),
+            Route("/skeletons", get_skeletons),
             Route("/loaded", get_loaded),
             Route("/state", get_state, methods=["GET"]),
             Route("/annotations", get_annotations, methods=["GET"]),

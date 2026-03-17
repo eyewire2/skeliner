@@ -91,10 +91,7 @@
     <span class="name" id="meshName">-</span>
     <button id="removeMesh">x</button>
   </div>
-  <div id="loadedSkel" class="item" style="display:none;">
-    <span class="name" id="skelName">-</span>
-    <button id="removeSkel">x</button>
-  </div>
+  <div id="loadedSkel"></div>
 </div>
 
 <script type="importmap">
@@ -113,7 +110,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // ── Globals ──────────────────────────────────────────────────────────
 let scene, camera, renderer, controls;
 let meshObj, wireframeObj, meshGeometry, clipPlane;
-let skelGroup = null;
+let skelGroups = {};  // keyed by skeleton name
 let faceWindingNumbers = null;
 let ws = null;
 let stateDebounceTimer = null;
@@ -160,10 +157,14 @@ async function init() {
     document.getElementById('empty-hint').style.display = 'none';
   }
 
-  // Try loading pre-loaded skeleton
-  const skelResp = await fetch('/skeleton');
-  const skelData = await skelResp.json();
-  if (skelData) buildSkeleton(skelData);
+  // Try loading pre-loaded skeletons
+  const skelResp = await fetch('/skeletons');
+  const skelDataAll = await skelResp.json();
+  if (skelDataAll) {
+    for (const [name, data] of Object.entries(skelDataAll)) {
+      buildSkeleton({ name, ...data });
+    }
+  }
 
   // Update loaded panel
   updateLoadedPanel();
@@ -190,7 +191,6 @@ async function init() {
 
   document.getElementById('removeMesh').addEventListener('click', () => removeItem('mesh'));
   document.getElementById('hlClearAll').addEventListener('click', clearAllAnnotations);
-  document.getElementById('removeSkel').addEventListener('click', () => removeItem('skeleton'));
 
   connectWebSocket();
 
@@ -216,23 +216,33 @@ async function updateLoadedPanel() {
     } else {
       meshEl.style.display = 'none';
     }
-    if (data.skeleton) {
-      skelEl.style.display = 'flex';
-      document.getElementById('skelName').textContent =
-        data.skeleton.path.split('/').pop() + ` (${data.skeleton.nNodes.toLocaleString()}n)`;
-    } else {
-      skelEl.style.display = 'none';
+    // Show all loaded skeletons
+    const skelContainer = document.getElementById('loadedSkel');
+    skelContainer.innerHTML = '';
+    if (data.skeletons) {
+      for (const [sname, sinfo] of Object.entries(data.skeletons)) {
+        const div = document.createElement('div');
+        div.className = 'item';
+        div.style.display = 'flex';
+        const c = sinfo.color || [1,1,1];
+        const rgb = `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`;
+        div.innerHTML = `<span class="name" style="color:${rgb}">${sname} (${sinfo.nNodes.toLocaleString()}n)</span>`;
+        const btn = document.createElement('button');
+        btn.textContent = 'x';
+        btn.addEventListener('click', () => removeItem('skeleton', sname));
+        div.appendChild(btn);
+        skelContainer.appendChild(div);
+      }
     }
   } catch (e) {}
 }
 
-async function removeItem(type) {
+async function removeItem(type, name) {
   await fetch('/remove', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type }),
+    body: JSON.stringify({ type, name }),
   });
-  // Server broadcasts removal via WebSocket
 }
 
 // ── Drag & Drop ──────────────────────────────────────────────────────
@@ -331,130 +341,80 @@ function buildMesh(data) {
 }
 
 // ── Build skeleton ───────────────────────────────────────────────────
-let skelData = null;  // cached for toggle
-let skelLines = null;
-let skelTubes = null;
-let skelNodePoints = null;  // THREE.Points for clickable nodes
-let skelNodeRadii = null;   // cached for click info
-let selectedNodeMesh = null; // highlight sphere for selected node
-
-function radiusToColor(t) {
-  // teal → amber ramp, t in [0,1]
-  return [0.0 + t * 1.0, 0.6 - t * 0.2, 0.8 - t * 0.6];
-}
+let selectedNodes = {};  // { "skelName:nodeIndex": { mesh, skelName, nodeIndex } }
 
 function buildSkeleton(data) {
-  if (skelGroup) { scene.remove(skelGroup); skelGroup = null; }
-  skelLines = null; skelTubes = null; skelNodePoints = null;
-  skelData = data;
+  const name = data.name || 'default';
+  const baseColor = data.color || [1.0, 0.4, 0.1];
+
+  // Remove old version of this skeleton
+  if (skelGroups[name]) {
+    scene.remove(skelGroups[name].group);
+    skelGroups[name] = null;
+    delete skelGroups[name];
+  }
 
   const { nodes, positions, nNodes, nEdges, edgeRadii, radii } = data;
   if (!nodes || nNodes === 0) return;
 
-  document.getElementById('nNodes').textContent = nNodes.toLocaleString();
+  document.getElementById('nNodes').textContent =
+    Object.keys(skelGroups).length > 0
+      ? Object.values(skelGroups).reduce((s, g) => s + g.nNodes, nNodes).toLocaleString()
+      : nNodes.toLocaleString();
   document.getElementById('empty-hint').style.display = 'none';
 
-  skelGroup = new THREE.Group();
-
+  const group = new THREE.Group();
   const nodesArr = new Float32Array(nodes);
   const radiiArr = new Float32Array(radii);
-  skelNodeRadii = radiiArr;
-  const rMin = Math.min(...radiiArr), rMax = Math.max(...radiiArr);
 
-  // ── Node points ────────────────────────────────────────────────
+  // ── Node points (colored by skeleton identity) ─────────────────
   const nodeGeo = new THREE.BufferGeometry();
   nodeGeo.setAttribute('position', new THREE.BufferAttribute(nodesArr, 3));
 
   const nodeColors = new Float32Array(nNodes * 3);
   for (let i = 0; i < nNodes; i++) {
-    const t = rMax > rMin ? (radiiArr[i] - rMin) / (rMax - rMin) : 0.5;
-    const [r, g, b] = radiusToColor(t);
-    nodeColors[i*3] = r; nodeColors[i*3+1] = g; nodeColors[i*3+2] = b;
+    nodeColors[i*3] = baseColor[0];
+    nodeColors[i*3+1] = baseColor[1];
+    nodeColors[i*3+2] = baseColor[2];
   }
   nodeGeo.setAttribute('color', new THREE.BufferAttribute(nodeColors, 3));
 
-  const nodeMat = new THREE.PointsMaterial({
+  const nodePoints = new THREE.Points(nodeGeo, new THREE.PointsMaterial({
     vertexColors: true, size: 5, sizeAttenuation: false,
     depthTest: true, depthWrite: true,
-  });
-  skelNodePoints = new THREE.Points(nodeGeo, nodeMat);
-  skelGroup.add(skelNodePoints);
+  }));
+  group.add(nodePoints);
 
-  // ── Lines mode ─────────────────────────────────────────────────
+  // ── Lines (colored by skeleton identity) ────────────────────────
+  let lines = null;
   if (nEdges > 0 && positions) {
     const geo = new THREE.BufferGeometry();
-    const posArr = new Float32Array(positions);
-    geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
 
-    const rArr = new Float32Array(edgeRadii);
-    const erMin = Math.min(...rArr), erMax = Math.max(...rArr);
     const colorArr = new Float32Array(nEdges * 6);
     for (let i = 0; i < nEdges; i++) {
-      const t = erMax > erMin ? (rArr[i] - erMin) / (erMax - erMin) : 0.5;
-      const [r, g, b] = radiusToColor(t);
-      colorArr[i*6]=r; colorArr[i*6+1]=g; colorArr[i*6+2]=b;
-      colorArr[i*6+3]=r; colorArr[i*6+4]=g; colorArr[i*6+5]=b;
+      colorArr[i*6]=baseColor[0]; colorArr[i*6+1]=baseColor[1]; colorArr[i*6+2]=baseColor[2];
+      colorArr[i*6+3]=baseColor[0]; colorArr[i*6+4]=baseColor[1]; colorArr[i*6+5]=baseColor[2];
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colorArr, 3));
-    skelLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 }));
-    skelGroup.add(skelLines);
+    lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 }));
+    group.add(lines);
   }
 
-  // ── Tubes mode (built lazily) ──────────────────────────────────
-  const showTubes = document.getElementById('tubeToggle').checked;
-  if (showTubes) {
-    buildTubes();
-    if (skelLines) skelLines.visible = false;
-  }
+  scene.add(group);
 
-  scene.add(skelGroup);
+  skelGroups[name] = {
+    group, nodePoints, lines, radii: radiiArr, nNodes, nEdges,
+    color: baseColor, data,
+  };
+
+  activeSkelName = name;
   if (!meshObj) fitCamera();
+  updateLoadedPanel();
 }
 
 function buildTubes() {
-  if (skelTubes || !skelData) return;
-  const { nodes, edges, radii, nEdges } = skelData;
-  const nodesArr = new Float32Array(nodes);
-  const radiiArr = new Float32Array(radii);
-  const rMin = Math.min(...radiiArr), rMax = Math.max(...radiiArr);
-
-  skelTubes = new THREE.Group();
-  const segments = 6;  // lower = faster
-
-  for (let i = 0; i < nEdges; i++) {
-    const a = edges[i * 2], b = edges[i * 2 + 1];
-    const ax = nodesArr[a*3], ay = nodesArr[a*3+1], az = nodesArr[a*3+2];
-    const bx = nodesArr[b*3], by = nodesArr[b*3+1], bz = nodesArr[b*3+2];
-
-    const rA = radiiArr[a], rB = radiiArr[b];
-    const dx = bx-ax, dy = by-ay, dz = bz-az;
-    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
-    if (len < 1e-6) continue;
-
-    const cylGeo = new THREE.CylinderGeometry(rB, rA, len, segments, 1, true);
-
-    // Color
-    const t = rMax > rMin ? ((rA+rB)/2 - rMin) / (rMax - rMin) : 0.5;
-    const [cr, cg, cb] = radiusToColor(t);
-    const cylMat = new THREE.MeshPhongMaterial({
-      color: new THREE.Color(cr, cg, cb),
-      transparent: true, opacity: 0.8,
-    });
-
-    const cyl = new THREE.Mesh(cylGeo, cylMat);
-
-    // Position at midpoint
-    cyl.position.set((ax+bx)/2, (ay+by)/2, (az+bz)/2);
-
-    // Orient along edge direction
-    const dir = new THREE.Vector3(dx, dy, dz).normalize();
-    const up = new THREE.Vector3(0, 1, 0);
-    const quat = new THREE.Quaternion().setFromUnitVectors(up, dir);
-    cyl.quaternion.copy(quat);
-
-    skelTubes.add(cyl);
-  }
-  skelGroup.add(skelTubes);
+  // TODO: rebuild for multi-skeleton support
 }
 
 // ── Fit camera ───────────────────────────────────────────────────────
@@ -465,9 +425,11 @@ function fitCamera() {
     meshGeometry.computeBoundingBox();
     box.union(meshGeometry.boundingBox);
   }
-  if (skelGroup) {
-    const skelBox = new THREE.Box3().setFromObject(skelGroup);
-    box.union(skelBox);
+  for (const sg of Object.values(skelGroups)) {
+    if (sg && sg.group) {
+      const skelBox = new THREE.Box3().setFromObject(sg.group);
+      box.union(skelBox);
+    }
   }
   if (box.isEmpty()) return;
 
@@ -508,15 +470,7 @@ function setupControls() {
     if (wireframeObj) wireframeObj.visible = e.target.checked;
   });
   document.getElementById('tubeToggle').addEventListener('change', (e) => {
-    if (!skelGroup) return;
-    if (e.target.checked) {
-      buildTubes();
-      if (skelLines) skelLines.visible = false;
-      if (skelTubes) skelTubes.visible = true;
-    } else {
-      if (skelLines) skelLines.visible = true;
-      if (skelTubes) skelTubes.visible = false;
-    }
+    // TODO: tube mode for multiple skeletons
   });
   document.getElementById('opacitySlider').addEventListener('input', (e) => {
     const val = parseInt(e.target.value) / 100;
@@ -541,46 +495,56 @@ function onClickSelect(event) {
   const pickTarget = document.getElementById('pickTarget').value;
 
   if (pickTarget === 'skeleton') {
-    if (!skelNodePoints) return;
+    // Find closest node across all skeletons
     const camDist = camera.position.distanceTo(controls.target);
     raycaster.params.Points.threshold = camDist * 0.02;
-    const nodeHits = raycaster.intersectObject(skelNodePoints);
-    if (nodeHits.length === 0) return;
+    let bestHit = null, bestSkelName = null, bestDist = Infinity;
+    for (const [sname, sg] of Object.entries(skelGroups)) {
+      if (!sg || !sg.nodePoints) continue;
+      const hits = raycaster.intersectObject(sg.nodePoints);
+      if (hits.length > 0 && hits[0].distance < bestDist) {
+        bestHit = hits[0]; bestSkelName = sname; bestDist = hits[0].distance;
+      }
+    }
+    if (!bestHit) return;
+    const skelNodeRadii = skelGroups[bestSkelName].radii;
+    const skelColor = skelGroups[bestSkelName].color;
 
-    const nodeIndex = nodeHits[0].index;
-    const point = nodeHits[0].point;
+    const nodeIndex = bestHit.index;
+    const point = bestHit.point;
     const radius = skelNodeRadii ? skelNodeRadii[nodeIndex] : null;
+    const key = `${bestSkelName}:${nodeIndex}`;
 
     // Click same node again → deselect
-    if (selectedNodeMesh && selectedNodeMesh.userData.nodeIndex === nodeIndex) {
-      scene.remove(selectedNodeMesh); selectedNodeMesh.geometry.dispose(); selectedNodeMesh.material.dispose();
-      selectedNodeMesh = null;
-      document.getElementById('selDetail').innerHTML = '';
+    if (selectedNodes[key]) {
+      scene.remove(selectedNodes[key].mesh);
+      selectedNodes[key].mesh.geometry.dispose();
+      selectedNodes[key].mesh.material.dispose();
+      delete selectedNodes[key];
+      updateNodeSelectionDisplay();
+      syncNodeSelections();
       return;
     }
 
-    const nodeInfo = {
-      nodeIndex,
-      point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)],
-      radius: radius !== null ? radius.toFixed(2) : null,
-    };
-    document.getElementById('selDetail').innerHTML =
-      `<div>Node: <b>${nodeIndex}</b></div>` +
-      `<div>Radius: <b>${radius !== null ? radius.toFixed(1) : '-'}</b></div>` +
-      `<div>Pos: ${nodeInfo.point.join(', ')}</div>`;
-
-    // Highlight selected node with a sphere
-    if (selectedNodeMesh) { scene.remove(selectedNodeMesh); selectedNodeMesh.geometry.dispose(); selectedNodeMesh.material.dispose(); }
+    // Add to selection
     const sphereR = radius !== null ? radius : 100;
     const sphereGeo = new THREE.SphereGeometry(sphereR, 16, 12);
-    const sphereMat = new THREE.MeshPhongMaterial({ color: 0xff4444, transparent: true, opacity: 0.6, depthTest: true });
-    selectedNodeMesh = new THREE.Mesh(sphereGeo, sphereMat);
-    selectedNodeMesh.position.copy(point);
-    selectedNodeMesh.userData.nodeIndex = nodeIndex;
-    scene.add(selectedNodeMesh);
+    const sc = skelColor || [1, 0.3, 0.3];
+    const sphereMat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(sc[0], sc[1], sc[2]),
+      transparent: true, opacity: 0.4, depthTest: true,
+    });
+    const sphereMesh = new THREE.Mesh(sphereGeo, sphereMat);
+    sphereMesh.position.copy(point);
+    scene.add(sphereMesh);
 
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'node_selection', payload: nodeInfo }));
-    else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nodeSelection: nodeInfo }) }).catch(() => {});
+    selectedNodes[key] = {
+      mesh: sphereMesh, skelName: bestSkelName, nodeIndex, radius,
+      point: [point.x, point.y, point.z],
+    };
+
+    updateNodeSelectionDisplay();
+    syncNodeSelections();
     return;
   }
 
@@ -608,6 +572,42 @@ function onClickSelect(event) {
 
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'selection', payload: selInfo }));
   else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selInfo) }).catch(() => {});
+}
+
+// ── Node selection display & sync ─────────────────────────────────────
+function updateNodeSelectionDisplay() {
+  const keys = Object.keys(selectedNodes);
+  if (keys.length === 0) {
+    document.getElementById('selDetail').innerHTML = '';
+    return;
+  }
+  let html = '';
+  for (const key of keys) {
+    const s = selectedNodes[key];
+    const c = skelGroups[s.skelName] ? skelGroups[s.skelName].color : [1,1,1];
+    const rgb = `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`;
+    html += `<div style="color:${rgb}">Node ${s.nodeIndex} (${s.skelName}) r=${s.radius !== null ? s.radius.toFixed(0) : '?'}</div>`;
+  }
+  document.getElementById('selDetail').innerHTML = html;
+}
+
+function syncNodeSelections() {
+  const payload = {};
+  for (const [key, s] of Object.entries(selectedNodes)) {
+    payload[key] = {
+      skelName: s.skelName, nodeIndex: s.nodeIndex,
+      radius: s.radius, point: s.point.map(v => v.toFixed(2)),
+    };
+  }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'node_selection', payload }));
+  } else {
+    fetch('/update_selection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeSelections: payload }),
+    }).catch(() => {});
+  }
 }
 
 // ── Manual highlight ─────────────────────────────────────────────────
@@ -813,7 +813,22 @@ function connectWebSocket() {
     else if (msg.type === 'camera_command') applyCameraCommand(msg.payload);
     else if (msg.type === 'reload') window.location.reload();
     else if (msg.type === 'mesh_loaded') { buildMesh(msg.payload); updateLoadedPanel(); }
-    else if (msg.type === 'skeleton_loaded') { buildSkeleton(msg.payload); updateLoadedPanel(); }
+    else if (msg.type === 'skeleton_loaded') { buildSkeleton(msg.payload); }
+    else if (msg.type === 'skeleton_removed') {
+      const sname = msg.payload && msg.payload.name;
+      if (sname && skelGroups[sname]) {
+        scene.remove(skelGroups[sname].group);
+        delete skelGroups[sname];
+      }
+      updateLoadedPanel();
+      if (Object.keys(skelGroups).length === 0 && !meshObj) document.getElementById('empty-hint').style.display = 'block';
+    }
+    else if (msg.type === 'all_skeletons_removed') {
+      for (const sg of Object.values(skelGroups)) scene.remove(sg.group);
+      for (const k of Object.keys(skelGroups)) delete skelGroups[k];
+      updateLoadedPanel();
+      if (!meshObj) document.getElementById('empty-hint').style.display = 'block';
+    }
     else if (msg.type === 'mesh_removed') {
       if (meshObj) { scene.remove(meshObj); meshObj.geometry.dispose(); meshObj.material.dispose(); meshObj = null; }
       if (wireframeObj) { scene.remove(wireframeObj); wireframeObj.geometry.dispose(); wireframeObj.material.dispose(); wireframeObj = null; }
@@ -821,13 +836,7 @@ function connectWebSocket() {
       document.getElementById('nVerts').textContent = '-';
       document.getElementById('nFaces').textContent = '-';
       updateLoadedPanel();
-      if (!skelGroup) document.getElementById('empty-hint').style.display = 'block';
-    }
-    else if (msg.type === 'skeleton_removed') {
-      if (skelGroup) { scene.remove(skelGroup); skelGroup = null; }
-      document.getElementById('nNodes').textContent = '-';
-      updateLoadedPanel();
-      if (!meshObj) document.getElementById('empty-hint').style.display = 'block';
+      if (Object.keys(skelGroups).length === 0) document.getElementById('empty-hint').style.display = 'block';
     }
   };
   ws.onerror = (err) => console.error('[skeliner] WebSocket error:', err);
