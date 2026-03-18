@@ -420,8 +420,38 @@ function buildSkeleton(data) {
   updateLoadedPanel();
 }
 
-function buildTubes() {
-  // TODO: rebuild for multi-skeleton support
+function buildTubes(name) {
+  const sg = skelGroups[name];
+  if (!sg || sg.tubes) return;
+  const { nodes, edges, radii, nEdges } = sg.data;
+  const nodesArr = new Float32Array(nodes);
+  const radiiArr = new Float32Array(radii);
+  const baseColor = sg.color;
+  const tubes = new THREE.Group();
+  const segments = 6;
+
+  for (let i = 0; i < nEdges; i++) {
+    const a = edges[i * 2], b = edges[i * 2 + 1];
+    const ax = nodesArr[a*3], ay = nodesArr[a*3+1], az = nodesArr[a*3+2];
+    const bx = nodesArr[b*3], by = nodesArr[b*3+1], bz = nodesArr[b*3+2];
+    const rA = radiiArr[a], rB = radiiArr[b];
+    const dx = bx-ax, dy = by-ay, dz = bz-az;
+    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (len < 1e-6) continue;
+
+    const cylGeo = new THREE.CylinderGeometry(rB, rA, len, segments, 1, true);
+    const cylMat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(baseColor[0], baseColor[1], baseColor[2]),
+      transparent: true, opacity: 0.6,
+    });
+    const cyl = new THREE.Mesh(cylGeo, cylMat);
+    cyl.position.set((ax+bx)/2, (ay+by)/2, (az+bz)/2);
+    const dir = new THREE.Vector3(dx, dy, dz).normalize();
+    cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    tubes.add(cyl);
+  }
+  sg.tubes = tubes;
+  sg.group.add(tubes);
 }
 
 // ── Fit camera ───────────────────────────────────────────────────────
@@ -477,7 +507,17 @@ function setupControls() {
     if (wireframeObj) wireframeObj.visible = e.target.checked;
   });
   document.getElementById('tubeToggle').addEventListener('change', (e) => {
-    // TODO: tube mode for multiple skeletons
+    for (const [name, sg] of Object.entries(skelGroups)) {
+      if (!sg) continue;
+      if (e.target.checked) {
+        buildTubes(name);
+        if (sg.lines) sg.lines.visible = false;
+        if (sg.tubes) sg.tubes.visible = true;
+      } else {
+        if (sg.lines) sg.lines.visible = true;
+        if (sg.tubes) sg.tubes.visible = false;
+      }
+    }
   });
   document.getElementById('opacitySlider').addEventListener('input', (e) => {
     const val = parseInt(e.target.value) / 100;

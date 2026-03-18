@@ -135,7 +135,7 @@ def load_swc(
     # --- core arrays ----------------------------------------------------
     nodes_arr = np.asarray(xyz, dtype=np.float64) * scale
     radii_arr = np.asarray(radii, dtype=np.float64) * scale
-    radii_dict = {"median": radii_arr, "mean": radii_arr, "trim": radii_arr}
+    radii_dict = {"median": radii_arr, "mean": radii_arr.copy(), "trim": radii_arr.copy()}
     ntype_arr = np.asarray(ntype, dtype=np.int8)
     # --- edges (parent IDs → 0-based indices) ---------------------------
     id_map = {old: new for new, old in enumerate(ids)}
@@ -150,7 +150,7 @@ def load_swc(
         edges_arr = np.unique(edges_arr, axis=0)
 
     # --- minimal spherical soma around node 0 --------------------------
-    soma_centre = nodes_arr[0]
+    soma_centre = nodes_arr[0].copy()
     soma_radius = radii_arr[0]
     soma = Soma.from_sphere(soma_centre, soma_radius, verts=None)
 
