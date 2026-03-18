@@ -621,14 +621,29 @@ function updateNodeSelectionDisplay() {
     document.getElementById('selDetail').innerHTML = '';
     return;
   }
-  let html = '';
+  const container = document.getElementById('selDetail');
+  container.innerHTML = '';
   for (const key of keys) {
     const s = selectedNodes[key];
     const c = skelGroups[s.skelName] ? skelGroups[s.skelName].color : [1,1,1];
     const rgb = `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`;
-    html += `<div style="color:${rgb}">Node ${s.nodeIndex} (${s.skelName}) r=${s.radius !== null ? s.radius.toFixed(0) : '?'}</div>`;
+    const div = document.createElement('div');
+    div.className = 'hl-item';
+    div.style.color = rgb;
+    div.innerHTML = `<span>Node ${s.nodeIndex} (${s.skelName}) r=${s.radius !== null ? s.radius.toFixed(0) : '?'}</span>`;
+    const btn = document.createElement('button');
+    btn.textContent = 'x';
+    btn.addEventListener('click', () => {
+      scene.remove(selectedNodes[key].mesh);
+      selectedNodes[key].mesh.geometry.dispose();
+      selectedNodes[key].mesh.material.dispose();
+      delete selectedNodes[key];
+      updateNodeSelectionDisplay();
+      syncNodeSelections();
+    });
+    div.appendChild(btn);
+    container.appendChild(div);
   }
-  document.getElementById('selDetail').innerHTML = html;
 }
 
 function syncNodeSelections() {
