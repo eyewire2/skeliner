@@ -89,6 +89,7 @@
   <div style="color:#888;margin-bottom:4px;">Loaded:</div>
   <div id="loadedMesh" class="item" style="display:none;">
     <span class="name" id="meshName">-</span>
+    <button id="toggleMesh" style="font-size:10px;cursor:pointer;margin-left:4px;">hide</button>
     <button id="removeMesh">x</button>
   </div>
   <div id="loadedSkel"></div>
@@ -116,6 +117,7 @@ let stateDebounceTimer = null;
 const STATE_DEBOUNCE_MS = 300;
 
 let annotationMeshes = [];
+let markerMeshes = [];
 let manualHighlightFaces = new Set();
 let manualHighlightMesh = null;
 
@@ -189,6 +191,14 @@ async function init() {
   });
 
   document.getElementById('removeMesh').addEventListener('click', () => removeItem('mesh'));
+  document.getElementById('toggleMesh').addEventListener('click', () => {
+    const btn = document.getElementById('toggleMesh');
+    if (meshObj) {
+      meshObj.visible = !meshObj.visible;
+      if (wireframeObj) wireframeObj.visible = meshObj.visible && document.getElementById('wireToggle').checked;
+      btn.textContent = meshObj.visible ? 'hide' : 'show';
+    }
+  });
   document.getElementById('hlClearAll').addEventListener('click', clearAllAnnotations);
 
   connectWebSocket();
@@ -226,6 +236,17 @@ async function updateLoadedPanel() {
         const c = sinfo.color || [1,1,1];
         const rgb = `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`;
         div.innerHTML = `<span class="name" style="color:${rgb}">${sname} (${sinfo.nNodes.toLocaleString()}n)</span>`;
+        const toggleBtn = document.createElement('button');
+        toggleBtn.textContent = 'hide';
+        toggleBtn.style.cssText = 'font-size:10px;cursor:pointer;margin-left:4px;';
+        toggleBtn.addEventListener('click', () => {
+          const sg = skelGroups[sname];
+          if (!sg) return;
+          const vis = !sg.group.visible;
+          sg.group.visible = vis;
+          toggleBtn.textContent = vis ? 'hide' : 'show';
+        });
+        div.appendChild(toggleBtn);
         const btn = document.createElement('button');
         btn.textContent = 'x';
         btn.addEventListener('click', () => removeItem('skeleton', sname));
@@ -774,21 +795,58 @@ let currentAnnotations = null;  // cached for panel rebuild
 function applyAnnotations(annotations) {
   for (const m of annotationMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
   annotationMeshes = [];
+  for (const m of markerMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+  markerMeshes = [];
   currentAnnotations = annotations;
   updateHighlightsPanel();
-  if (!annotations || !annotations.highlights || !meshGeometry) return;
-  const posAttr = meshGeometry.getAttribute('position');
-  for (const group of annotations.highlights) {
-    const fi = group.faces || []; if (fi.length === 0) continue;
-    const color = group.color || [1, 0, 0];
-    const pos = new Float32Array(fi.length * 9);
-    for (let j = 0; j < fi.length; j++) { const base = fi[j] * 9; for (let k = 0; k < 9; k++) pos[j * 9 + k] = posAttr.array[base + k]; }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.computeVertexNormals();
-    const mat = new THREE.MeshPhongMaterial({ color: new THREE.Color(color[0], color[1], color[2]), side: THREE.DoubleSide, clippingPlanes: [clipPlane], transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -1 });
-    const hlm = new THREE.Mesh(geo, mat);
-    scene.add(hlm); annotationMeshes.push(hlm);
+  if (!annotations) return;
+  // Face highlights
+  if (annotations.highlights && meshGeometry) {
+    const posAttr = meshGeometry.getAttribute('position');
+    for (const group of annotations.highlights) {
+      const fi = group.faces || []; if (fi.length === 0) continue;
+      const color = group.color || [1, 0, 0];
+      const pos = new Float32Array(fi.length * 9);
+      for (let j = 0; j < fi.length; j++) { const base = fi[j] * 9; for (let k = 0; k < 9; k++) pos[j * 9 + k] = posAttr.array[base + k]; }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      geo.computeVertexNormals();
+      const mat = new THREE.MeshPhongMaterial({ color: new THREE.Color(color[0], color[1], color[2]), side: THREE.DoubleSide, clippingPlanes: [clipPlane], transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -1 });
+      const hlm = new THREE.Mesh(geo, mat);
+      scene.add(hlm); annotationMeshes.push(hlm);
+    }
+  }
+  // Markers (spheres at arbitrary positions)
+  if (annotations.markers) {
+    for (const mk of annotations.markers) {
+      const pos = mk.position || [0,0,0];
+      const color = mk.color || [1,1,1];
+      const radius = mk.radius || 50;
+      const geo = new THREE.SphereGeometry(radius, 12, 8);
+      const mat = new THREE.MeshPhongMaterial({
+        color: new THREE.Color(color[0], color[1], color[2]),
+        transparent: true, opacity: mk.opacity !== undefined ? mk.opacity : 0.8,
+        depthTest: true,
+      });
+      const sphere = new THREE.Mesh(geo, mat);
+      sphere.position.set(pos[0], pos[1], pos[2]);
+      scene.add(sphere);
+      markerMeshes.push(sphere);
+    }
+  }
+  // Edges between markers
+  if (annotations.edges) {
+    for (const edge of annotations.edges) {
+      const a = edge[0], b = edge[1];
+      const color = edge[2] || [1,1,1];
+      const pts = new Float32Array([a[0],a[1],a[2], b[0],b[1],b[2]]);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color[0], color[1], color[2]), linewidth: 2 });
+      const line = new THREE.LineSegments(geo, mat);
+      scene.add(line);
+      markerMeshes.push(line);
+    }
   }
 }
 
@@ -796,26 +854,62 @@ function updateHighlightsPanel() {
   const list = document.getElementById('hlList');
   list.innerHTML = '';
   const clearRow = document.getElementById('hlClearAllRow');
-  if (!currentAnnotations || !currentAnnotations.highlights || currentAnnotations.highlights.length === 0) {
+  const hasHighlights = currentAnnotations && currentAnnotations.highlights && currentAnnotations.highlights.length > 0;
+  const hasMarkers = currentAnnotations && currentAnnotations.markers && currentAnnotations.markers.length > 0;
+  if (!hasHighlights && !hasMarkers) {
     clearRow.style.display = 'none';
     return;
   }
   clearRow.style.display = 'block';
-  currentAnnotations.highlights.forEach((group, idx) => {
-    const n = (group.faces || []).length;
-    if (n === 0) return;
-    const color = group.color || [1, 0, 0];
-    const label = group.label || `Group ${idx}`;
-    const div = document.createElement('div');
-    div.className = 'hl-item';
-    const rgb = `rgb(${Math.round(color[0]*255)},${Math.round(color[1]*255)},${Math.round(color[2]*255)})`;
-    div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}"></span>${label} (${n.toLocaleString()})</span>`;
-    const btn = document.createElement('button');
-    btn.textContent = 'x';
-    btn.addEventListener('click', () => removeAnnotationGroup(idx));
-    div.appendChild(btn);
-    list.appendChild(div);
-  });
+  if (hasHighlights) {
+    currentAnnotations.highlights.forEach((group, idx) => {
+      const n = (group.faces || []).length;
+      if (n === 0) return;
+      const color = group.color || [1, 0, 0];
+      const label = group.label || `Group ${idx}`;
+      const div = document.createElement('div');
+      div.className = 'hl-item';
+      const rgb = `rgb(${Math.round(color[0]*255)},${Math.round(color[1]*255)},${Math.round(color[2]*255)})`;
+      div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}"></span>${label} (${n.toLocaleString()})</span>`;
+      const btn = document.createElement('button');
+      btn.textContent = 'x';
+      btn.addEventListener('click', () => removeAnnotationGroup(idx));
+      div.appendChild(btn);
+      list.appendChild(div);
+    });
+  }
+  if (hasMarkers) {
+    currentAnnotations.markers.forEach((mk, idx) => {
+      const color = mk.color || [1, 1, 1];
+      const label = mk.label || `Marker ${idx}`;
+      const div = document.createElement('div');
+      div.className = 'hl-item';
+      const rgb = `rgb(${Math.round(color[0]*255)},${Math.round(color[1]*255)},${Math.round(color[2]*255)})`;
+      div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}; border-radius:50%"></span>${label}</span>`;
+      const btn = document.createElement('button');
+      btn.textContent = 'x';
+      btn.addEventListener('click', () => removeMarker(idx));
+      div.appendChild(btn);
+      list.appendChild(div);
+    });
+  }
+}
+
+function removeMarker(idx) {
+  if (!currentAnnotations || !currentAnnotations.markers) return;
+  currentAnnotations.markers.splice(idx, 1);
+  if (markerMeshes[idx]) {
+    scene.remove(markerMeshes[idx]);
+    markerMeshes[idx].geometry.dispose();
+    markerMeshes[idx].material.dispose();
+    markerMeshes.splice(idx, 1);
+  }
+  updateHighlightsPanel();
+  fetch('/update_annotations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(currentAnnotations),
+  }).catch(() => {});
 }
 
 function removeAnnotationGroup(idx) {
@@ -840,7 +934,9 @@ function removeAnnotationGroup(idx) {
 function clearAllAnnotations() {
   for (const m of annotationMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
   annotationMeshes = [];
-  currentAnnotations = { highlights: [] };
+  for (const m of markerMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+  markerMeshes = [];
+  currentAnnotations = { highlights: [], markers: [] };
   updateHighlightsPanel();
   fetch('/update_annotations', {
     method: 'POST',
