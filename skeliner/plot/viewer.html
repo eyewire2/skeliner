@@ -110,7 +110,6 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 let scene, camera, renderer, controls;
 let meshObj, wireframeObj, meshGeometry, clipPlane;
 let skelGroups = {};  // keyed by skeleton name
-let faceWindingNumbers = null;
 let ws = null;
 let stateDebounceTimer = null;
 const STATE_DEBOUNCE_MS = 300;
@@ -290,13 +289,11 @@ function buildMesh(data) {
   if (wireframeObj) { scene.remove(wireframeObj); wireframeObj.geometry.dispose(); wireframeObj.material.dispose(); wireframeObj = null; }
   meshGeometry = null;
 
-  const { vertices, faces, nVertices, nFaces, faceWindingNumbers: fwn } = data;
+  const { vertices, faces, nVertices, nFaces } = data;
 
   document.getElementById('nVerts').textContent = nVertices.toLocaleString();
   document.getElementById('nFaces').textContent = nFaces.toLocaleString();
   document.getElementById('empty-hint').style.display = 'none';
-
-  faceWindingNumbers = fwn ? new Float32Array(fwn) : null;
 
   meshGeometry = new THREE.BufferGeometry();
   const positions = new Float32Array(nFaces * 9);
@@ -310,8 +307,7 @@ function buildMesh(data) {
       positions[i * 9 + 3 + k] = verts[b * 3 + k];
       positions[i * 9 + 6 + k] = verts[c * 3 + k];
     }
-    const wn = faceWindingNumbers ? faceWindingNumbers[i] : 0;
-    const [r, g, bl] = wnToColor(wn);
+    const r = 0.55, g = 0.55, bl = 0.6;
     for (let v = 0; v < 3; v++) {
       colors[i * 9 + v * 3] = r;
       colors[i * 9 + v * 3 + 1] = g;
@@ -485,15 +481,6 @@ function fitCamera() {
   clipSlider._bsCenter = sphere.center.z;
 }
 
-// ── Winding number → RGB colour ──────────────────────────────────────
-function wnToColor(wn) {
-  const t = Math.min(Math.max(wn, 0), 1.5);
-  if (t < 0.3) { const u = t / 0.3; return [0.05 + 0.1 * u, 0.1 + 0.4 * u, 0.3 + 0.3 * u]; }
-  else if (t < 0.6) { const u = (t - 0.3) / 0.3; return [0.15 + 0.65 * u, 0.5 + 0.3 * u, 0.6]; }
-  else if (t < 1.0) { const u = (t - 0.6) / 0.4; return [0.8 + 0.2 * u, 0.8 - 0.4 * u, 0.6 - 0.5 * u]; }
-  else { const u = Math.min((t - 1.0) / 0.5, 1.0); return [1.0, 0.4 - 0.3 * u, 0.1 - 0.1 * u]; }
-}
-
 // ── Controls ─────────────────────────────────────────────────────────
 function setupControls() {
   document.getElementById('clipSlider').addEventListener('input', (e) => {
@@ -602,8 +589,6 @@ function onClickSelect(event) {
   const hit = hits[0];
   const faceIndex = hit.faceIndex;
   const point = hit.point;
-  const wn = faceWindingNumbers ? faceWindingNumbers[faceIndex] : null;
-
   if (event.shiftKey) {
     if (manualHighlightFaces.has(faceIndex)) manualHighlightFaces.delete(faceIndex);
     else manualHighlightFaces.add(faceIndex);
@@ -612,9 +597,9 @@ function onClickSelect(event) {
     return;
   }
 
-  const selInfo = { faceIndex, point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)], windingNumber: wn !== null ? wn.toFixed(4) : null };
+  const selInfo = { faceIndex, point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)] };
   document.getElementById('selDetail').innerHTML =
-    `<div>Face: <b>${faceIndex}</b></div><div>WN: <b>${wn !== null ? wn.toFixed(4) : '-'}</b></div><div>Pos: ${selInfo.point.join(', ')}</div>`;
+    `<div>Face: <b>${faceIndex}</b></div><div>Pos: ${selInfo.point.join(', ')}</div>`;
 
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'selection', payload: selInfo }));
   else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selInfo) }).catch(() => {});
@@ -881,7 +866,7 @@ function connectWebSocket() {
     else if (msg.type === 'mesh_removed') {
       if (meshObj) { scene.remove(meshObj); meshObj.geometry.dispose(); meshObj.material.dispose(); meshObj = null; }
       if (wireframeObj) { scene.remove(wireframeObj); wireframeObj.geometry.dispose(); wireframeObj.material.dispose(); wireframeObj = null; }
-      meshGeometry = null; faceWindingNumbers = null;
+      meshGeometry = null;
       document.getElementById('nVerts').textContent = '-';
       document.getElementById('nFaces').textContent = '-';
       updateLoadedPanel();

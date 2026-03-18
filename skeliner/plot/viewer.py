@@ -49,27 +49,6 @@ def _mesh_to_buffers(mesh: trimesh.Trimesh) -> dict[str, Any]:
     }
 
 
-def _compute_face_winding(mesh: trimesh.Trimesh, offset: float = 5.0) -> np.ndarray:
-    try:
-        import igl
-    except ImportError:
-        return np.zeros(len(mesh.faces), dtype=np.float32)
-
-    V = np.asarray(mesh.vertices, dtype=np.float64)
-    F = np.asarray(mesh.faces, dtype=np.int32)
-    centroids = mesh.triangles_center
-    normals = mesh.face_normals
-
-    query_out = centroids + offset * normals
-    query_in = centroids - offset * normals
-
-    wn_out = igl.fast_winding_number(V, F, query_out).astype(np.float32)
-    wn_in = igl.fast_winding_number(V, F, query_in).astype(np.float32)
-
-    score = (wn_out + wn_in) / 2.0
-    return score
-
-
 # ── Skeleton helpers ──────────────────────────────────────────────────
 
 def _skeleton_to_buffers(skel, centroid: np.ndarray) -> dict[str, Any]:
@@ -174,12 +153,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh_path = Path(mesh_path)
         mesh = trimesh.load_mesh(str(mesh_path), process=False)
         print(f"Loaded mesh: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
-        print("Computing face winding numbers...")
-        face_wn = _compute_face_winding(mesh)
-        print(f"Winding number range: [{face_wn.min():.3f}, {face_wn.max():.3f}]")
 
         buffers = _mesh_to_buffers(mesh)
-        buffers["faceWindingNumbers"] = face_wn.tolist()
 
         mesh_state["mesh"] = mesh
         mesh_state["buffers"] = buffers
@@ -281,20 +256,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             if suffix in (".obj", ".ply", ".stl"):
                 mesh = trimesh.load_mesh(str(tmp_path), process=False)
                 print(f"Uploaded mesh: {len(mesh.vertices):,} verts, {len(mesh.faces):,} faces")
-                face_wn = _compute_face_winding(mesh)
                 buffers = _mesh_to_buffers(mesh)
-                buffers["faceWindingNumbers"] = face_wn.tolist()
 
                 mesh_state["mesh"] = mesh
                 mesh_state["buffers"] = buffers
                 mesh_state["path"] = str(tmp_path.resolve())
                 mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
-
-                # Re-compute skeleton buffers if skeleton exists (centroid changed)
-                if skeleton_state["skeleton"] is not None:
-                    skeleton_state["buffers"] = _skeleton_to_buffers(
-                        skeleton_state["skeleton"], mesh_state["centroid"]
-                    )
 
                 # Update state file
                 current = {}
