@@ -20,6 +20,7 @@ dependencies = [
     "notebook>=7.4.7",
     "jupyter>=1.1.1",
     "pytest>=8.3.5",
+    "python-multipart>=0.0.22",
 ]
 license = "GPL-3.0-or-later"
 readme = {file = "README.md", content-type = "text/markdown"}
