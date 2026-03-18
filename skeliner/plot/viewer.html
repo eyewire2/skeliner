@@ -69,6 +69,7 @@
   <label>Clip plane: <input type="range" id="clipSlider" min="0" max="100" value="100"></label>
   <label><input type="checkbox" id="wireToggle" checked> Wireframe</label>
   <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50"></label>
+  <label>Ann: <input type="range" id="annOpacitySlider" min="0" max="100" value="90"></label>
   <label><input type="checkbox" id="tubeToggle"> Tubes</label>
   <label style="margin-left:8px;">Pick: <select id="pickTarget" style="font-size:11px;">
     <option value="mesh">Mesh</option>
@@ -513,6 +514,14 @@ function setupControls() {
       meshObj.material.opacity = val;
       meshObj.material.depthWrite = val >= 1.0;
       meshObj.material.needsUpdate = true;
+    }
+  });
+  document.getElementById('annOpacitySlider').addEventListener('input', (e) => {
+    const val = parseInt(e.target.value) / 100;
+    for (const m of annotationMeshes) {
+      m.material.transparent = true;
+      m.material.opacity = val;
+      m.material.needsUpdate = true;
     }
   });
 }

@@ -116,6 +116,48 @@ def _load_skeleton_as_nm(path: Path) -> Any:
         raise ValueError(f"Unsupported skeleton format: {suffix}")
 
 
+def _is_l2_graph(path: Path) -> bool:
+    """Check if an npz file is an L2 graph (not a skeliner skeleton)."""
+    with np.load(path, allow_pickle=False) as data:
+        return "graph_nodes" in data and "graph_edges" in data
+
+
+def _l2_graph_to_buffers(path: Path, centroid: np.ndarray) -> dict[str, Any]:
+    """Load an L2 supervoxel graph and convert to skeleton-like buffers."""
+    with np.load(path, allow_pickle=False) as data:
+        nodes = np.asarray(data["graph_nodes"], dtype=np.float32) - centroid
+        edges = np.asarray(data["graph_edges"], dtype=np.int32)
+        radii = np.zeros(len(nodes), dtype=np.float32)
+
+        if "max_dt_nm" in data:
+            n_l2 = len(data["max_dt_nm"])
+            l2_radii = np.asarray(data["max_dt_nm"], dtype=np.float32)
+            orig_edges = np.asarray(data["edges"], dtype=np.int32)
+            n_edges = len(orig_edges)
+            radii[:n_l2] = l2_radii
+            # boundary_src [N..N+M-1] inherits from src L2 node
+            radii[n_l2:n_l2 + n_edges] = l2_radii[orig_edges[:, 0]]
+            # boundary_dst [N+M..N+2M-1] inherits from dst L2 node
+            radii[n_l2 + n_edges:] = l2_radii[orig_edges[:, 1]]
+
+    positions = np.empty((len(edges) * 2, 3), dtype=np.float32)
+    positions[0::2] = nodes[edges[:, 0]]
+    positions[1::2] = nodes[edges[:, 1]]
+    edge_radii = (radii[edges[:, 0]] + radii[edges[:, 1]]) / 2.0
+
+    return {
+        "nodes": nodes.ravel().tolist(),
+        "edges": edges.ravel().tolist(),
+        "positions": positions.ravel().tolist(),
+        "radii": radii.tolist(),
+        "edgeRadii": edge_radii.tolist(),
+        "nNodes": len(nodes),
+        "nEdges": len(edges),
+    }
+
+
+
+
 def _get_viewer_html() -> str:
     html_path = Path(__file__).parent / "viewer.html"
     return html_path.read_text(encoding="utf-8")
@@ -277,15 +319,40 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 await broadcast({"type": "mesh_loaded", "payload": buffers})
                 # Re-send all skeletons (centroid changed)
                 for sname, sstate in skeleton_states.items():
-                    sstate["buffers"] = _skeleton_to_buffers(
-                        sstate["skeleton"], mesh_state["centroid"]
-                    )
+                    if sstate.get("l2_graph"):
+                        sstate["buffers"] = _l2_graph_to_buffers(
+                            Path(sstate["path"]), mesh_state["centroid"]
+                        )
+                    else:
+                        sstate["buffers"] = _skeleton_to_buffers(
+                            sstate["skeleton"], mesh_state["centroid"]
+                        )
                     sstate["buffers"]["color"] = sstate["color"]
                     await broadcast({"type": "skeleton_loaded", "payload": {
                         "name": sname, **sstate["buffers"]
                     }})
 
                 return JSONResponse({"ok": True, "type": "mesh", "name": filename})
+
+            elif suffix == ".npz" and _is_l2_graph(tmp_path):
+                buffers = _l2_graph_to_buffers(tmp_path, mesh_state["centroid"])
+                print(f"Uploaded L2 graph: {buffers['nNodes']:,} nodes, {buffers['nEdges']:,} edges")
+
+                color = SKEL_COLORS[len(skeleton_states) % len(SKEL_COLORS)]
+                buffers["color"] = color
+
+                skeleton_states[filename] = {
+                    "skeleton": None,
+                    "path": str(tmp_path.resolve()),
+                    "buffers": buffers,
+                    "color": color,
+                    "l2_graph": True,
+                }
+
+                await broadcast({"type": "skeleton_loaded", "payload": {
+                    "name": filename, **buffers
+                }})
+                return JSONResponse({"ok": True, "type": "skeleton", "name": filename})
 
             elif suffix in (".swc", ".npz"):
                 skel = _load_skeleton_as_nm(tmp_path)
@@ -324,9 +391,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             mesh_state["path"] = None
             mesh_state["centroid"] = np.zeros(3, dtype=np.float32)
             for sname, sstate in skeleton_states.items():
-                sstate["buffers"] = _skeleton_to_buffers(
-                    sstate["skeleton"], mesh_state["centroid"]
-                )
+                if sstate.get("l2_graph"):
+                    sstate["buffers"] = _l2_graph_to_buffers(
+                        Path(sstate["path"]), mesh_state["centroid"]
+                    )
+                else:
+                    sstate["buffers"] = _skeleton_to_buffers(
+                        sstate["skeleton"], mesh_state["centroid"]
+                    )
                 sstate["buffers"]["color"] = sstate["color"]
                 await broadcast({"type": "skeleton_loaded", "payload": {
                     "name": sname, **sstate["buffers"]
