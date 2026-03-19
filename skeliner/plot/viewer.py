@@ -508,7 +508,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return JSONResponse({"ok": True, "nFaces": n_faces})
 
     async def detect_rims(request):
-        """Run rim detection and write results to annotations."""
+        """Run rim detection and write results as edge annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
@@ -517,27 +517,41 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import find_rims
 
         mesh = mesh_state["mesh"]
+        centroid = mesh_state["centroid"]
 
         def _run():
-            mask = find_rims(mesh)
-            return [int(fi) for fi in np.where(mask)[0]]
+            rims = find_rims(mesh, verbose=True)
+            verts = np.asarray(mesh.vertices, dtype=np.float32)
+            colors = [
+                [0.2, 1.0, 0.6], [0.1, 0.8, 0.9], [0.9, 1.0, 0.2],
+                [1.0, 0.5, 0.8], [0.5, 1.0, 0.4], [0.3, 0.7, 1.0],
+            ]
+            edge_groups = []
+            for i, rim_edges in enumerate(rims):
+                color = colors[i % len(colors)]
+                segments = []
+                for e in rim_edges:
+                    a = (verts[e[0]] - centroid).tolist()
+                    b = (verts[e[1]] - centroid).tolist()
+                    segments.append([a, b])
+                edge_groups.append({
+                    "segments": segments,
+                    "color": color,
+                    "label": f"rim {i} ({len(rim_edges)}e)",
+                })
+            return edge_groups, len(rims)
 
         loop = asyncio.get_event_loop()
-        faces = await loop.run_in_executor(None, _run)
+        edge_groups, n_rims = await loop.run_in_executor(None, _run)
 
         ann = {}
         if annotations_path.exists():
             ann = json.loads(annotations_path.read_text(encoding="utf-8"))
-        if "highlights" not in ann:
-            ann["highlights"] = []
-        if faces:
-            ann["highlights"].append({
-                "faces": faces,
-                "color": [0.2, 1.0, 0.6],
-                "label": f"rims ({len(faces):,})",
-            })
+        if "edge_groups" not in ann:
+            ann["edge_groups"] = []
+        ann["edge_groups"].extend(edge_groups)
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
-        return JSONResponse({"ok": True, "nFaces": len(faces)})
+        return JSONResponse({"ok": True, "nFaces": n_rims})
 
     async def detect_holes(request):
         """Run hole detection and write results to annotations."""

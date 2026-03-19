@@ -958,43 +958,92 @@ def find_rims(
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
-    gradient_threshold: float = 0.8,
+    min_pocket_size: int = 100,
     verbose: bool = False,
-) -> np.ndarray:
-    """Find rim faces — high-gradient transitions between outward and inward.
+) -> list[list[tuple[int, int]]]:
+    """Find rim edges — boundaries of negative-dot face clusters.
 
-    Rim faces mark the openings of pocket organelles where the mesh surface
-    transitions sharply from outward-facing to inward-facing.
+    Each rim is a list of edges (vertex-index pairs) forming the boundary
+    between a pocket (connected region of inward-facing faces) and the
+    outer surface.  Only pockets with at least *min_pocket_size* faces
+    produce a rim.
 
     Returns
     -------
-    np.ndarray
-        Boolean mask ``(nFaces,)`` — True for rim faces.
+    list[list[tuple[int, int]]]
+        One list of edges per pocket rim.
     """
+    from collections import defaultdict, deque
+
     outward_dots, _, _, main_face_mask = _organelle_precompute(
         mesh, radius, radius_multiplier, verbose,
     )
     n_faces = len(mesh.faces)
     adj = _face_adjacency(mesh)
-    gradient = _outward_dot_gradient(outward_dots, adj, n_faces)
 
-    rim = np.zeros(n_faces, dtype=bool)
-    for fi in range(n_faces):
-        if not main_face_mask[fi]:
+    # Build edge-to-face map
+    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi, f in enumerate(mesh.faces):
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            edge_to_face[(min(a, b), max(a, b))].append(fi)
+
+    # Connected components of negative-dot faces on main component
+    neg_idx = set(np.where((outward_dots < 0) & main_face_mask)[0].tolist())
+    visited: set[int] = set()
+    clusters: list[list[int]] = []
+    for fi in neg_idx:
+        if fi in visited:
             continue
-        if gradient[fi] < gradient_threshold:
+        cluster: list[int] = []
+        queue = deque([fi])
+        while queue:
+            curr = queue.popleft()
+            if curr in visited:
+                continue
+            visited.add(curr)
+            cluster.append(curr)
+            for nfi in adj.get(curr, set()):
+                if nfi in neg_idx and nfi not in visited:
+                    queue.append(nfi)
+        clusters.append(cluster)
+
+    # For each large-enough cluster, collect boundary edges
+    rims: list[list[tuple[int, int]]] = []
+    for cluster in clusters:
+        if len(cluster) < min_pocket_size:
             continue
-        nbs = list(adj.get(fi, set()))
-        if not nbs:
-            continue
-        nb_dots = outward_dots[nbs]
-        if nb_dots.max() > 0.2 and nb_dots.min() < -0.2:
-            rim[fi] = True
+        cset = set(cluster)
+        rim_edges: list[tuple[int, int]] = []
+        seen_edges: set[tuple[int, int]] = set()
+        for fi in cluster:
+            f = mesh.faces[fi]
+            for i in range(3):
+                e = (min(int(f[i]), int(f[(i + 1) % 3])),
+                     max(int(f[i]), int(f[(i + 1) % 3])))
+                if e in seen_edges:
+                    continue
+                seen_edges.add(e)
+                faces_on_edge = edge_to_face[e]
+                if len(faces_on_edge) == 2:
+                    other = (
+                        faces_on_edge[1]
+                        if faces_on_edge[0] in cset
+                        else faces_on_edge[0]
+                    )
+                    if other not in cset:
+                        rim_edges.append(e)
+        if rim_edges:
+            rims.append(rim_edges)
 
     if verbose:
-        print(f"[skeliner.pre] Rim faces: {rim.sum():,}")
+        print(
+            f"[skeliner.pre] Rims: {len(rims)} pockets "
+            f"(>= {min_pocket_size} faces), "
+            f"{sum(len(r) for r in rims):,} rim edges"
+        )
 
-    return rim
+    return rims
 
 
 def _face_adjacency(mesh: trimesh.Trimesh) -> dict[int, set[int]]:
@@ -1037,24 +1086,21 @@ def find_pocket_organelles(
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     grow_threshold: float = 0.1,
-    gradient_threshold: float = 0.8,
+    min_pocket_size: int = 100,
     min_cluster_size: int = 5,
     verbose: bool = False,
 ) -> np.ndarray:
     """Detect pocket organelles — membrane folds connected to the neuron surface.
 
-    Uses a rim-seeded flood-fill approach:
+    Uses rims (boundaries of negative-dot clusters) as seeds:
 
-    1. Compute per-face outward_dot and its gradient (max neighbor difference).
-    2. Identify **rim faces** — high-gradient faces at the pocket opening
-       where the surface transitions sharply from outward to inward.
-    3. Seed from the **inward side of each rim** — neighbors of rim faces
-       that have negative outward_dot.
-    4. Flood-fill from seeds, stopping at rim faces and faces with
-       ``outward_dot > grow_threshold``.
+    1. Call :func:`find_rims` to get rim edges for each pocket.
+    2. Seed from the **negative-dot faces** of each rim's pocket cluster.
+    3. Flood-fill from seeds, stopping at rim edges (sign boundary) and
+       faces with ``outward_dot > grow_threshold``.
 
     Only regions behind a rim get detected — curved surfaces without a
-    rim transition are correctly excluded.
+    rim are correctly excluded.
 
     Parameters
     ----------
@@ -1066,10 +1112,10 @@ def find_pocket_organelles(
         Multiplier for auto radius.
     grow_threshold : float
         Flood-fill will not enter faces with ``outward_dot > grow_threshold``.
-    gradient_threshold : float
-        Faces with gradient above this form the rim (flood-fill barrier).
+    min_pocket_size : int
+        Minimum negative-face cluster size to produce a rim / be detected.
     min_cluster_size : int
-        Pocket clusters smaller than this are discarded (noise).
+        Final pocket clusters smaller than this are discarded.
     verbose : bool
 
     Returns
@@ -1077,7 +1123,7 @@ def find_pocket_organelles(
     np.ndarray
         Boolean mask ``(nFaces,)`` — pocket organelle faces.
     """
-    from collections import deque
+    from collections import defaultdict, deque
 
     outward_dots, _, _, main_face_mask = _organelle_precompute(
         mesh, radius, radius_multiplier, verbose,
@@ -1085,40 +1131,73 @@ def find_pocket_organelles(
     n_faces = len(mesh.faces)
     adj = _face_adjacency(mesh)
 
-    # Gradient of outward_dot
-    gradient = _outward_dot_gradient(outward_dots, adj, n_faces)
+    # Build edge-to-face map
+    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi, f in enumerate(mesh.faces):
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            edge_to_face[(min(a, b), max(a, b))].append(fi)
 
-    # Rim faces: high gradient AND on the transition (have both positive
-    # and negative dot neighbors)
-    rim = np.zeros(n_faces, dtype=bool)
-    for fi in range(n_faces):
-        if not main_face_mask[fi]:
+    # Connected components of negative-dot faces on main component
+    neg_idx = set(np.where((outward_dots < 0) & main_face_mask)[0].tolist())
+    visited_cc: set[int] = set()
+    clusters: list[list[int]] = []
+    for fi in neg_idx:
+        if fi in visited_cc:
             continue
-        if gradient[fi] < gradient_threshold:
+        cluster: list[int] = []
+        queue = deque([fi])
+        while queue:
+            curr = queue.popleft()
+            if curr in visited_cc:
+                continue
+            visited_cc.add(curr)
+            cluster.append(curr)
+            for nfi in adj.get(curr, set()):
+                if nfi in neg_idx and nfi not in visited_cc:
+                    queue.append(nfi)
+        clusters.append(cluster)
+
+    # Collect rim edges and seed faces from large-enough clusters
+    rim_edge_set: set[tuple[int, int]] = set()
+    seeds: set[int] = set()
+    n_pockets = 0
+
+    for cluster in clusters:
+        if len(cluster) < min_pocket_size:
             continue
-        nbs = list(adj.get(fi, set()))
-        if not nbs:
-            continue
-        nb_dots = outward_dots[nbs]
-        if nb_dots.max() > 0.2 and nb_dots.min() < -0.2:
-            rim[fi] = True
+        n_pockets += 1
+        cset = set(cluster)
+        seeds.update(cluster)
+        for fi in cluster:
+            f = mesh.faces[fi]
+            for i in range(3):
+                e = (min(int(f[i]), int(f[(i + 1) % 3])),
+                     max(int(f[i]), int(f[(i + 1) % 3])))
+                faces_on_edge = edge_to_face.get(e, [])
+                if len(faces_on_edge) == 2:
+                    other = (
+                        faces_on_edge[1]
+                        if faces_on_edge[0] in cset
+                        else faces_on_edge[0]
+                    )
+                    if other not in cset:
+                        rim_edge_set.add(e)
 
     if verbose:
-        print(f"[skeliner.pre] Rim faces: {rim.sum():,}")
+        print(
+            f"[skeliner.pre] Pockets with rims: {n_pockets}, "
+            f"rim edges: {len(rim_edge_set):,}, "
+            f"seeds: {len(seeds):,}"
+        )
 
-    # Seeds: inward-facing neighbors of rim faces (the pocket side)
-    seeds = set()
-    for fi in np.where(rim)[0]:
-        for nfi in adj.get(fi, set()):
-            if not main_face_mask[nfi]:
-                continue
-            if rim[nfi]:
-                continue
-            if outward_dots[nfi] < 0:
-                seeds.add(nfi)
-
-    if verbose:
-        print(f"[skeliner.pre] Seed faces (inward side of rim): {len(seeds):,}")
+    # Build set of faces on rim edges (faces that touch a rim edge from
+    # outside the pocket — these block the flood-fill)
+    rim_faces: set[int] = set()
+    for e in rim_edge_set:
+        for fi in edge_to_face.get(e, []):
+            if fi not in seeds:
+                rim_faces.add(fi)
 
     # Flood-fill from seeds, blocked by rim faces and grow_threshold
     pocket = np.zeros(n_faces, dtype=bool)
@@ -1130,7 +1209,7 @@ def find_pocket_organelles(
         if visited[fi]:
             continue
         visited[fi] = True
-        if rim[fi]:
+        if fi in rim_faces:
             continue
         if not main_face_mask[fi]:
             continue
