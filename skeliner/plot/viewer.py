@@ -443,31 +443,69 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return JSONResponse({"ok": True})
 
     async def detect_organelles(request):
-        """Run organelle detection using find_organelles()."""
+        """Run organelle detection."""
         if mesh_state["mesh"] is None:
             return JSONResponse({"ok": False, "error": "No mesh loaded"}, status_code=400)
 
-        from skeliner.pre import find_organelles
-
         mesh = mesh_state["mesh"]
-
-        def _run():
-            mask = find_organelles(mesh)
-            return [int(fi) for fi in np.where(mask)[0]]
-
+        det_type = request.query_params.get("type", "all")
         loop = asyncio.get_event_loop()
-        faces = await loop.run_in_executor(None, _run)
+
+        highlights = []
+        if det_type == "surface":
+            from skeliner.pre import find_surface_organelles
+            mask = await loop.run_in_executor(
+                None, lambda: find_surface_organelles(mesh)
+            )
+            faces = [int(fi) for fi in np.where(mask)[0]]
+            if faces:
+                highlights.append({
+                    "faces": faces,
+                    "color": [1, 0.15, 0.15],
+                    "label": f"organelle:surface ({len(faces):,})",
+                })
+        elif det_type == "isolated":
+            from skeliner.pre import find_isolated_organelles
+            mask = await loop.run_in_executor(
+                None, lambda: find_isolated_organelles(mesh)
+            )
+            faces = [int(fi) for fi in np.where(mask)[0]]
+            if faces:
+                highlights.append({
+                    "faces": faces,
+                    "color": [0.8, 0.4, 0.1],
+                    "label": f"organelle:isolated ({len(faces):,})",
+                })
+        else:
+            from skeliner.pre import find_organelles
+            surface, isolated = await loop.run_in_executor(
+                None, lambda: find_organelles(mesh)
+            )
+            sf = [int(fi) for fi in np.where(surface)[0]]
+            iso = [int(fi) for fi in np.where(isolated)[0]]
+            if sf:
+                highlights.append({
+                    "faces": sf,
+                    "color": [1, 0.15, 0.15],
+                    "label": f"organelle:surface ({len(sf):,})",
+                })
+            if iso:
+                highlights.append({
+                    "faces": iso,
+                    "color": [0.8, 0.4, 0.1],
+                    "label": f"organelle:isolated ({len(iso):,})",
+                })
 
         ann = {}
         if annotations_path.exists():
             ann = json.loads(annotations_path.read_text(encoding="utf-8"))
         if "highlights" not in ann:
             ann["highlights"] = []
-        ann["highlights"].append(
-            {"faces": faces, "color": [1, 0.15, 0.15], "label": "organelle"}
-        )
+        ann["highlights"].extend(highlights)
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
-        return JSONResponse({"ok": True, "nFaces": len(faces)})
+
+        n_faces = sum(len(h["faces"]) for h in highlights)
+        return JSONResponse({"ok": True, "nFaces": n_faces})
 
     async def detect_holes(request):
         """Run hole detection and write results to annotations."""

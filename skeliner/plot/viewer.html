@@ -87,7 +87,9 @@
 
 <div id="detect-panel">
   <div style="color:#888;margin-bottom:4px;">Detect:</div>
-  <button id="detectBtn" style="font-size:11px;cursor:pointer;">Organelles (A)</button>
+  <button id="detectBtn" style="font-size:11px;cursor:pointer;">All Organelles (A)</button>
+  <button id="detectSurfaceBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Surface Org.</button>
+  <button id="detectIsolatedBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Isolated Org.</button>
   <button id="detectHolesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Holes (H)</button>
 </div>
 
@@ -207,6 +209,8 @@ async function init() {
   renderer.domElement.addEventListener('pointerdown', onRecenter);
 
   document.getElementById('detectBtn').addEventListener('click', runDetectOrganelles);
+  document.getElementById('detectSurfaceBtn').addEventListener('click', () => runDetectOrganellesType('surface'));
+  document.getElementById('detectIsolatedBtn').addEventListener('click', () => runDetectOrganellesType('isolated'));
   document.getElementById('detectHolesBtn').addEventListener('click', runDetectHoles);
   window.addEventListener('keydown', (e) => {
     if (e.target !== document.body || e.ctrlKey || e.metaKey || e.shiftKey) return;
@@ -740,6 +744,18 @@ async function runDetectOrganelles() {
     const data = await resp.json();
     btn.textContent = data.ok ? `Organelles: ${data.nFaces} (A)` : 'Error (A)';
   } catch (e) { btn.textContent = 'Error (A)'; } finally { btn.disabled = false; }
+}
+
+async function runDetectOrganellesType(type) {
+  const btnId = type === 'surface' ? 'detectSurfaceBtn' : 'detectIsolatedBtn';
+  const btn = document.getElementById(btnId);
+  const origText = btn.textContent;
+  btn.textContent = 'Detecting...'; btn.disabled = true;
+  try {
+    const resp = await fetch(`/detect_organelles?type=${type}`, { method: 'POST' });
+    const data = await resp.json();
+    btn.textContent = data.ok ? `${type}: ${data.nFaces}` : `Error`;
+  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
 }
 
 async function runDetectHoles() {

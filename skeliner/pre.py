@@ -905,7 +905,55 @@ def _filter_small_clusters(
     return filtered
 
 
-def find_organelles(
+def _organelle_precompute(
+    mesh: trimesh.Trimesh,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, int, np.ndarray]:
+    """Shared precomputation for organelle detection.
+
+    Returns (outward_dots, face_comp, main_ci, main_face_mask).
+    """
+    if radius is None:
+        median_edge = float(np.median(mesh.edges_unique_length))
+        radius = radius_multiplier * median_edge
+        if verbose:
+            print(
+                f"[skeliner.pre] Auto radius: {radius:.1f} "
+                f"({radius_multiplier}x median edge {median_edge:.1f})"
+            )
+
+    outward_dots = _outward_dot(mesh, radius)
+
+    if verbose:
+        raw_count = (outward_dots < 0).sum()
+        print(
+            f"[skeliner.pre] Raw internal faces: {raw_count:,} "
+            f"({100 * raw_count / len(mesh.faces):.1f}%)"
+        )
+
+    edge_list = set()
+    for face in mesh.faces:
+        for i in range(3):
+            a, b = int(face[i]), int(face[(i + 1) % 3])
+            edge_list.add((min(a, b), max(a, b)))
+
+    g = ig.Graph(n=len(mesh.vertices), edges=list(edge_list), directed=False)
+    comps = g.connected_components()
+    main_ci = max(range(len(comps)), key=lambda i: len(comps[i]))
+
+    vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
+    for ci, cl in enumerate(comps):
+        for v in cl:
+            vert_comp[v] = ci
+    face_comp = vert_comp[mesh.faces[:, 0]]
+    main_face_mask = face_comp == main_ci
+
+    return outward_dots, face_comp, main_ci, main_face_mask
+
+
+def find_surface_organelles(
     mesh: trimesh.Trimesh,
     *,
     radius: float | None = None,
@@ -913,14 +961,95 @@ def find_organelles(
     min_cluster_size: int = 5,
     verbose: bool = False,
 ) -> np.ndarray:
+    """Detect inward-facing face clusters on the main connected component.
+
+    These are organelle membranes that are topologically connected to the
+    neuron surface (share edges), detected via ``outward_dot < 0`` +
+    cluster filtering.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask ``(nFaces,)`` — surface organelle faces.
+    """
+    outward_dots, _, _, main_face_mask = _organelle_precompute(
+        mesh, radius, radius_multiplier, verbose,
+    )
+    raw = (outward_dots < 0) & main_face_mask
+    surface = _filter_small_clusters(mesh, raw, min_cluster_size)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Surface organelles (>= {min_cluster_size}): "
+            f"{surface.sum():,} faces"
+        )
+    return surface
+
+
+def find_isolated_organelles(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    verbose: bool = False,
+) -> np.ndarray:
+    """Detect vertex-disconnected internal fragments.
+
+    These are organelle membranes that form entirely separate connected
+    components enclosed within the neuron body.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask ``(nFaces,)`` — isolated organelle faces.
+    """
+    outward_dots, face_comp, main_ci, _ = _organelle_precompute(
+        mesh, radius, radius_multiplier, verbose,
+    )
+    n_comps = face_comp.max() + 1
+    isolated = np.zeros(len(mesh.faces), dtype=bool)
+    n_internal_frags = 0
+    n_internal_frag_faces = 0
+    n_kept_frags = 0
+
+    for ci in range(n_comps):
+        if ci == main_ci:
+            continue
+        comp_face_idx = np.where(face_comp == ci)[0]
+        if len(comp_face_idx) == 0:
+            continue
+        if outward_dots[comp_face_idx].mean() < 0:
+            isolated[comp_face_idx] = True
+            n_internal_frags += 1
+            n_internal_frag_faces += len(comp_face_idx)
+        else:
+            n_kept_frags += 1
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Isolated fragments: {n_internal_frags:,} "
+            f"({n_internal_frag_faces:,} faces), "
+            f"{n_kept_frags:,} external (kept)"
+        )
+    return isolated
+
+
+def find_organelles(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    min_cluster_size: int = 5,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
     """Detect internal mesh fragments (organelle membranes) in a neuron mesh.
 
-    Organelle membranes (mitochondria, ER, etc.) often appear as
-    connected or semi-connected components sitting *inside* the
-    neuron body.  They bias skeleton-node positions and radius estimates
-    and should be removed before skeletonisation.
+    Returns two non-overlapping masks:
 
-    Note: this does NOT detect the nucleus membrane inside the soma.
+    * **surface** — inward-facing face clusters on the main connected
+      component, detected via ``outward_dot < 0`` + cluster filtering.
+    * **isolated** — entire vertex-disconnected components whose
+      mean outward dot is negative (fully enclosed fragments).
 
     Parameters
     ----------
@@ -941,98 +1070,50 @@ def find_organelles(
 
     Returns
     -------
-    np.ndarray
-        Boolean mask of shape ``(nFaces,)`` — True for organelle faces.
+    surface : np.ndarray
+        Boolean mask ``(nFaces,)`` — surface organelle faces (main component).
+    isolated : np.ndarray
+        Boolean mask ``(nFaces,)`` — isolated internal fragment faces.
     """
-    n_faces = len(mesh.faces)
+    outward_dots, face_comp, main_ci, main_face_mask = _organelle_precompute(
+        mesh, radius, radius_multiplier, verbose,
+    )
 
-    # ------------------------------------------------------------------
-    # Step 0 – auto-compute radius from mesh edge lengths
-    # ------------------------------------------------------------------
-    if radius is None:
-        median_edge = float(np.median(mesh.edges_unique_length))
-        radius = radius_multiplier * median_edge
-        if verbose:
-            print(
-                f"[skeliner.pre] Auto radius: {radius:.1f} "
-                f"({radius_multiplier}x median edge {median_edge:.1f})"
-            )
-
-    # ------------------------------------------------------------------
-    # Step 1 – local outward scoring
-    # ------------------------------------------------------------------
-    outward_dots = _outward_dot(mesh, radius)
-    organelle_raw = outward_dots < 0
-
+    # Surface organelles
+    raw = (outward_dots < 0) & main_face_mask
+    surface = _filter_small_clusters(mesh, raw, min_cluster_size)
     if verbose:
         print(
-            f"[skeliner.pre] Raw internal faces: {organelle_raw.sum():,} "
-            f"({100 * organelle_raw.mean():.1f}% of {n_faces:,})"
+            f"[skeliner.pre] Surface organelles (>= {min_cluster_size}): "
+            f"{surface.sum():,} faces"
         )
 
-    # ------------------------------------------------------------------
-    # Step 2 – cluster filtering
-    # ------------------------------------------------------------------
-    organelle = _filter_small_clusters(mesh, organelle_raw, min_cluster_size)
-
-    if verbose:
-        print(
-            f"[skeliner.pre] After cluster filter (>= {min_cluster_size}): "
-            f"{organelle.sum():,} faces"
-        )
-
-    # ------------------------------------------------------------------
-    # Step 3 – flag internal disconnected fragments
-    #          (reuse outward_dots from step 1, no recomputation)
-    # ------------------------------------------------------------------
-    edge_list = set()
-    for face in mesh.faces:
-        for i in range(3):
-            a, b = int(face[i]), int(face[(i + 1) % 3])
-            edge_list.add((min(a, b), max(a, b)))
-
-    g = ig.Graph(n=len(mesh.vertices), edges=list(edge_list), directed=False)
-    comps = g.connected_components()
-    main_ci = max(range(len(comps)), key=lambda i: len(comps[i]))
-
+    # Isolated organelles
+    n_comps = face_comp.max() + 1
+    isolated = np.zeros(len(mesh.faces), dtype=bool)
     n_internal_frags = 0
     n_internal_frag_faces = 0
     n_kept_frags = 0
-
-    if len(comps) > 1:
-        # Map each vertex to its component
-        vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
-        for ci, cl in enumerate(comps):
-            for v in cl:
-                vert_comp[v] = ci
-
-        # Assign each face to its component (by first vertex)
-        face_comp = vert_comp[mesh.faces[:, 0]]
-
-        for ci in range(len(comps)):
-            if ci == main_ci:
-                continue
-            comp_face_mask = face_comp == ci
-            comp_face_idx = np.where(comp_face_mask)[0]
-            if len(comp_face_idx) == 0:
-                continue
-            mean_dot = outward_dots[comp_face_idx].mean()
-            if mean_dot < 0:
-                # Internal fragment — flag for removal
-                organelle[comp_face_idx] = True
-                n_internal_frags += 1
-                n_internal_frag_faces += len(comp_face_idx)
-            else:
-                n_kept_frags += 1
-
+    for ci in range(n_comps):
+        if ci == main_ci:
+            continue
+        comp_face_idx = np.where(face_comp == ci)[0]
+        if len(comp_face_idx) == 0:
+            continue
+        if outward_dots[comp_face_idx].mean() < 0:
+            isolated[comp_face_idx] = True
+            n_internal_frags += 1
+            n_internal_frag_faces += len(comp_face_idx)
+        else:
+            n_kept_frags += 1
     if verbose:
         print(
-            f"[skeliner.pre] Fragments: {n_internal_frags:,} internal "
-            f"({n_internal_frag_faces:,} faces removed), "
+            f"[skeliner.pre] Isolated fragments: {n_internal_frags:,} "
+            f"({n_internal_frag_faces:,} faces), "
             f"{n_kept_frags:,} external (kept)"
         )
 
-    return organelle
+    return surface, isolated
 
 
 def remove_organelles(
@@ -1075,13 +1156,14 @@ def remove_organelles(
     trimesh.Trimesh
         Cleaned mesh with internal fragments removed.
     """
-    organelle = find_organelles(
+    surface, isolated = find_organelles(
         mesh,
         radius=radius,
         radius_multiplier=radius_multiplier,
         min_cluster_size=min_cluster_size,
         verbose=verbose,
     )
+    organelle = surface | isolated
 
     if not organelle.any():
         if verbose:
