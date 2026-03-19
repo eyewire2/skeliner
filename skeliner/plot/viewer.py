@@ -994,7 +994,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             mesh = mesh_state["mesh"]
 
             def _run_mesh_path():
-                from collections import defaultdict
+                from scipy.sparse import csr_matrix
+                from scipy.sparse.csgraph import dijkstra
 
                 n_faces = len(mesh.faces)
                 if face1 < 0 or face1 >= n_faces or face2 < 0 or face2 >= n_faces:
@@ -1005,69 +1006,50 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 centroids = mesh.triangles_center
 
                 if mode == "vertex":
-                    # Vertex-based: faces sharing at least 1 vertex.
-                    # Slower but crosses fusion points.
-                    vert_to_faces = defaultdict(list)
-                    for fi, f in enumerate(mesh.faces):
-                        for v in f:
-                            vert_to_faces[int(v)].append(fi)
-
-                    adj_sets = [set() for _ in range(n_faces)]
-                    for v_faces in vert_to_faces.values():
-                        for i in range(len(v_faces)):
-                            for j in range(i + 1, len(v_faces)):
-                                adj_sets[v_faces[i]].add(v_faces[j])
-                                adj_sets[v_faces[j]].add(v_faces[i])
-
-                    adj = [[] for _ in range(n_faces)]
-                    for fi in range(n_faces):
-                        for fj in adj_sets[fi]:
-                            d = float(np.linalg.norm(
-                                centroids[fi] - centroids[fj]
-                            ))
-                            adj[fi].append((fj, d))
+                    # Sparse face-vertex incidence matrix M, then
+                    # M @ M.T gives vertex-adjacency (crosses fusions).
+                    n_verts = len(mesh.vertices)
+                    rows = np.repeat(np.arange(n_faces), 3)
+                    cols = mesh.faces.ravel().astype(np.int32)
+                    M = csr_matrix(
+                        (np.ones(len(rows), dtype=np.int8), (rows, cols)),
+                        shape=(n_faces, n_verts),
+                    )
+                    adj = M @ M.T
+                    adj.setdiag(0)
+                    adj.eliminate_zeros()
+                    fi, fj = adj.nonzero()
                 else:
-                    # Edge-based: faces sharing an edge. Fast.
+                    # Edge-based: faces sharing an edge.
                     adj_pairs = mesh.face_adjacency
-                    adj = [[] for _ in range(n_faces)]
-                    for a, b in adj_pairs:
-                        d = float(np.linalg.norm(
-                            centroids[a] - centroids[b]
-                        ))
-                        adj[a].append((b, d))
-                        adj[b].append((a, d))
+                    fi = np.concatenate([adj_pairs[:, 0], adj_pairs[:, 1]])
+                    fj = np.concatenate([adj_pairs[:, 1], adj_pairs[:, 0]])
 
-                dist = [float("inf")] * n_faces
-                dist[face1] = 0
-                prev = [-1] * n_faces
-                pq = [(0.0, face1)]
-                visited = [False] * n_faces
+                dists = np.linalg.norm(
+                    centroids[fi] - centroids[fj], axis=1
+                ).astype(np.float64)
+                graph = csr_matrix(
+                    (dists, (fi, fj)), shape=(n_faces, n_faces)
+                )
 
-                while pq:
-                    d, u = heapq.heappop(pq)
-                    if visited[u]:
-                        continue
-                    visited[u] = True
-                    if u == face2:
-                        break
-                    for v, w in adj[u]:
-                        if not visited[v]:
-                            nd = d + w
-                            if nd < dist[v]:
-                                dist[v] = nd
-                                prev[v] = u
-                                heapq.heappush(pq, (nd, v))
+                dist_arr, predecessors = dijkstra(
+                    graph, directed=False, indices=face1,
+                    return_predecessors=True,
+                )
 
-                if dist[face2] == float("inf"):
+                if np.isinf(dist_arr[face2]):
                     return None, 0
 
                 path = []
                 cur = face2
-                while cur != -1:
+                while cur != face1 and cur >= 0:
                     path.append(int(cur))
-                    cur = prev[cur]
+                    cur = int(predecessors[cur])
+                if cur < 0:
+                    return None, 0
+                path.append(int(face1))
                 path.reverse()
-                return path, float(dist[face2])
+                return path, float(dist_arr[face2])
 
             loop = asyncio.get_event_loop()
             path, length = await loop.run_in_executor(None, _run_mesh_path)
