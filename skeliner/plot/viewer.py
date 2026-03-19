@@ -507,6 +507,46 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         n_faces = sum(len(h["faces"]) for h in highlights)
         return JSONResponse({"ok": True, "nFaces": n_faces})
 
+    async def detect_fusions(request):
+        """Run fusion detection and write results to annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import find_fusions
+
+        mesh = mesh_state["mesh"]
+
+        def _run():
+            return find_fusions(mesh, verbose=True)
+
+        loop = asyncio.get_event_loop()
+        clusters = await loop.run_in_executor(None, _run)
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+
+        colors = [
+            [0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0], [1.0, 0.5, 0.0], [0.5, 0.0, 1.0],
+        ]
+        for i, cluster in enumerate(clusters):
+            ann["highlights"].append({
+                "faces": cluster,
+                "color": colors[i % len(colors)],
+                "label": f"fusion {i} ({len(cluster)}f)",
+            })
+
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        return JSONResponse({
+            "ok": True,
+            "nClusters": len(clusters),
+        })
+
     async def detect_rims(request):
         """Run rim detection and write results as edge annotations."""
         if mesh_state["mesh"] is None:
@@ -721,6 +761,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
+            Route("/detect_fusions", detect_fusions, methods=["POST"]),
             Route("/detect_rims", detect_rims, methods=["POST"]),
             Route("/detect_holes", detect_holes, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),

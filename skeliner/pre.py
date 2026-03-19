@@ -1515,6 +1515,107 @@ def find_organelles(
     return pocket, isolated
 
 
+def find_fusions(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    verbose: bool = False,
+) -> list[list[int]]:
+    """Detect fusion points where two branches share faces.
+
+    At a fusion, two branch surfaces cross through each other, creating
+    edges shared by 4 faces (instead of the normal 2).  The inward-facing
+    faces at those edges are the fusion faces — the shared membrane
+    between two branches that should be separated.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh (ideally after organelle removal).
+    radius : float or None
+        Radius for outward_dot computation. Auto-computed if None.
+    radius_multiplier : float
+        Multiplier for auto radius.
+    verbose : bool
+
+    Returns
+    -------
+    list[list[int]]
+        Each inner list is one fusion cluster (face indices).
+    """
+    from collections import deque
+
+    areas = mesh.area_faces
+    zero_faces = set(np.where(areas < 1e-6)[0].tolist())
+
+    # Build edge-to-face map, excluding zero-area faces
+    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi, f in enumerate(mesh.faces):
+        if fi in zero_faces:
+            continue
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            edge_to_face[(min(a, b), max(a, b))].append(fi)
+
+    # Outward dot for inward-face filtering
+    outward_dots = _outward_dot(
+        mesh,
+        radius if radius is not None
+        else radius_multiplier * float(np.median(mesh.edges_unique_length)),
+    )
+
+    # Fusion faces: negative-dot faces at edges shared by exactly 4 faces
+    fusion_faces: set[int] = set()
+    for e, faces in edge_to_face.items():
+        if len(faces) == 4:
+            for fi in faces:
+                if outward_dots[fi] < 0:
+                    fusion_faces.add(fi)
+
+    if not fusion_faces:
+        if verbose:
+            print("[skeliner.pre] No fusions found")
+        return []
+
+    # Cluster by adjacency
+    adj: dict[int, set[int]] = defaultdict(set)
+    for e, faces in edge_to_face.items():
+        for i in range(len(faces)):
+            for j in range(i + 1, len(faces)):
+                if faces[i] in fusion_faces and faces[j] in fusion_faces:
+                    adj[faces[i]].add(faces[j])
+                    adj[faces[j]].add(faces[i])
+
+    visited: set[int] = set()
+    clusters: list[list[int]] = []
+    for fi in fusion_faces:
+        if fi in visited:
+            continue
+        cluster: list[int] = []
+        queue = deque([fi])
+        while queue:
+            curr = queue.popleft()
+            if curr in visited:
+                continue
+            visited.add(curr)
+            cluster.append(curr)
+            for nfi in adj.get(curr, set()):
+                if nfi not in visited:
+                    queue.append(nfi)
+        clusters.append(sorted(cluster))
+
+    clusters.sort(key=len, reverse=True)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Fusions: {len(clusters)} clusters, "
+            f"{sum(len(c) for c in clusters)} faces"
+        )
+
+    return clusters
+
+
 def remove_organelles(
     mesh: trimesh.Trimesh,
     *,
