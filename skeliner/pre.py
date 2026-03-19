@@ -1089,6 +1089,7 @@ def find_pocket_organelles(
     min_pocket_size: int = 100,
     min_cluster_size: int = 5,
     verbose: bool = False,
+    _precomputed: tuple | None = None,
 ) -> np.ndarray:
     """Detect pocket organelles — membrane folds connected to the neuron surface.
 
@@ -1125,9 +1126,12 @@ def find_pocket_organelles(
     """
     from collections import defaultdict, deque
 
-    outward_dots, _, _, main_face_mask = _organelle_precompute(
-        mesh, radius, radius_multiplier, verbose,
-    )
+    if _precomputed is not None:
+        outward_dots, _, _, main_face_mask = _precomputed
+    else:
+        outward_dots, _, _, main_face_mask = _organelle_precompute(
+            mesh, radius, radius_multiplier, verbose,
+        )
     n_faces = len(mesh.faces)
     adj = _face_adjacency(mesh)
 
@@ -1237,6 +1241,7 @@ def find_isolated_organelles(
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     verbose: bool = False,
+    _precomputed: tuple | None = None,
 ) -> np.ndarray:
     """Detect vertex-disconnected internal fragments.
 
@@ -1248,9 +1253,12 @@ def find_isolated_organelles(
     np.ndarray
         Boolean mask ``(nFaces,)`` — isolated organelle faces.
     """
-    outward_dots, face_comp, main_ci, _ = _organelle_precompute(
-        mesh, radius, radius_multiplier, verbose,
-    )
+    if _precomputed is not None:
+        outward_dots, face_comp, main_ci, _ = _precomputed
+    else:
+        outward_dots, face_comp, main_ci, _ = _organelle_precompute(
+            mesh, radius, radius_multiplier, verbose,
+        )
     n_comps = face_comp.max() + 1
     isolated = np.zeros(len(mesh.faces), dtype=bool)
     n_internal_frags = 0
@@ -1320,42 +1328,25 @@ def find_organelles(
     isolated : np.ndarray
         Boolean mask ``(nFaces,)`` — isolated internal fragment faces.
     """
+    precomputed = _organelle_precompute(
+        mesh, radius, radius_multiplier, verbose,
+    )
+
     pocket = find_pocket_organelles(
         mesh,
         radius=radius,
         radius_multiplier=radius_multiplier,
         min_cluster_size=min_cluster_size,
         verbose=verbose,
+        _precomputed=precomputed,
     )
-
-    outward_dots, face_comp, main_ci, _ = _organelle_precompute(
-        mesh, radius, radius_multiplier, verbose=False,
+    isolated = find_isolated_organelles(
+        mesh,
+        radius=radius,
+        radius_multiplier=radius_multiplier,
+        verbose=verbose,
+        _precomputed=precomputed,
     )
-
-    # Isolated organelles
-    n_comps = face_comp.max() + 1
-    isolated = np.zeros(len(mesh.faces), dtype=bool)
-    n_internal_frags = 0
-    n_internal_frag_faces = 0
-    n_kept_frags = 0
-    for ci in range(n_comps):
-        if ci == main_ci:
-            continue
-        comp_face_idx = np.where(face_comp == ci)[0]
-        if len(comp_face_idx) == 0:
-            continue
-        if outward_dots[comp_face_idx].mean() < 0:
-            isolated[comp_face_idx] = True
-            n_internal_frags += 1
-            n_internal_frag_faces += len(comp_face_idx)
-        else:
-            n_kept_frags += 1
-    if verbose:
-        print(
-            f"[skeliner.pre] Isolated fragments: {n_internal_frags:,} "
-            f"({n_internal_frag_faces:,} faces), "
-            f"{n_kept_frags:,} external (kept)"
-        )
 
     return pocket, isolated
 
