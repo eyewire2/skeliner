@@ -90,14 +90,20 @@
   </select></label>
 </div>
 
-<div id="detect-panel">
-  <div style="color:#888;margin-bottom:4px;">Detect:</div>
-  <button id="detectBtn" style="font-size:11px;cursor:pointer;">All Organelles (A)</button>
+<div id="detect-panel" style="white-space:nowrap;">
+  <span style="color:#888;">Detect:</span>
+  <button id="detectBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">All Organelles (A)</button>
   <button id="detectSurfaceBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Pocket Org.</button>
   <button id="detectIsolatedBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Isolated Org.</button>
   <button id="detectRimsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Rims (R)</button>
   <button id="detectHolesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Holes (H)</button>
   <button id="detectFusionsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Fusions (F)</button>
+  <span style="color:#888;margin-left:12px;">Remove:</span>
+  <button id="removeOrganellesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Organelles</button>
+  <button id="removeFusionsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Fusions</button>
+  <span style="color:#888;margin-left:12px;">Save:</span>
+  <button id="saveMeshBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Save Mesh</button>
+  <span id="saveStatus" style="font-size:11px;color:#6f6;margin-left:6px;"></span>
 </div>
 
 <div id="selection-info">
@@ -225,6 +231,9 @@ async function init() {
   document.getElementById('detectRimsBtn').addEventListener('click', runDetectRims);
   document.getElementById('detectHolesBtn').addEventListener('click', runDetectHoles);
   document.getElementById('detectFusionsBtn').addEventListener('click', runDetectFusions);
+  document.getElementById('removeOrganellesBtn').addEventListener('click', runRemoveOrganelles);
+  document.getElementById('removeFusionsBtn').addEventListener('click', runRemoveFusions);
+  document.getElementById('saveMeshBtn').addEventListener('click', runSaveMesh);
   window.addEventListener('keydown', (e) => {
     if (e.target !== document.body || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key === 'a') runDetectOrganelles();
@@ -801,6 +810,49 @@ async function runDetectRims() {
     const data = await resp.json();
     btn.textContent = data.ok ? `Rims: ${data.nFaces} (R)` : 'Error (R)';
   } catch (e) { btn.textContent = 'Error (R)'; } finally { btn.disabled = false; }
+}
+
+async function runRemoveOrganelles() {
+  const btn = document.getElementById('removeOrganellesBtn');
+  btn.textContent = 'Removing...'; btn.disabled = true;
+  try {
+    const resp = await fetch('/remove_organelles', { method: 'POST' });
+    const data = await resp.json();
+    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : 'Error';
+  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
+}
+
+async function runRemoveFusions() {
+  const btn = document.getElementById('removeFusionsBtn');
+  btn.textContent = 'Removing...'; btn.disabled = true;
+  try {
+    const resp = await fetch('/remove_fusions', { method: 'POST' });
+    const data = await resp.json();
+    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : 'Error';
+  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
+}
+
+async function runSaveMesh() {
+  const btn = document.getElementById('saveMeshBtn');
+  const status = document.getElementById('saveStatus');
+  btn.textContent = 'Saving...'; btn.disabled = true; status.textContent = '';
+  try {
+    const resp = await fetch('/export_mesh');
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.error || 'Export failed');
+    }
+    const blob = await resp.blob();
+    const name = resp.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'mesh.obj';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.click();
+    URL.revokeObjectURL(url);
+    status.textContent = `Downloaded: ${name}`;
+    status.style.color = '#6f6';
+  } catch (e) {
+    status.textContent = e.message || 'Error'; status.style.color = '#f66';
+  } finally { btn.textContent = 'Save Mesh'; btn.disabled = false; }
 }
 
 function syncManualHighlight() {

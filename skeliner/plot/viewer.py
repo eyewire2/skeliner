@@ -702,6 +702,122 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nFaces": n_rims})
 
+    async def _apply_new_mesh(new_mesh):
+        """Replace the current mesh with a modified one and broadcast."""
+        mesh_state["mesh"] = new_mesh
+        buffers = _mesh_to_buffers(new_mesh)
+        mesh_state["buffers"] = buffers
+        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+
+        # Clear annotations (they reference old face indices)
+        annotations_path.write_text("{}", encoding="utf-8")
+
+        await broadcast({"type": "mesh_loaded", "payload": buffers})
+
+        # Re-send skeletons (centroid may have changed)
+        for sname, sstate in skeleton_states.items():
+            if sstate.get("l2_graph"):
+                sstate["buffers"] = _l2_graph_to_buffers(
+                    Path(sstate["path"]), mesh_state["centroid"]
+                )
+            else:
+                sstate["buffers"] = _skeleton_to_buffers(
+                    sstate["skeleton"], mesh_state["centroid"]
+                )
+            sstate["buffers"]["color"] = sstate["color"]
+            await broadcast({"type": "skeleton_loaded", "payload": {
+                "name": sname, **sstate["buffers"]
+            }})
+
+        # Update state file
+        current = {}
+        if state_path.exists():
+            current = json.loads(state_path.read_text(encoding="utf-8"))
+        current["mesh"] = {
+            "path": mesh_state["path"],
+            "nVertices": len(new_mesh.vertices),
+            "nFaces": len(new_mesh.faces),
+        }
+        state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+
+    async def do_remove_organelles(request):
+        """Remove organelles from the mesh."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        from skeliner.pre import remove_organelles as _remove_organelles
+
+        mesh = mesh_state["mesh"]
+        n_before = len(mesh.faces)
+
+        loop = asyncio.get_event_loop()
+        new_mesh = await loop.run_in_executor(
+            None, lambda: _remove_organelles(mesh, verbose=True)
+        )
+        n_after = len(new_mesh.faces)
+
+        await _apply_new_mesh(new_mesh)
+        print(f"Remove organelles: {n_before:,} → {n_after:,} faces ({n_before - n_after:,} removed)")
+        return JSONResponse({
+            "ok": True,
+            "facesBefore": n_before,
+            "facesAfter": n_after,
+            "facesRemoved": n_before - n_after,
+        })
+
+    async def do_remove_fusions(request):
+        """Remove fusions from the mesh."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        from skeliner.pre import remove_fusions as _remove_fusions
+
+        mesh = mesh_state["mesh"]
+        n_before = len(mesh.faces)
+
+        loop = asyncio.get_event_loop()
+        new_mesh = await loop.run_in_executor(
+            None, lambda: _remove_fusions(mesh, verbose=True)
+        )
+        n_after = len(new_mesh.faces)
+
+        await _apply_new_mesh(new_mesh)
+        print(f"Remove fusions: {n_before:,} → {n_after:,} faces ({n_before - n_after:,} removed)")
+        return JSONResponse({
+            "ok": True,
+            "facesBefore": n_before,
+            "facesAfter": n_after,
+            "facesRemoved": n_before - n_after,
+        })
+
+    async def export_mesh(request):
+        """Export the current mesh as a downloadable OBJ file."""
+        from starlette.responses import Response
+
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        mesh = mesh_state["mesh"]
+        fmt = request.query_params.get("format", "obj")
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(
+            None, lambda: mesh.export(file_type=fmt)
+        )
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+
+        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        filename = f"{stem}_cleaned"
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.{fmt}"'},
+        )
+
     async def detect_holes(request):
         """Run hole detection and write results to annotations."""
         if mesh_state["mesh"] is None:
@@ -874,6 +990,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/detect_fusions", detect_fusions, methods=["POST"]),
             Route("/detect_rims", detect_rims, methods=["POST"]),
             Route("/detect_holes", detect_holes, methods=["POST"]),
+            Route("/remove_organelles", do_remove_organelles, methods=["POST"]),
+            Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
+            Route("/export_mesh", export_mesh, methods=["GET"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],
         on_startup=[on_startup],

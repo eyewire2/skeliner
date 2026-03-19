@@ -11,6 +11,7 @@ __all__ = [
     "ensure_watertight",
     "fill_holes",
     "find_holes",
+    "remove_fusions",
     "remove_organelles",
     "remove_fragments",
     "remove_nucleus",
