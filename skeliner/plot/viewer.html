@@ -244,16 +244,17 @@
         </div>
 
         <div id="controls">
-            <label><input type="checkbox" id="wireToggle" checked /> Wireframe</label>
-            <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50" /></label>
-            <label>Ann: <input type="range" id="annOpacitySlider" min="0" max="100" value="90" /></label>
-            <label><input type="checkbox" id="tubeToggle" /> Tubes</label>
-            <label style="margin-left: 8px"
-                >Pick:
-                <select id="pickTarget" style="font-size: 11px">
-                    <option value="mesh">Mesh</option>
-                </select></label
-            >
+          <span style="color:#888;">Mesh:</span>
+          <label><input type="checkbox" id="wireToggle" checked /> Wire</label>
+          <label>Opacity <input type="range" id="opacitySlider" min="0" max="100" value="50" /></label>
+          <span style="color:#555;margin:0 4px;">|</span>
+          <span style="color:#888;">Skel:</span>
+          <label><input type="checkbox" id="tubeToggle" /> Tubes</label>
+          <span style="color:#555;margin:0 4px;">|</span>
+          <span style="color:#888;">Ann:</span>
+          <label>Opacity <input type="range" id="annOpacitySlider" min="0" max="100" value="90" /></label>
+          <span style="color:#555;margin:0 4px;">|</span>
+          <label><span style="color:#888;">Pick:</span> <select id="pickTarget" style="font-size:11px;"><option value="mesh">Mesh</option></select></label>
         </div>
 
         <div id="detect-panel">
