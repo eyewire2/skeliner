@@ -1743,6 +1743,164 @@ def find_fusions(
     return result_clusters
 
 
+def _split_fan_vertices(
+    mesh: trimesh.Trimesh,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Split vertices whose face fan is disconnected by face-edge adjacency.
+
+    At a manifold fusion, two branches share vertices but not face-edges.
+    Duplicating these vertices so each face-edge component gets its own
+    copy disconnects the branches in the vertex graph.
+
+    Returns a new mesh with split vertices (more vertices, same faces).
+    """
+    from collections import deque
+
+    vert_to_face: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
+    for fi, f in enumerate(mesh.faces):
+        for v in f:
+            vert_to_face[int(v)].append(fi)
+
+    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi, f in enumerate(mesh.faces):
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            edge_to_face[(min(a, b), max(a, b))].append(fi)
+
+    verts = mesh.vertices.copy()
+    faces = mesh.faces.copy()
+    new_verts = list(verts)
+    n_split = 0
+
+    for vid in range(len(verts)):
+        fan = vert_to_face[vid]
+        if len(fan) < 2:
+            continue
+
+        fan_set = set(fan)
+        fan_adj: dict[int, set[int]] = defaultdict(set)
+        for fi in fan:
+            f = faces[fi]
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                for nfi in edge_to_face[e]:
+                    if nfi in fan_set and nfi != fi:
+                        fan_adj[fi].add(nfi)
+
+        # Find connected components of the face fan
+        vis: set[int] = set()
+        comps: list[set[int]] = []
+        for fi in fan:
+            if fi in vis:
+                continue
+            comp: set[int] = set()
+            q = deque([fi])
+            while q:
+                curr = q.popleft()
+                if curr in vis:
+                    continue
+                vis.add(curr)
+                comp.add(curr)
+                for nfi in fan_adj[curr]:
+                    if nfi not in vis:
+                        q.append(nfi)
+            comps.append(comp)
+
+        if len(comps) <= 1:
+            continue
+
+        # Keep first component with original vertex, duplicate for rest
+        for comp_faces in comps[1:]:
+            new_vid = len(new_verts)
+            new_verts.append(verts[vid].copy())
+            for fi in comp_faces:
+                for j in range(3):
+                    if int(faces[fi][j]) == vid:
+                        faces[fi][j] = new_vid
+            n_split += 1
+
+    if n_split == 0:
+        return mesh
+
+    result = trimesh.Trimesh(
+        vertices=np.array(new_verts),
+        faces=faces,
+        process=False,
+    )
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Split {n_split} fan vertices "
+            f"({len(verts):,} -> {len(new_verts):,} vertices)"
+        )
+
+    return result
+
+
+def remove_fusions(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove fusion faces and split shared vertices between branches.
+
+    Two-step process:
+
+    1. **Remove non-manifold fusion faces** — detected by
+       :func:`find_fusions` (non-manifold edges, duplicate faces).
+    2. **Split shared vertices** — vertices whose face fan is
+       disconnected by face-edge adjacency, indicating two branches
+       share a vertex without sharing face-edges.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh (ideally after organelle removal).
+    radius : float or None
+        Radius for outward_dot computation. Auto-computed if None.
+    radius_multiplier : float
+        Multiplier for auto radius.
+    verbose : bool
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with fusions removed and shared vertices split.
+    """
+    # Step 1: remove non-manifold fusion faces
+    clusters = find_fusions(
+        mesh,
+        radius=radius,
+        radius_multiplier=radius_multiplier,
+        verbose=verbose,
+    )
+
+    all_fusion: set[int] = set()
+    for c in clusters:
+        all_fusion.update(c)
+
+    if all_fusion:
+        keep = np.ones(len(mesh.faces), dtype=bool)
+        for fi in all_fusion:
+            keep[fi] = False
+        mesh = mesh.submesh([np.where(keep)[0]], append=True)
+        mesh.remove_unreferenced_vertices()
+        if verbose:
+            print(
+                f"[skeliner.pre] Removed {len(all_fusion)} fusion faces "
+                f"({len(clusters)} regions)"
+            )
+
+    # Step 2: split shared vertices
+    mesh = _split_fan_vertices(mesh, verbose=verbose)
+
+    return mesh
+
+
 def remove_organelles(
     mesh: trimesh.Trimesh,
     *,
