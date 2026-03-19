@@ -443,54 +443,17 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return JSONResponse({"ok": True})
 
     async def detect_organelles(request):
-        """Run organelle detection matching remove_organelles() exactly."""
+        """Run organelle detection using find_organelles()."""
         if mesh_state["mesh"] is None:
             return JSONResponse({"ok": False, "error": "No mesh loaded"}, status_code=400)
 
-        from skeliner.pre import _outward_dot, _filter_small_clusters
-        import igraph as ig
+        from skeliner.pre import find_organelles
 
         mesh = mesh_state["mesh"]
 
         def _run():
-            # Step 1 – outward dot scoring
-            median_edge = float(np.median(mesh.edges_unique_length))
-            radius = 5.0 * median_edge
-            outward_dots = _outward_dot(mesh, radius=radius)
-            organelle = _filter_small_clusters(
-                mesh, outward_dots < 0, min_cluster_size=5
-            )
-
-            # Step 3 – flag internal disconnected fragments
-            edge_set = set()
-            for face in mesh.faces:
-                for i in range(3):
-                    a, b = int(face[i]), int(face[(i + 1) % 3])
-                    edge_set.add((min(a, b), max(a, b)))
-            g = ig.Graph(
-                n=len(mesh.vertices),
-                edges=list(edge_set),
-                directed=False,
-            )
-            comps = g.connected_components()
-            main_ci = max(range(len(comps)), key=lambda i: len(comps[i]))
-
-            if len(comps) > 1:
-                vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
-                for ci, cl in enumerate(comps):
-                    for v in cl:
-                        vert_comp[v] = ci
-                face_comp = vert_comp[mesh.faces[:, 0]]
-                for ci in range(len(comps)):
-                    if ci == main_ci:
-                        continue
-                    comp_face_idx = np.where(face_comp == ci)[0]
-                    if len(comp_face_idx) == 0:
-                        continue
-                    if outward_dots[comp_face_idx].mean() < 0:
-                        organelle[comp_face_idx] = True
-
-            return [int(fi) for fi in np.where(organelle)[0]]
+            mask = find_organelles(mesh)
+            return [int(fi) for fi in np.where(mask)[0]]
 
         loop = asyncio.get_event_loop()
         faces = await loop.run_in_executor(None, _run)

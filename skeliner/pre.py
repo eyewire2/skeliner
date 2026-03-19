@@ -905,23 +905,22 @@ def _filter_small_clusters(
     return filtered
 
 
-def remove_organelles(
+def find_organelles(
     mesh: trimesh.Trimesh,
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     min_cluster_size: int = 5,
     verbose: bool = False,
-) -> trimesh.Trimesh:
-    """Remove internal mesh fragments (organelle membranes) from a neuron mesh.
+) -> np.ndarray:
+    """Detect internal mesh fragments (organelle membranes) in a neuron mesh.
 
     Organelle membranes (mitochondria, ER, etc.) often appear as
     connected or semi-connected components sitting *inside* the
     neuron body.  They bias skeleton-node positions and radius estimates
     and should be removed before skeletonisation.
 
-    Note: this does NOT remove the nucleus membrane inside the soma.
-    Use :func:`remove_nucleus` after skeletonisation for that.
+    Note: this does NOT detect the nucleus membrane inside the soma.
 
     Parameters
     ----------
@@ -942,8 +941,8 @@ def remove_organelles(
 
     Returns
     -------
-    trimesh.Trimesh
-        Cleaned mesh with internal fragments removed.
+    np.ndarray
+        Boolean mask of shape ``(nFaces,)`` — True for organelle faces.
     """
     n_faces = len(mesh.faces)
 
@@ -1033,9 +1032,57 @@ def remove_organelles(
             f"{n_kept_frags:,} external (kept)"
         )
 
-    # ------------------------------------------------------------------
-    # Step 4 – remove all flagged faces (organelles + internal fragments)
-    # ------------------------------------------------------------------
+    return organelle
+
+
+def remove_organelles(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    min_cluster_size: int = 5,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove internal mesh fragments (organelle membranes) from a neuron mesh.
+
+    Organelle membranes (mitochondria, ER, etc.) often appear as
+    connected or semi-connected components sitting *inside* the
+    neuron body.  They bias skeleton-node positions and radius estimates
+    and should be removed before skeletonisation.
+
+    Note: this does NOT remove the nucleus membrane inside the soma.
+    Use :func:`remove_nucleus` after skeletonisation for that.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh.
+    radius : float or None, default None
+        Radius (in mesh units, typically nm) for the local center-of-mass
+        neighbourhood.  If None, automatically set to
+        ``radius_multiplier * median_edge_length``.
+    radius_multiplier : float, default 5.0
+        Multiplier for automatic radius computation.  Only used when
+        *radius* is None.
+    min_cluster_size : int, default 5
+        Connected components of internal faces smaller than this are
+        kept (assumed to be noise).
+    verbose : bool, default False
+        Print summary statistics.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Cleaned mesh with internal fragments removed.
+    """
+    organelle = find_organelles(
+        mesh,
+        radius=radius,
+        radius_multiplier=radius_multiplier,
+        min_cluster_size=min_cluster_size,
+        verbose=verbose,
+    )
+
     if not organelle.any():
         if verbose:
             print("[skeliner.pre] Nothing to remove")
