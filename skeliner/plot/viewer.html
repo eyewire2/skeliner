@@ -1516,6 +1516,7 @@ let meshCentroid = [0, 0, 0];
                 postprocess: { value: true, type: "bool", label: "Postprocess" },
             };
             let skelParams = {};
+            try { const s = JSON.parse(localStorage.getItem('skeliner_skelParams')); if (s) skelParams = s; } catch (e) {}
 
             function getSkelParams() {
                 const params = {};
@@ -1544,6 +1545,7 @@ let meshCentroid = [0, 0, 0];
                         cb.dataset.key = key;
                         cb.addEventListener("change", () => {
                             skelParams[key] = cb.checked;
+                            localStorage.setItem('skeliner_skelParams', JSON.stringify(skelParams));
                         });
                         body.appendChild(cb);
                     } else {
@@ -1556,6 +1558,7 @@ let meshCentroid = [0, 0, 0];
                         inp.addEventListener("change", () => {
                             skelParams[key] =
                                 def.type === "int" ? parseInt(inp.value) : parseFloat(inp.value);
+                            localStorage.setItem('skeliner_skelParams', JSON.stringify(skelParams));
                         });
                         body.appendChild(inp);
                     }
@@ -1571,6 +1574,7 @@ let meshCentroid = [0, 0, 0];
 
             function resetSkelParams() {
                 skelParams = {};
+                localStorage.removeItem('skeliner_skelParams');
                 openSkelParams();
             }
 
