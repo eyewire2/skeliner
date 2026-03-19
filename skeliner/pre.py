@@ -953,6 +953,50 @@ def _organelle_precompute(
     return outward_dots, face_comp, main_ci, main_face_mask
 
 
+def find_rims(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    gradient_threshold: float = 0.8,
+    verbose: bool = False,
+) -> np.ndarray:
+    """Find rim faces — high-gradient transitions between outward and inward.
+
+    Rim faces mark the openings of pocket organelles where the mesh surface
+    transitions sharply from outward-facing to inward-facing.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask ``(nFaces,)`` — True for rim faces.
+    """
+    outward_dots, _, _, main_face_mask = _organelle_precompute(
+        mesh, radius, radius_multiplier, verbose,
+    )
+    n_faces = len(mesh.faces)
+    adj = _face_adjacency(mesh)
+    gradient = _outward_dot_gradient(outward_dots, adj, n_faces)
+
+    rim = np.zeros(n_faces, dtype=bool)
+    for fi in range(n_faces):
+        if not main_face_mask[fi]:
+            continue
+        if gradient[fi] < gradient_threshold:
+            continue
+        nbs = list(adj.get(fi, set()))
+        if not nbs:
+            continue
+        nb_dots = outward_dots[nbs]
+        if nb_dots.max() > 0.2 and nb_dots.min() < -0.2:
+            rim[fi] = True
+
+    if verbose:
+        print(f"[skeliner.pre] Rim faces: {rim.sum():,}")
+
+    return rim
+
+
 def _face_adjacency(mesh: trimesh.Trimesh) -> dict[int, set[int]]:
     """Build face adjacency map (edge-connected neighbors)."""
     from collections import defaultdict

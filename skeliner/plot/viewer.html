@@ -90,6 +90,7 @@
   <button id="detectBtn" style="font-size:11px;cursor:pointer;">All Organelles (A)</button>
   <button id="detectSurfaceBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Pocket Org.</button>
   <button id="detectIsolatedBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Isolated Org.</button>
+  <button id="detectRimsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Rims (R)</button>
   <button id="detectHolesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Holes (H)</button>
 </div>
 
@@ -211,10 +212,12 @@ async function init() {
   document.getElementById('detectBtn').addEventListener('click', runDetectOrganelles);
   document.getElementById('detectSurfaceBtn').addEventListener('click', () => runDetectOrganellesType('pocket'));
   document.getElementById('detectIsolatedBtn').addEventListener('click', () => runDetectOrganellesType('isolated'));
+  document.getElementById('detectRimsBtn').addEventListener('click', runDetectRims);
   document.getElementById('detectHolesBtn').addEventListener('click', runDetectHoles);
   window.addEventListener('keydown', (e) => {
     if (e.target !== document.body || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key === 'a') runDetectOrganelles();
+    if (e.key === 'r') runDetectRims();
     if (e.key === 'h') runDetectHoles();
   });
 
@@ -766,6 +769,16 @@ async function runDetectHoles() {
     const data = await resp.json();
     btn.textContent = data.ok ? `Holes: ${data.nHoles} (H)` : 'Error (H)';
   } catch (e) { btn.textContent = 'Error (H)'; } finally { btn.disabled = false; }
+}
+
+async function runDetectRims() {
+  const btn = document.getElementById('detectRimsBtn');
+  btn.textContent = 'Detecting...'; btn.disabled = true;
+  try {
+    const resp = await fetch('/detect_rims', { method: 'POST' });
+    const data = await resp.json();
+    btn.textContent = data.ok ? `Rims: ${data.nFaces} (R)` : 'Error (R)';
+  } catch (e) { btn.textContent = 'Error (R)'; } finally { btn.disabled = false; }
 }
 
 function syncManualHighlight() {

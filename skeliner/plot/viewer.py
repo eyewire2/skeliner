@@ -507,6 +507,38 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         n_faces = sum(len(h["faces"]) for h in highlights)
         return JSONResponse({"ok": True, "nFaces": n_faces})
 
+    async def detect_rims(request):
+        """Run rim detection and write results to annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import find_rims
+
+        mesh = mesh_state["mesh"]
+
+        def _run():
+            mask = find_rims(mesh)
+            return [int(fi) for fi in np.where(mask)[0]]
+
+        loop = asyncio.get_event_loop()
+        faces = await loop.run_in_executor(None, _run)
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+        if faces:
+            ann["highlights"].append({
+                "faces": faces,
+                "color": [0.2, 1.0, 0.6],
+                "label": f"rims ({len(faces):,})",
+            })
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        return JSONResponse({"ok": True, "nFaces": len(faces)})
+
     async def detect_holes(request):
         """Run hole detection and write results to annotations."""
         if mesh_state["mesh"] is None:
@@ -675,6 +707,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
+            Route("/detect_rims", detect_rims, methods=["POST"]),
             Route("/detect_holes", detect_holes, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],
