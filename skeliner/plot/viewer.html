@@ -236,6 +236,11 @@
             <div><span class="label">Skel nodes: </span><span class="value" id="nNodes">-</span></div>
             <div><span class="label">Camera: </span><span class="value" id="camPos">-</span></div>
             <div><span class="label">Visible faces: </span><span class="value" id="visCount">-</span></div>
+            <div style="margin-top:4px;color:#666;font-size:11px;">
+              <div>Click: select</div>
+              <div>Shift+click: highlight</div>
+              <div>Shift+drag: lasso</div>
+            </div>
         </div>
 
         <div id="controls">
@@ -403,7 +408,6 @@
         ></div>
 
         <div id="selection-info">
-            <div><span class="label">Click: select | Shift+click: highlight | Shift+drag: lasso</span></div>
             <div id="selDetail"></div>
             <div>
                 <span class="label">Highlighted: </span><span class="value" id="hlCount">0</span>
@@ -468,6 +472,7 @@
             // ── Globals ──────────────────────────────────────────────────────────
             let scene, camera, renderer, controls;
             let meshObj, wireframeObj, meshGeometry, clipPlane;
+let meshCentroid = [0, 0, 0];
             let skelGroups = {}; // keyed by skeleton name
             let ws = null;
             let stateDebounceTimer = null;
@@ -716,7 +721,8 @@
                 }
                 meshGeometry = null;
 
-                const { vertices, faces, nVertices, nFaces } = data;
+                const { vertices, faces, nVertices, nFaces, centroid } = data;
+  if (centroid) meshCentroid = centroid;
 
                 document.getElementById("nVerts").textContent = nVertices.toLocaleString();
                 document.getElementById("nFaces").textContent = nFaces.toLocaleString();
@@ -1074,12 +1080,18 @@
                     return;
                 }
 
+                const origPoint = [
+                    (point.x + meshCentroid[0]).toFixed(2),
+                    (point.y + meshCentroid[1]).toFixed(2),
+                    (point.z + meshCentroid[2]).toFixed(2),
+                ];
                 const selInfo = {
                     faceIndex,
                     point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)],
+                    origPoint,
                 };
                 document.getElementById("selDetail").innerHTML =
-                    `<div>Face: <b>${faceIndex}</b></div><div>Pos: ${selInfo.point.join(", ")}</div>`;
+                    `<div>Face: <b>${faceIndex}</b></div><div>Pos: ${origPoint.join(", ")}</div>`;
 
                 if (ws && ws.readyState === WebSocket.OPEN)
                     ws.send(JSON.stringify({ type: "selection", payload: selInfo }));
