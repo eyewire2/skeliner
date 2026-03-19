@@ -243,6 +243,7 @@
               <div>Shift+drag: lasso</div>
               <div>H: toggle UI</div>
               <div>L: lock camera</div>
+              <div>R: reset camera</div>
             </div>
         </div>
 
@@ -587,6 +588,8 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("skel-params-backdrop").addEventListener("click", closeSkelParams);
                 document.getElementById("skelParamsReset").addEventListener("click", resetSkelParams);
                 document.getElementById("removeMesh").addEventListener("click", () => removeItem("mesh"));
+                const savedMeshColor = localStorage.getItem('skeliner_meshColor');
+                if (savedMeshColor) document.getElementById("meshColorPicker").value = savedMeshColor;
                 document.getElementById("meshColorPicker").addEventListener("input", (e) => {
                     if (!meshObj) return;
                     const c = hexToRgb01(e.target.value);
@@ -595,6 +598,7 @@ let meshCentroid = [0, 0, 0];
                         colors.setXYZ(i, c[0], c[1], c[2]);
                     }
                     colors.needsUpdate = true;
+                    localStorage.setItem('skeliner_meshColor', e.target.value);
                 });
                 document.getElementById("toggleMesh").addEventListener("click", () => {
                     const btn = document.getElementById("toggleMesh");
@@ -617,6 +621,43 @@ let meshCentroid = [0, 0, 0];
                             applyAnnotations(ann);
                     })
                     .catch(() => {});
+
+                // Restore cached UI state
+                try {
+                    const savedUI = JSON.parse(localStorage.getItem('skeliner_ui'));
+                    if (savedUI) {
+                        document.getElementById('opacitySlider').value = savedUI.opacity;
+                        if (meshObj) {
+                            const v = savedUI.opacity / 100;
+                            meshObj.material.opacity = v;
+                            meshObj.material.transparent = v < 1.0;
+                            meshObj.material.depthWrite = v >= 1.0;
+                            meshObj.material.needsUpdate = true;
+                        }
+                        document.getElementById('annOpacitySlider').value = savedUI.annOpacity;
+                        document.getElementById('wireToggle').checked = savedUI.wireframe;
+                        if (wireframeObj) wireframeObj.visible = savedUI.wireframe;
+                        document.getElementById('tubeToggle').checked = savedUI.tubes;
+                        if (savedUI.tubes) {
+                            for (const [n, sg] of Object.entries(skelGroups)) {
+                                if (sg) { buildTubes(n); if (sg.lines) sg.lines.visible = false; if (sg.tubes) sg.tubes.visible = true; }
+                            }
+                        }
+                    }
+                } catch (e) {}
+                // Restore cached camera (after fitCamera)
+                try {
+                    const savedCam = JSON.parse(localStorage.getItem('skeliner_camera'));
+                    if (savedCam) {
+                        camera.position.fromArray(savedCam.position);
+                        controls.target.fromArray(savedCam.target);
+                        if (savedCam.up) camera.up.fromArray(savedCam.up);
+                        if (savedCam.near) camera.near = savedCam.near;
+                        if (savedCam.far) camera.far = savedCam.far;
+                        camera.updateProjectionMatrix();
+                        controls.update();
+                    }
+                } catch (e) {}
 
                 window.addEventListener("resize", onResize);
                 window.addEventListener("keydown", onKeyDown);
@@ -652,7 +693,8 @@ let meshCentroid = [0, 0, 0];
                             const picker = document.createElement("input");
                             picker.type = "color";
                             picker.className = "hl-color-input";
-                            picker.value = rgbToHex(c);
+                            const savedSkelHex = localStorage.getItem(`skeliner_skelColor_${sname}`);
+                            picker.value = savedSkelHex || rgbToHex(c);
                             picker.title = "Skeleton color";
                             picker.addEventListener("input", () => {
                                 const nc = hexToRgb01(picker.value);
@@ -678,6 +720,7 @@ let meshCentroid = [0, 0, 0];
                                     });
                                 }
                                 nameSpan.style.color = `rgb(${Math.round(nc[0]*255)},${Math.round(nc[1]*255)},${Math.round(nc[2]*255)})`;
+                                localStorage.setItem(`skeliner_skelColor_${sname}`, picker.value);
                             });
                             div.appendChild(picker);
 
@@ -796,9 +839,9 @@ let meshCentroid = [0, 0, 0];
                         positions[i * 9 + 3 + k] = verts[b * 3 + k];
                         positions[i * 9 + 6 + k] = verts[c * 3 + k];
                     }
-                    const r = 0.55,
-                        g = 0.55,
-                        bl = 0.6;
+                    const savedMeshColor = localStorage.getItem('skeliner_meshColor');
+                    const mc = savedMeshColor ? hexToRgb01(savedMeshColor) : [0.55, 0.55, 0.6];
+                    const r = mc[0], g = mc[1], bl = mc[2];
                     for (let v = 0; v < 3; v++) {
                         colors[i * 9 + v * 3] = r;
                         colors[i * 9 + v * 3 + 1] = g;
@@ -845,7 +888,8 @@ let meshCentroid = [0, 0, 0];
 
             function buildSkeleton(data) {
                 const name = data.name || "default";
-                const baseColor = data.color || [1.0, 0.4, 0.1];
+                const savedSkelColor = localStorage.getItem(`skeliner_skelColor_${name}`);
+                const baseColor = savedSkelColor ? hexToRgb01(savedSkelColor) : (data.color || [1.0, 0.4, 0.1]);
 
                 // Remove old version of this skeleton
                 if (skelGroups[name]) {
@@ -1900,6 +1944,15 @@ let meshCentroid = [0, 0, 0];
                     },
                     visibleFaceCount: visCount,
                 };
+                // Persist to localStorage
+                localStorage.setItem('skeliner_camera', JSON.stringify(state.camera));
+                localStorage.setItem('skeliner_ui', JSON.stringify({
+                    opacity: parseInt(document.getElementById('opacitySlider').value),
+                    annOpacity: parseInt(document.getElementById('annOpacitySlider').value),
+                    wireframe: document.getElementById('wireToggle').checked,
+                    tubes: document.getElementById('tubeToggle').checked,
+                }));
+
                 if (ws && ws.readyState === WebSocket.OPEN)
                     ws.send(JSON.stringify({ type: "state_update", payload: state }));
                 else
@@ -2478,6 +2531,7 @@ let meshCentroid = [0, 0, 0];
               if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
               if (e.key === 'h' || e.key === 'H') togglePanels();
               if (e.key === 'l' || e.key === 'L') toggleCameraLock();
+              if (e.key === 'r' || e.key === 'R') { localStorage.removeItem('skeliner_camera'); fitCamera(); }
             }
 
             function onResize() {
