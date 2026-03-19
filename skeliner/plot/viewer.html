@@ -1104,6 +1104,16 @@ function updateHighlightsPanel() {
 
       div.appendChild(left);
 
+      const toggleBtn = document.createElement('button');
+      toggleBtn.textContent = annotationMeshes[idx] && !annotationMeshes[idx].visible ? 'show' : 'hide';
+      toggleBtn.style.cssText = 'font-size:10px;cursor:pointer;margin-left:4px;';
+      toggleBtn.addEventListener('click', () => {
+        if (!annotationMeshes[idx]) return;
+        annotationMeshes[idx].visible = !annotationMeshes[idx].visible;
+        toggleBtn.textContent = annotationMeshes[idx].visible ? 'hide' : 'show';
+      });
+      div.appendChild(toggleBtn);
+
       const btn = document.createElement('button');
       btn.textContent = 'x';
       btn.addEventListener('click', () => removeAnnotationGroup(idx));
@@ -1119,6 +1129,17 @@ function updateHighlightsPanel() {
       div.className = 'hl-item';
       const rgb = `rgb(${Math.round(color[0]*255)},${Math.round(color[1]*255)},${Math.round(color[2]*255)})`;
       div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}; border-radius:50%"></span>${label}</span>`;
+
+      const toggleBtn = document.createElement('button');
+      toggleBtn.textContent = markerMeshes[idx] && !markerMeshes[idx].visible ? 'show' : 'hide';
+      toggleBtn.style.cssText = 'font-size:10px;cursor:pointer;margin-left:4px;';
+      toggleBtn.addEventListener('click', () => {
+        if (!markerMeshes[idx]) return;
+        markerMeshes[idx].visible = !markerMeshes[idx].visible;
+        toggleBtn.textContent = markerMeshes[idx].visible ? 'hide' : 'show';
+      });
+      div.appendChild(toggleBtn);
+
       const btn = document.createElement('button');
       btn.textContent = 'x';
       btn.addEventListener('click', () => removeMarker(idx));
@@ -1186,6 +1207,16 @@ function updateHighlightsPanel() {
       left.appendChild(focusBtn);
 
       div.appendChild(left);
+
+      const toggleBtn = document.createElement('button');
+      toggleBtn.textContent = edgeGroupMeshes[idx] && !edgeGroupMeshes[idx].visible ? 'show' : 'hide';
+      toggleBtn.style.cssText = 'font-size:10px;cursor:pointer;margin-left:4px;';
+      toggleBtn.addEventListener('click', () => {
+        if (!edgeGroupMeshes[idx]) return;
+        edgeGroupMeshes[idx].visible = !edgeGroupMeshes[idx].visible;
+        toggleBtn.textContent = edgeGroupMeshes[idx].visible ? 'hide' : 'show';
+      });
+      div.appendChild(toggleBtn);
 
       const btn = document.createElement('button');
       btn.textContent = 'x';
