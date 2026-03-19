@@ -953,37 +953,144 @@ def _organelle_precompute(
     return outward_dots, face_comp, main_ci, main_face_mask
 
 
-def find_surface_organelles(
+def _face_adjacency(mesh: trimesh.Trimesh) -> dict[int, set[int]]:
+    """Build face adjacency map (edge-connected neighbors)."""
+    from collections import defaultdict
+
+    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi, f in enumerate(mesh.faces):
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            edge_to_face[(min(a, b), max(a, b))].append(fi)
+
+    adj: dict[int, set[int]] = defaultdict(set)
+    for faces in edge_to_face.values():
+        for i in range(len(faces)):
+            for j in range(i + 1, len(faces)):
+                adj[faces[i]].add(faces[j])
+                adj[faces[j]].add(faces[i])
+    return adj
+
+
+def _outward_dot_gradient(
+    dots: np.ndarray,
+    adj: dict[int, set[int]],
+    n_faces: int,
+) -> np.ndarray:
+    """Per-face gradient: max absolute outward_dot difference to neighbors."""
+    gradient = np.zeros(n_faces, dtype=np.float32)
+    for fi in range(n_faces):
+        nbs = adj.get(fi)
+        if nbs:
+            nbs_list = list(nbs)
+            gradient[fi] = np.abs(dots[nbs_list] - dots[fi]).max()
+    return gradient
+
+
+def find_pocket_organelles(
     mesh: trimesh.Trimesh,
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
+    seed_threshold: float = -0.5,
+    gradient_threshold: float = 0.8,
     min_cluster_size: int = 5,
     verbose: bool = False,
 ) -> np.ndarray:
-    """Detect inward-facing face clusters on the main connected component.
+    """Detect pocket organelles — membrane folds connected to the neuron surface.
 
-    These are organelle membranes that are topologically connected to the
-    neuron surface (share edges), detected via ``outward_dot < 0`` +
-    cluster filtering.
+    Uses a gradient-based approach:
+
+    1. Compute per-face outward_dot and its gradient (max neighbor difference).
+    2. Identify **rim faces** — high gradient faces at the opening of each
+       pocket, where the surface transitions sharply from outward to inward.
+    3. Seed from strongly inward-facing faces (``outward_dot < seed_threshold``).
+    4. Flood-fill from seeds through connected faces, stopping at rim faces.
+       This fills entire pockets regardless of individual face dot values.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh.
+    radius : float or None
+        Radius for outward_dot computation. Auto-computed if None.
+    radius_multiplier : float
+        Multiplier for auto radius.
+    seed_threshold : float
+        Faces with ``outward_dot < seed_threshold`` are seeds.
+    gradient_threshold : float
+        Faces with gradient above this form the rim (flood-fill barrier).
+    min_cluster_size : int
+        Pocket clusters smaller than this are discarded (noise).
+    verbose : bool
 
     Returns
     -------
     np.ndarray
-        Boolean mask ``(nFaces,)`` — surface organelle faces.
+        Boolean mask ``(nFaces,)`` — pocket organelle faces.
     """
+    from collections import deque
+
     outward_dots, _, _, main_face_mask = _organelle_precompute(
         mesh, radius, radius_multiplier, verbose,
     )
-    raw = (outward_dots < 0) & main_face_mask
-    surface = _filter_small_clusters(mesh, raw, min_cluster_size)
+    n_faces = len(mesh.faces)
+    adj = _face_adjacency(mesh)
+
+    # Gradient of outward_dot
+    gradient = _outward_dot_gradient(outward_dots, adj, n_faces)
+
+    # Rim faces: high gradient AND on the transition (have both positive
+    # and negative dot neighbors)
+    rim = np.zeros(n_faces, dtype=bool)
+    for fi in range(n_faces):
+        if not main_face_mask[fi]:
+            continue
+        if gradient[fi] < gradient_threshold:
+            continue
+        nbs = list(adj.get(fi, set()))
+        if not nbs:
+            continue
+        nb_dots = outward_dots[nbs]
+        if nb_dots.max() > 0.2 and nb_dots.min() < -0.2:
+            rim[fi] = True
+
+    if verbose:
+        print(f"[skeliner.pre] Rim faces: {rim.sum():,}")
+
+    # Seeds: strongly negative faces on main component, not on rim
+    seeds = (outward_dots < seed_threshold) & main_face_mask & ~rim
+    if verbose:
+        print(f"[skeliner.pre] Seed faces (dot < {seed_threshold}): {seeds.sum():,}")
+
+    # Flood-fill from seeds, blocked by rim faces
+    pocket = np.zeros(n_faces, dtype=bool)
+    visited = np.zeros(n_faces, dtype=bool)
+    queue = deque(np.where(seeds)[0].tolist())
+
+    while queue:
+        fi = queue.popleft()
+        if visited[fi]:
+            continue
+        visited[fi] = True
+        if rim[fi]:
+            continue
+        if not main_face_mask[fi]:
+            continue
+        pocket[fi] = True
+        for nfi in adj.get(fi, set()):
+            if not visited[nfi]:
+                queue.append(nfi)
+
+    # Cluster filter to remove noise
+    pocket = _filter_small_clusters(mesh, pocket, min_cluster_size)
 
     if verbose:
         print(
-            f"[skeliner.pre] Surface organelles (>= {min_cluster_size}): "
-            f"{surface.sum():,} faces"
+            f"[skeliner.pre] Pocket organelles (>= {min_cluster_size}): "
+            f"{pocket.sum():,} faces"
         )
-    return surface
+    return pocket
 
 
 def find_isolated_organelles(
@@ -1046,8 +1153,8 @@ def find_organelles(
 
     Returns two non-overlapping masks:
 
-    * **surface** — inward-facing face clusters on the main connected
-      component, detected via ``outward_dot < 0`` + cluster filtering.
+    * **pocket** — membrane folds connected to the neuron surface,
+      detected via gradient-based rim finding + flood-fill.
     * **isolated** — entire vertex-disconnected components whose
       mean outward dot is negative (fully enclosed fragments).
 
@@ -1070,23 +1177,22 @@ def find_organelles(
 
     Returns
     -------
-    surface : np.ndarray
-        Boolean mask ``(nFaces,)`` — surface organelle faces (main component).
+    pocket : np.ndarray
+        Boolean mask ``(nFaces,)`` — pocket organelle faces (main component).
     isolated : np.ndarray
         Boolean mask ``(nFaces,)`` — isolated internal fragment faces.
     """
-    outward_dots, face_comp, main_ci, main_face_mask = _organelle_precompute(
-        mesh, radius, radius_multiplier, verbose,
+    pocket = find_pocket_organelles(
+        mesh,
+        radius=radius,
+        radius_multiplier=radius_multiplier,
+        min_cluster_size=min_cluster_size,
+        verbose=verbose,
     )
 
-    # Surface organelles
-    raw = (outward_dots < 0) & main_face_mask
-    surface = _filter_small_clusters(mesh, raw, min_cluster_size)
-    if verbose:
-        print(
-            f"[skeliner.pre] Surface organelles (>= {min_cluster_size}): "
-            f"{surface.sum():,} faces"
-        )
+    outward_dots, face_comp, main_ci, _ = _organelle_precompute(
+        mesh, radius, radius_multiplier, verbose=False,
+    )
 
     # Isolated organelles
     n_comps = face_comp.max() + 1
@@ -1113,7 +1219,7 @@ def find_organelles(
             f"{n_kept_frags:,} external (kept)"
         )
 
-    return surface, isolated
+    return pocket, isolated
 
 
 def remove_organelles(
@@ -1156,14 +1262,14 @@ def remove_organelles(
     trimesh.Trimesh
         Cleaned mesh with internal fragments removed.
     """
-    surface, isolated = find_organelles(
+    pocket, isolated = find_organelles(
         mesh,
         radius=radius,
         radius_multiplier=radius_multiplier,
         min_cluster_size=min_cluster_size,
         verbose=verbose,
     )
-    organelle = surface | isolated
+    organelle = pocket | isolated
 
     if not organelle.any():
         if verbose:

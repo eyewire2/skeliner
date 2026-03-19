@@ -452,17 +452,17 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         loop = asyncio.get_event_loop()
 
         highlights = []
-        if det_type == "surface":
-            from skeliner.pre import find_surface_organelles
+        if det_type in ("pocket", "surface"):
+            from skeliner.pre import find_pocket_organelles
             mask = await loop.run_in_executor(
-                None, lambda: find_surface_organelles(mesh)
+                None, lambda: find_pocket_organelles(mesh)
             )
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
                 highlights.append({
                     "faces": faces,
                     "color": [1, 0.15, 0.15],
-                    "label": f"organelle:surface ({len(faces):,})",
+                    "label": f"organelle:pocket ({len(faces):,})",
                 })
         elif det_type == "isolated":
             from skeliner.pre import find_isolated_organelles
@@ -487,7 +487,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 highlights.append({
                     "faces": sf,
                     "color": [1, 0.15, 0.15],
-                    "label": f"organelle:surface ({len(sf):,})",
+                    "label": f"organelle:pocket ({len(sf):,})",
                 })
             if iso:
                 highlights.append({
