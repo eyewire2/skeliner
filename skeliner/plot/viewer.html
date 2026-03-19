@@ -107,7 +107,9 @@
   <div id="hlSaveRow" style="display:none;margin-top:4px;">
     <input id="hlSaveName" type="text" placeholder="annotation name" style="font-size:11px;width:120px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:2px 4px;">
     <button id="hlSaveBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Save</button>
+    <button id="hlCheckFusion" style="font-size:11px;cursor:pointer;margin-left:4px;">Check Fusion</button>
   </div>
+  <div id="fusionResult" style="margin-top:4px;font-size:11px;color:#adf;display:none;"></div>
   <div id="hlList" style="margin-top:4px;max-height:200px;overflow-y:auto;"></div>
   <div id="hlClearAllRow" style="display:none;margin-top:2px;"><button id="hlClearAll" style="font-size:10px;cursor:pointer;">Clear All Annotations</button></div>
 </div>
@@ -212,6 +214,7 @@ async function init() {
   document.getElementById('hlSaveName').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') saveHighlightAsAnnotation();
   });
+  document.getElementById('hlCheckFusion').addEventListener('click', checkFusion);
 
   renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
   renderer.domElement.addEventListener('pointerdown', onRecenter);
@@ -836,6 +839,37 @@ function saveHighlightAsAnnotation() {
   rebuildManualHighlight();
   syncManualHighlight();
   nameInput.value = '';
+}
+
+async function checkFusion() {
+  if (manualHighlightFaces.size === 0) return;
+  const resultDiv = document.getElementById('fusionResult');
+  resultDiv.style.display = 'block';
+  resultDiv.textContent = 'Analyzing...';
+  try {
+    const resp = await fetch('/check_fusion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      const lines = [];
+      if (data.nm_edges > 0) lines.push(`${data.nm_edges} non-manifold edges`);
+      if (data.duplicate_faces > 0) lines.push(`${data.duplicate_faces} duplicate faces`);
+      if (data.high_neighbor_faces > 0) lines.push(`${data.high_neighbor_faces} faces with >3 neighbors`);
+      if (data.fusion_faces && data.fusion_faces.length > 0) {
+        lines.push(`${data.fusion_faces.length} fusion face(s) found`);
+        // Add fusion faces to highlight
+        for (const fi of data.fusion_faces) manualHighlightFaces.add(fi);
+        rebuildManualHighlight();
+        syncManualHighlight();
+      }
+      resultDiv.textContent = lines.length > 0 ? lines.join(' | ') : 'No fusion signals found';
+    } else {
+      resultDiv.textContent = data.error || 'Error';
+    }
+  } catch (e) { resultDiv.textContent = 'Error: ' + e.message; }
 }
 
 // ── Lasso (rectangle) selection ───────────────────────────────────
