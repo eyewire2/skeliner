@@ -54,6 +54,29 @@
     background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
     font-size: 12px;
   }
+  #detect-panel button, #skel-params-dialog button, #save-dialog button {
+    background: #2a2a3e; color: #ccc; border: 1px solid #555; border-radius: 4px;
+    padding: 3px 10px; font-size: 11px; font-family: monospace; cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #detect-panel button:hover, #skel-params-dialog button:hover, #save-dialog button:hover {
+    background: #3a3a52; border-color: #7af;
+  }
+  #detect-panel button:active, #skel-params-dialog button:active, #save-dialog button:active {
+    background: #4a4a62;
+  }
+  #detect-panel button:disabled {
+    opacity: 0.5; cursor: default;
+  }
+  #detect-panel button:disabled:hover {
+    background: #2a2a3e; border-color: #555;
+  }
+  #saveBtn {
+    background: #1a3a2a !important; border-color: #4a8 !important; color: #8dc !important;
+  }
+  #saveBtn:hover {
+    background: #2a4a3a !important; border-color: #6ca !important;
+  }
   #lasso-rect {
     position: fixed; border: 2px dashed #4af; background: rgba(0,120,255,0.1);
     pointer-events: none; display: none; z-index: 100;
@@ -80,7 +103,6 @@
 </div>
 
 <div id="controls">
-  <label>Clip plane: <input type="range" id="clipSlider" min="0" max="100" value="100"></label>
   <label><input type="checkbox" id="wireToggle" checked> Wireframe</label>
   <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50"></label>
   <label>Ann: <input type="range" id="annOpacitySlider" min="0" max="100" value="90"></label>
@@ -90,23 +112,28 @@
   </select></label>
 </div>
 
-<div id="detect-panel" style="white-space:nowrap;">
-  <span style="color:#888;">Detect:</span>
-  <button id="detectBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">All Organelles (A)</button>
-  <button id="detectSurfaceBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Pocket Org.</button>
-  <button id="detectIsolatedBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Isolated Org.</button>
-  <button id="detectRimsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Rims (R)</button>
-  <button id="detectHolesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Holes (H)</button>
-  <button id="detectFusionsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Fusions (F)</button>
-  <span style="color:#888;margin-left:12px;">Remove:</span>
-  <button id="removeOrganellesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Organelles</button>
-  <button id="removeFusionsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Fusions</button>
-  <button id="fillHolesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Holes</button>
-  <span style="color:#888;margin-left:12px;">Skeleton:</span>
-  <button id="skeletonizeBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Skeletonize</button>
-  <button id="skelParamsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Set Params</button>
-  <span style="color:#888;margin-left:12px;">Save:</span>
-  <button id="saveBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Save</button>
+<div id="detect-panel">
+  <div style="white-space:nowrap;">
+    <span style="color:#888;">Detect:</span>
+    <button id="detectBtn" style="margin-left:4px;">All Organelles</button>
+    <button id="detectSurfaceBtn" style="margin-left:4px;">Pocket Org.</button>
+    <button id="detectIsolatedBtn" style="margin-left:4px;">Isolated Org.</button>
+    <button id="detectRimsBtn" style="margin-left:4px;">Rims</button>
+    <button id="detectHolesBtn" style="margin-left:4px;">Holes</button>
+    <button id="detectFusionsBtn" style="margin-left:4px;">Fusions</button>
+    <span style="color:#888;margin-left:12px;">Skeleton:</span>
+    <button id="skeletonizeBtn" style="margin-left:4px;">Skeletonize</button>
+    <button id="skelParamsBtn" style="margin-left:4px;">Set Params</button>
+  </div>
+  <div style="white-space:nowrap;margin-top:4px;display:flex;justify-content:space-between;align-items:center;">
+    <span>
+      <span style="color:#888;">Remove:</span>
+      <button id="removeOrganellesBtn" style="margin-left:4px;">Organelles</button>
+      <button id="removeFusionsBtn" style="margin-left:4px;">Fusions</button>
+      <button id="fillHolesBtn" style="margin-left:4px;">Holes</button>
+    </span>
+    <button id="saveBtn">Save</button>
+  </div>
 </div>
 
 <div id="skel-params-dialog" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;border:1px solid #555;border-radius:6px;padding:16px;z-index:1000;font-size:12px;min-width:360px;max-height:80vh;overflow-y:auto;">
@@ -282,14 +309,6 @@ async function init() {
   document.getElementById('skelParamsClose').addEventListener('click', closeSkelParams);
   document.getElementById('skel-params-backdrop').addEventListener('click', closeSkelParams);
   document.getElementById('skelParamsReset').addEventListener('click', resetSkelParams);
-  window.addEventListener('keydown', (e) => {
-    if (e.target !== document.body || e.ctrlKey || e.metaKey || e.shiftKey) return;
-    if (e.key === 'a') runDetectOrganelles();
-    if (e.key === 'r') runDetectRims();
-    if (e.key === 'h') runDetectHoles();
-    if (e.key === 'f') runDetectFusions();
-  });
-
   document.getElementById('removeMesh').addEventListener('click', () => removeItem('mesh'));
   document.getElementById('toggleMesh').addEventListener('click', () => {
     const btn = document.getElementById('toggleMesh');
@@ -598,20 +617,10 @@ function fitCamera() {
   controls.target.copy(sphere.center);
   controls.update();
 
-  const clipSlider = document.getElementById('clipSlider');
-  clipSlider._bsRadius = sphere.radius;
-  clipSlider._bsCenter = sphere.center.z;
 }
 
 // ── Controls ─────────────────────────────────────────────────────────
 function setupControls() {
-  document.getElementById('clipSlider').addEventListener('input', (e) => {
-    const pct = parseInt(e.target.value);
-    const r = e.target._bsRadius || 500;
-    const cz = e.target._bsCenter || 0;
-    clipPlane.constant = cz - r + (pct / 100) * r * 2;
-    scheduleStateUpdate();
-  });
   document.getElementById('wireToggle').addEventListener('change', (e) => {
     if (wireframeObj) wireframeObj.visible = e.target.checked;
   });
@@ -814,8 +823,8 @@ async function runDetectOrganelles() {
   try {
     const resp = await fetch('/detect_organelles', { method: 'POST' });
     const data = await resp.json();
-    btn.textContent = data.ok ? `Organelles: ${data.nFaces} (A)` : 'Error (A)';
-  } catch (e) { btn.textContent = 'Error (A)'; } finally { btn.disabled = false; }
+    btn.textContent = data.ok ? `Organelles: ${data.nFaces} (A)` : 'Error';
+  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
 }
 
 async function runDetectOrganellesType(type) {
@@ -836,8 +845,8 @@ async function runDetectHoles() {
   try {
     const resp = await fetch('/detect_holes', { method: 'POST' });
     const data = await resp.json();
-    btn.textContent = data.ok ? `Holes: ${data.nHoles} (H)` : 'Error (H)';
-  } catch (e) { btn.textContent = 'Error (H)'; } finally { btn.disabled = false; }
+    btn.textContent = data.ok ? `Holes: ${data.nHoles} (H)` : 'Error';
+  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
 }
 
 async function runDetectFusions() {
@@ -846,8 +855,8 @@ async function runDetectFusions() {
   try {
     const resp = await fetch('/detect_fusions', { method: 'POST' });
     const data = await resp.json();
-    btn.textContent = data.ok ? `Fusions: ${data.nClusters} (F)` : 'Error (F)';
-  } catch (e) { btn.textContent = 'Error (F)'; } finally { btn.disabled = false; }
+    btn.textContent = data.ok ? `Fusions: ${data.nClusters} (F)` : 'Error';
+  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
 }
 
 async function runDetectRims() {
@@ -856,8 +865,8 @@ async function runDetectRims() {
   try {
     const resp = await fetch('/detect_rims', { method: 'POST' });
     const data = await resp.json();
-    btn.textContent = data.ok ? `Rims: ${data.nFaces} (R)` : 'Error (R)';
-  } catch (e) { btn.textContent = 'Error (R)'; } finally { btn.disabled = false; }
+    btn.textContent = data.ok ? `Rims: ${data.nFaces} (R)` : 'Error';
+  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
 }
 
 async function runRemoveOrganelles() {
