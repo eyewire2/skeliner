@@ -985,6 +985,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 )
             face1 = body.get("face1")
             face2 = body.get("face2")
+            mode = body.get("mode", "edge")  # "edge" or "vertex"
             if face1 is None or face2 is None:
                 return JSONResponse(
                     {"ok": False, "error": "Need face1 and face2"}, status_code=400
@@ -993,20 +994,48 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             mesh = mesh_state["mesh"]
 
             def _run_mesh_path():
+                from collections import defaultdict
+
                 n_faces = len(mesh.faces)
                 if face1 < 0 or face1 >= n_faces or face2 < 0 or face2 >= n_faces:
                     return None, 0
                 if face1 == face2:
                     return [face1], 0.0
 
-                adj_pairs = mesh.face_adjacency
                 centroids = mesh.triangles_center
 
-                adj = [[] for _ in range(n_faces)]
-                for a, b in adj_pairs:
-                    d = float(np.linalg.norm(centroids[a] - centroids[b]))
-                    adj[a].append((b, d))
-                    adj[b].append((a, d))
+                if mode == "vertex":
+                    # Vertex-based: faces sharing at least 1 vertex.
+                    # Slower but crosses fusion points.
+                    vert_to_faces = defaultdict(list)
+                    for fi, f in enumerate(mesh.faces):
+                        for v in f:
+                            vert_to_faces[int(v)].append(fi)
+
+                    adj_sets = [set() for _ in range(n_faces)]
+                    for v_faces in vert_to_faces.values():
+                        for i in range(len(v_faces)):
+                            for j in range(i + 1, len(v_faces)):
+                                adj_sets[v_faces[i]].add(v_faces[j])
+                                adj_sets[v_faces[j]].add(v_faces[i])
+
+                    adj = [[] for _ in range(n_faces)]
+                    for fi in range(n_faces):
+                        for fj in adj_sets[fi]:
+                            d = float(np.linalg.norm(
+                                centroids[fi] - centroids[fj]
+                            ))
+                            adj[fi].append((fj, d))
+                else:
+                    # Edge-based: faces sharing an edge. Fast.
+                    adj_pairs = mesh.face_adjacency
+                    adj = [[] for _ in range(n_faces)]
+                    for a, b in adj_pairs:
+                        d = float(np.linalg.norm(
+                            centroids[a] - centroids[b]
+                        ))
+                        adj[a].append((b, d))
+                        adj[b].append((a, d))
 
                 dist = [float("inf")] * n_faces
                 dist[face1] = 0
