@@ -979,6 +979,91 @@ def _organelle_precompute(
     return outward_dots, face_comp, main_ci, main_face_mask
 
 
+def _rim_enclosed_area(
+    boundary_edges: list[tuple[int, int]],
+    vertices: np.ndarray,
+) -> float:
+    """Compute total enclosed planar area of closed loops in boundary edges.
+
+    For each closed loop: project vertices onto a best-fit plane, then
+    compute polygon area via the shoelace formula.
+    """
+    from collections import defaultdict, deque
+
+    if not boundary_edges:
+        return 0.0
+
+    vert_to_be: dict[int, list[int]] = defaultdict(list)
+    for i, e in enumerate(boundary_edges):
+        vert_to_be[e[0]].append(i)
+        vert_to_be[e[1]].append(i)
+
+    visited: set[int] = set()
+    total_area = 0.0
+
+    for start in range(len(boundary_edges)):
+        if start in visited:
+            continue
+        comp: list[int] = []
+        queue = deque([start])
+        while queue:
+            ei = queue.popleft()
+            if ei in visited:
+                continue
+            visited.add(ei)
+            comp.append(ei)
+            for v in boundary_edges[ei]:
+                for nei in vert_to_be[v]:
+                    if nei not in visited:
+                        queue.append(nei)
+
+        # Check closed ring
+        vcount: dict[int, int] = defaultdict(int)
+        for ei in comp:
+            for v in boundary_edges[ei]:
+                vcount[v] += 1
+        if not all(c == 2 for c in vcount.values()):
+            continue
+
+        # Order vertices into a loop
+        edge_list = [boundary_edges[ei] for ei in comp]
+        adj_v: dict[int, list[int]] = defaultdict(list)
+        for a, b in edge_list:
+            adj_v[a].append(b)
+            adj_v[b].append(a)
+
+        ordered = [edge_list[0][0]]
+        while len(ordered) < len(edge_list):
+            curr = ordered[-1]
+            prev = ordered[-2] if len(ordered) > 1 else -1
+            for nb in adj_v[curr]:
+                if nb != prev:
+                    ordered.append(nb)
+                    break
+            else:
+                break
+
+        if len(ordered) < 3:
+            continue
+
+        # Project onto best-fit plane and compute area
+        pts = vertices[ordered]
+        centroid = pts.mean(axis=0)
+        centered = pts - centroid
+        _, _, vh = np.linalg.svd(centered)
+        u_ax, v_ax = vh[0], vh[1]
+        pts_2d = np.column_stack([centered @ u_ax, centered @ v_ax])
+        x, y = pts_2d[:, 0], pts_2d[:, 1]
+        area = 0.5 * abs(
+            np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
+            + x[-1] * y[0]
+            - x[0] * y[-1]
+        )
+        total_area += area
+
+    return total_area
+
+
 def _count_edge_loops(edges: list[tuple[int, int]]) -> int:
     """Count connected components of an edge list."""
     from collections import defaultdict, deque
@@ -1014,16 +1099,19 @@ def find_rims(
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
-    min_pocket_size: int = 30,
+    min_pocket_size: int = 5,
+    min_fold_ratio: float = 2.0,
     verbose: bool = False,
     _precomputed: tuple | None = None,
 ) -> list[list[tuple[int, int]]]:
     """Find rim edges — boundaries of negative-dot face clusters.
 
-    Each rim is a list of edges (vertex-index pairs) forming the boundary
-    between a pocket (connected region of inward-facing faces) and the
-    outer surface.  Only pockets with at least *min_pocket_size* faces
-    produce a rim.
+    A valid pocket must satisfy:
+
+    1. Multiple boundary loops (not a flat patch with a single outline).
+    2. Fold ratio > *min_fold_ratio*: the pocket surface area must be
+       much larger than the rim's enclosed planar area, indicating the
+       surface folds inward through a small opening.
 
     Returns
     -------
@@ -1108,13 +1196,22 @@ def find_rims(
         if n_loops <= 1:
             continue  # single loop = flat patch, not a pocket
 
-        # Keep all boundary edges as rim for this pocket
+        # Fold ratio: pocket surface area / rim enclosed planar area.
+        # A real pocket folds inward through a small opening (high ratio).
+        # A flat patch has ratio ≈ 1 (same area inside and outside).
+        pocket_area = float(mesh.area_faces[cluster].sum())
+        opening_area = _rim_enclosed_area(boundary_edges, mesh.vertices)
+        if opening_area > 0:
+            fold_ratio = pocket_area / opening_area
+            if fold_ratio < min_fold_ratio:
+                continue
+
         rims.append(boundary_edges)
 
     if verbose:
         print(
             f"[skeliner.pre] Rims: {len(rims)} pockets "
-            f"(>= {min_pocket_size} faces, multi-loop), "
+            f"(multi-loop, fold >= {min_fold_ratio}), "
             f"{sum(len(r) for r in rims):,} rim edges"
         )
 
@@ -1162,6 +1259,7 @@ def find_pocket_organelles(
     radius_multiplier: float = 5.0,
     grow_threshold: float = 0.1,
     min_pocket_size: int = 5,
+    min_fold_ratio: float = 2.0,
     min_cluster_size: int = 5,
     verbose: bool = False,
     _precomputed: tuple | None = None,
@@ -1219,6 +1317,7 @@ def find_pocket_organelles(
         radius=radius,
         radius_multiplier=radius_multiplier,
         min_pocket_size=min_pocket_size,
+        min_fold_ratio=min_fold_ratio,
         verbose=verbose,
         _precomputed=_precomputed,
     )
