@@ -1520,14 +1520,23 @@ def find_fusions(
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
+    grow_rings: int = 20,
+    min_branch_size: int = 5,
     verbose: bool = False,
 ) -> list[list[int]]:
     """Detect fusion points where two branches share faces.
 
-    At a fusion, two branch surfaces cross through each other, creating
-    edges shared by 4 faces (instead of the normal 2).  The inward-facing
-    faces at those edges are the fusion faces — the shared membrane
-    between two branches that should be separated.
+    Algorithm:
+
+    1. Find non-manifold seed faces: negative-outward-dot faces at edges
+       shared by >2 faces, plus duplicate faces with >3 neighbors.
+    2. Cluster seeds by adjacency.
+    3. For each seed cluster, grow a local region outward ring by ring.
+    4. Split the region using **manifold-only** edge connectivity — at
+       a fusion, non-manifold edges connect the two branches, so removing
+       them from the adjacency separates the branches.
+    5. Report the boundary faces between the two largest components as
+       the fusion zone.
 
     Parameters
     ----------
@@ -1537,14 +1546,19 @@ def find_fusions(
         Radius for outward_dot computation. Auto-computed if None.
     radius_multiplier : float
         Multiplier for auto radius.
+    grow_rings : int
+        Maximum rings to grow around each seed cluster.
+    min_branch_size : int
+        Minimum faces in a component to count as a branch.
     verbose : bool
 
     Returns
     -------
     list[list[int]]
-        Each inner list is one fusion cluster (face indices).
+        Each inner list is one fusion cluster (boundary face indices
+        between the two branches).
     """
-    from collections import deque
+    from collections import Counter, deque
 
     areas = mesh.area_faces
     zero_faces = set(np.where(areas < 1e-6)[0].tolist())
@@ -1558,6 +1572,16 @@ def find_fusions(
             a, b = int(f[i]), int(f[(i + 1) % 3])
             edge_to_face[(min(a, b), max(a, b))].append(fi)
 
+    def _get_neighbors(fi: int) -> set[int]:
+        f = mesh.faces[fi]
+        nb: set[int] = set()
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            for nfi in edge_to_face[(min(a, b), max(a, b))]:
+                if nfi != fi:
+                    nb.add(nfi)
+        return nb
+
     # Outward dot for inward-face filtering
     outward_dots = _outward_dot(
         mesh,
@@ -1565,31 +1589,54 @@ def find_fusions(
         else radius_multiplier * float(np.median(mesh.edges_unique_length)),
     )
 
-    # Fusion faces: negative-dot faces at edges shared by exactly 4 faces
-    fusion_faces: set[int] = set()
+    # ── Seed detection ───────────────────────────────────────────────
+    # Signal 1: negative-dot faces at non-manifold edges
+    nm_neg_faces: set[int] = set()
     for e, faces in edge_to_face.items():
-        if len(faces) == 4:
+        if len(faces) > 2:
             for fi in faces:
                 if outward_dots[fi] < 0:
-                    fusion_faces.add(fi)
+                    nm_neg_faces.add(fi)
 
-    if not fusion_faces:
+    # Signal 2: exact duplicate faces with >3 neighbors
+    face_tuples = [
+        tuple(sorted(int(v) for v in f)) for f in mesh.faces
+    ]
+    dupe_set = {
+        ft for ft, c in Counter(face_tuples).items() if c > 1
+    }
+    dupe_faces: set[int] = set()
+    for fi, ft in enumerate(face_tuples):
+        if ft in dupe_set and fi not in zero_faces:
+            nb: set[int] = set()
+            f = mesh.faces[fi]
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                for nfi in edge_to_face[(min(a, b), max(a, b))]:
+                    if nfi != fi:
+                        nb.add(nfi)
+            if len(nb) > 3:
+                dupe_faces.add(fi)
+
+    seed_faces = nm_neg_faces | dupe_faces
+
+    if not seed_faces:
         if verbose:
             print("[skeliner.pre] No fusions found")
         return []
 
-    # Cluster by adjacency
-    adj: dict[int, set[int]] = defaultdict(set)
+    # ── Cluster seeds ────────────────────────────────────────────────
+    seed_adj: dict[int, set[int]] = defaultdict(set)
     for e, faces in edge_to_face.items():
         for i in range(len(faces)):
             for j in range(i + 1, len(faces)):
-                if faces[i] in fusion_faces and faces[j] in fusion_faces:
-                    adj[faces[i]].add(faces[j])
-                    adj[faces[j]].add(faces[i])
+                if faces[i] in seed_faces and faces[j] in seed_faces:
+                    seed_adj[faces[i]].add(faces[j])
+                    seed_adj[faces[j]].add(faces[i])
 
     visited: set[int] = set()
-    clusters: list[list[int]] = []
-    for fi in fusion_faces:
+    seed_clusters: list[list[int]] = []
+    for fi in seed_faces:
         if fi in visited:
             continue
         cluster: list[int] = []
@@ -1600,20 +1647,100 @@ def find_fusions(
                 continue
             visited.add(curr)
             cluster.append(curr)
-            for nfi in adj.get(curr, set()):
+            for nfi in seed_adj.get(curr, set()):
                 if nfi not in visited:
                     queue.append(nfi)
-        clusters.append(sorted(cluster))
-
-    clusters.sort(key=len, reverse=True)
+        seed_clusters.append(cluster)
 
     if verbose:
         print(
-            f"[skeliner.pre] Fusions: {len(clusters)} clusters, "
-            f"{sum(len(c) for c in clusters)} faces"
+            f"[skeliner.pre] Fusion seeds: {len(seed_clusters)} clusters, "
+            f"{len(seed_faces)} faces "
+            f"(nm_neg={len(nm_neg_faces)}, dupes={len(dupe_faces)})"
         )
 
-    return clusters
+    # ── Grow region & split per cluster ──────────────────────────────
+    def _manifold_components(
+        region: set[int],
+    ) -> list[set[int]]:
+        """Split region into components using manifold edges only."""
+        m_adj: dict[int, set[int]] = defaultdict(set)
+        for fi in region:
+            f = mesh.faces[fi]
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                if len(edge_to_face[e]) == 2:
+                    for nfi in edge_to_face[e]:
+                        if nfi != fi and nfi in region:
+                            m_adj[fi].add(nfi)
+        vis: set[int] = set()
+        comps: list[set[int]] = []
+        for fi in region:
+            if fi in vis:
+                continue
+            comp: set[int] = set()
+            q = deque([fi])
+            while q:
+                curr = q.popleft()
+                if curr in vis:
+                    continue
+                vis.add(curr)
+                comp.add(curr)
+                for nfi in m_adj[curr]:
+                    if nfi not in vis:
+                        q.append(nfi)
+            comps.append(comp)
+        comps.sort(key=len, reverse=True)
+        return comps
+
+    result_clusters: list[list[int]] = []
+
+    for seed_cluster in seed_clusters:
+        region = set(seed_cluster)
+
+        # Grow outward until manifold-split gives 2 big components
+        found = False
+        for ring in range(1, grow_rings + 1):
+            boundary: set[int] = set()
+            for fi in region:
+                boundary.update(_get_neighbors(fi))
+            region = (region | boundary) - zero_faces
+
+            if ring < 3:
+                continue
+
+            comps = _manifold_components(region)
+            big = [c for c in comps if len(c) >= min_branch_size]
+            if len(big) >= 2:
+                # Boundary faces between the two largest components
+                branch0 = big[0]
+                branch1 = big[1]
+                fusion_boundary: set[int] = set()
+                for fi in branch0:
+                    for nfi in _get_neighbors(fi):
+                        if nfi in branch1:
+                            fusion_boundary.add(fi)
+                            fusion_boundary.add(nfi)
+                result_clusters.append(sorted(fusion_boundary))
+                found = True
+                break
+
+        if not found and verbose:
+            print(
+                f"[skeliner.pre]   Seed cluster ({len(seed_cluster)}f): "
+                f"no split after {grow_rings} rings"
+            )
+
+    result_clusters.sort(key=len, reverse=True)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Fusions: {len(result_clusters)} regions, "
+            f"{sum(len(c) for c in result_clusters)} boundary faces"
+        )
+
+    return result_clusters
 
 
 def remove_organelles(
