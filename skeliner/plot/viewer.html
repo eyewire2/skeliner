@@ -131,6 +131,8 @@
       <button id="removeOrganellesBtn" style="margin-left:4px;">Organelles</button>
       <button id="removeFusionsBtn" style="margin-left:4px;">Fusions</button>
       <button id="fillHolesBtn" style="margin-left:4px;">Holes</button>
+      <span style="color:#888;margin-left:12px;">Path:</span>
+      <button id="findPathBtn" style="margin-left:4px;">Find Path</button>
     </span>
     <button id="saveBtn">Save</button>
   </div>
@@ -305,6 +307,7 @@ async function init() {
   document.getElementById('saveSkelNpz').addEventListener('click', () => doSave('npz'));
   document.getElementById('saveAll').addEventListener('click', () => doSave('all'));
   document.getElementById('skeletonizeBtn').addEventListener('click', runSkeletonize);
+  document.getElementById('findPathBtn').addEventListener('click', runFindPath);
   document.getElementById('skelParamsBtn').addEventListener('click', openSkelParams);
   document.getElementById('skelParamsClose').addEventListener('click', closeSkelParams);
   document.getElementById('skel-params-backdrop').addEventListener('click', closeSkelParams);
@@ -1042,6 +1045,76 @@ async function runSkeletonize() {
     }
   } catch (e) { btn.textContent = 'Error'; }
   finally { btn.disabled = false; }
+}
+
+async function runFindPath() {
+  const btn = document.getElementById('findPathBtn');
+  const origText = btn.textContent;
+  btn.textContent = 'Computing...'; btn.disabled = true;
+
+  try {
+    let body;
+    const nNodes = Object.keys(selectedNodes).length;
+    const nFaces = manualHighlightFaces.size;
+
+    if (nNodes === 2) {
+      const keys = Object.keys(selectedNodes);
+      const s1 = selectedNodes[keys[0]];
+      const s2 = selectedNodes[keys[1]];
+      if (s1.skelName !== s2.skelName) {
+        btn.textContent = 'Diff skeletons'; setTimeout(() => { btn.textContent = origText; }, 2000);
+        return;
+      }
+      body = { type: 'skeleton', skelName: s1.skelName, node1: s1.nodeIndex, node2: s2.nodeIndex };
+    } else if (nFaces === 2) {
+      const faces = Array.from(manualHighlightFaces);
+      body = { type: 'mesh', face1: faces[0], face2: faces[1] };
+    } else {
+      btn.textContent = 'Select 2'; setTimeout(() => { btn.textContent = origText; }, 2000);
+      return;
+    }
+
+    const resp = await fetch('/shortest_path', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+
+    if (data.ok) {
+      if (!currentAnnotations) currentAnnotations = {};
+      if (data.type === 'mesh') {
+        if (!currentAnnotations.highlights) currentAnnotations.highlights = [];
+        currentAnnotations.highlights.push({
+          faces: data.path,
+          color: [0.2, 1.0, 0.8],
+          label: `path (${data.nFaces}f, ${data.length.toFixed(0)}nm)`,
+        });
+        manualHighlightFaces.clear();
+        rebuildManualHighlight();
+        syncManualHighlight();
+      } else {
+        if (!currentAnnotations.edge_groups) currentAnnotations.edge_groups = [];
+        currentAnnotations.edge_groups.push({
+          segments: data.segments,
+          color: [1.0, 1.0, 0.2],
+          label: `path (${data.nNodes}n, ${data.length.toFixed(0)}nm)`,
+        });
+      }
+      applyAnnotations(currentAnnotations);
+      syncAnnotationsToServer();
+      btn.textContent = data.type === 'mesh'
+        ? `${data.nFaces}f ${data.length.toFixed(0)}nm`
+        : `${data.nNodes}n ${data.length.toFixed(0)}nm`;
+    } else {
+      btn.textContent = data.error || 'No path';
+    }
+  } catch (e) {
+    btn.textContent = 'Error';
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { btn.textContent = origText; }, 3000);
+  }
 }
 
 function syncManualHighlight() {

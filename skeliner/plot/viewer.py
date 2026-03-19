@@ -284,7 +284,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
     async def upload_file(request):
         """Handle file upload (mesh or skeleton)."""
-        form = await request.form()
+        try:
+            form = await request.form()
+        except Exception:
+            # Client disconnected during upload (e.g. drag-drop retry)
+            return JSONResponse({"ok": False, "error": "Upload interrupted"}, status_code=499)
         upload = form["file"]
         filename = upload.filename
         content = await upload.read()
@@ -967,6 +971,182 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "nEdges": len(skel.edges),
         })
 
+    async def shortest_path_endpoint(request):
+        """Compute shortest path between two faces or two skeleton nodes."""
+        import heapq
+
+        body = await request.json()
+        path_type = body.get("type")
+
+        if path_type == "mesh":
+            if mesh_state["mesh"] is None:
+                return JSONResponse(
+                    {"ok": False, "error": "No mesh loaded"}, status_code=400
+                )
+            face1 = body.get("face1")
+            face2 = body.get("face2")
+            if face1 is None or face2 is None:
+                return JSONResponse(
+                    {"ok": False, "error": "Need face1 and face2"}, status_code=400
+                )
+
+            mesh = mesh_state["mesh"]
+
+            def _run_mesh_path():
+                n_faces = len(mesh.faces)
+                if face1 < 0 or face1 >= n_faces or face2 < 0 or face2 >= n_faces:
+                    return None, 0
+                if face1 == face2:
+                    return [face1], 0.0
+
+                adj_pairs = mesh.face_adjacency
+                centroids = mesh.triangles_center
+
+                adj = [[] for _ in range(n_faces)]
+                for a, b in adj_pairs:
+                    d = float(np.linalg.norm(centroids[a] - centroids[b]))
+                    adj[a].append((b, d))
+                    adj[b].append((a, d))
+
+                dist = [float("inf")] * n_faces
+                dist[face1] = 0
+                prev = [-1] * n_faces
+                pq = [(0.0, face1)]
+                visited = [False] * n_faces
+
+                while pq:
+                    d, u = heapq.heappop(pq)
+                    if visited[u]:
+                        continue
+                    visited[u] = True
+                    if u == face2:
+                        break
+                    for v, w in adj[u]:
+                        if not visited[v]:
+                            nd = d + w
+                            if nd < dist[v]:
+                                dist[v] = nd
+                                prev[v] = u
+                                heapq.heappush(pq, (nd, v))
+
+                if dist[face2] == float("inf"):
+                    return None, 0
+
+                path = []
+                cur = face2
+                while cur != -1:
+                    path.append(int(cur))
+                    cur = prev[cur]
+                path.reverse()
+                return path, float(dist[face2])
+
+            loop = asyncio.get_event_loop()
+            path, length = await loop.run_in_executor(None, _run_mesh_path)
+
+            if path is None:
+                return JSONResponse(
+                    {"ok": False, "error": "No path found (disconnected components?)"}
+                )
+
+            return JSONResponse({
+                "ok": True,
+                "type": "mesh",
+                "path": path,
+                "length": length,
+                "nFaces": len(path),
+            })
+
+        elif path_type == "skeleton":
+            skel_name = body.get("skelName")
+            node1 = body.get("node1")
+            node2 = body.get("node2")
+            if skel_name not in skeleton_states:
+                return JSONResponse(
+                    {"ok": False, "error": "Skeleton not found"}, status_code=400
+                )
+
+            buffers = skeleton_states[skel_name]["buffers"]
+
+            def _run_skel_path():
+                nodes = np.array(buffers["nodes"], dtype=np.float32).reshape(-1, 3)
+                edges = np.array(buffers["edges"], dtype=np.int32).reshape(-1, 2)
+                n_nodes = len(nodes)
+
+                if node1 < 0 or node1 >= n_nodes or node2 < 0 or node2 >= n_nodes:
+                    return None, None, 0
+                if node1 == node2:
+                    return [node1], [], 0.0
+
+                adj = [[] for _ in range(n_nodes)]
+                for ei, (a, b) in enumerate(edges):
+                    d = float(np.linalg.norm(nodes[a] - nodes[b]))
+                    adj[int(a)].append((int(b), d, ei))
+                    adj[int(b)].append((int(a), d, ei))
+
+                dist_arr = [float("inf")] * n_nodes
+                dist_arr[node1] = 0
+                prev = [(-1, -1)] * n_nodes
+                pq = [(0.0, node1)]
+                visited = [False] * n_nodes
+
+                while pq:
+                    d, u = heapq.heappop(pq)
+                    if visited[u]:
+                        continue
+                    visited[u] = True
+                    if u == node2:
+                        break
+                    for v, w, ei in adj[u]:
+                        if not visited[v]:
+                            nd = d + w
+                            if nd < dist_arr[v]:
+                                dist_arr[v] = nd
+                                prev[v] = (u, ei)
+                                heapq.heappush(pq, (nd, v))
+
+                if dist_arr[node2] == float("inf"):
+                    return None, None, 0
+
+                path_nodes = []
+                path_edges = []
+                cur = node2
+                while cur != node1:
+                    path_nodes.append(int(cur))
+                    pn, pe = prev[cur]
+                    path_edges.append(int(pe))
+                    cur = pn
+                path_nodes.append(int(node1))
+                path_nodes.reverse()
+                path_edges.reverse()
+
+                segments = []
+                for ei in path_edges:
+                    a, b = int(edges[ei][0]), int(edges[ei][1])
+                    segments.append([nodes[a].tolist(), nodes[b].tolist()])
+
+                return path_nodes, segments, float(dist_arr[node2])
+
+            loop = asyncio.get_event_loop()
+            path_nodes, segments, length = await loop.run_in_executor(
+                None, _run_skel_path
+            )
+
+            if path_nodes is None:
+                return JSONResponse({"ok": False, "error": "No path found"})
+
+            return JSONResponse({
+                "ok": True,
+                "type": "skeleton",
+                "pathNodes": path_nodes,
+                "segments": segments,
+                "length": length,
+                "nNodes": len(path_nodes),
+            })
+
+        return JSONResponse(
+            {"ok": False, "error": "Unknown path type"}, status_code=400
+        )
+
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
         connected_clients.append(ws)
@@ -1099,6 +1279,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
+            Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],
         on_startup=[on_startup],
