@@ -992,22 +992,25 @@ def find_pocket_organelles(
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
-    seed_threshold: float = -0.5,
-    grow_threshold: float = 0.3,
+    grow_threshold: float = 0.1,
     gradient_threshold: float = 0.8,
     min_cluster_size: int = 5,
     verbose: bool = False,
 ) -> np.ndarray:
     """Detect pocket organelles — membrane folds connected to the neuron surface.
 
-    Uses a gradient-based approach:
+    Uses a rim-seeded flood-fill approach:
 
     1. Compute per-face outward_dot and its gradient (max neighbor difference).
-    2. Identify **rim faces** — high-gradient faces at the opening of each
-       pocket where the surface transitions sharply from outward to inward.
-    3. Seed from strongly inward-facing faces (``outward_dot < seed_threshold``).
-    4. Flood-fill from seeds through connected faces, stopping at rim faces
-       and faces with ``outward_dot > grow_threshold``.
+    2. Identify **rim faces** — high-gradient faces at the pocket opening
+       where the surface transitions sharply from outward to inward.
+    3. Seed from the **inward side of each rim** — neighbors of rim faces
+       that have negative outward_dot.
+    4. Flood-fill from seeds, stopping at rim faces and faces with
+       ``outward_dot > grow_threshold``.
+
+    Only regions behind a rim get detected — curved surfaces without a
+    rim transition are correctly excluded.
 
     Parameters
     ----------
@@ -1017,8 +1020,6 @@ def find_pocket_organelles(
         Radius for outward_dot computation. Auto-computed if None.
     radius_multiplier : float
         Multiplier for auto radius.
-    seed_threshold : float
-        Faces with ``outward_dot < seed_threshold`` are seeds.
     grow_threshold : float
         Flood-fill will not enter faces with ``outward_dot > grow_threshold``.
     gradient_threshold : float
@@ -1061,18 +1062,24 @@ def find_pocket_organelles(
     if verbose:
         print(f"[skeliner.pre] Rim faces: {rim.sum():,}")
 
-    # Seeds: strongly negative faces on main component, not on rim
-    seeds = (outward_dots < seed_threshold) & main_face_mask & ~rim
+    # Seeds: inward-facing neighbors of rim faces (the pocket side)
+    seeds = set()
+    for fi in np.where(rim)[0]:
+        for nfi in adj.get(fi, set()):
+            if not main_face_mask[nfi]:
+                continue
+            if rim[nfi]:
+                continue
+            if outward_dots[nfi] < 0:
+                seeds.add(nfi)
+
     if verbose:
-        print(
-            f"[skeliner.pre] Seed faces (dot < {seed_threshold}): "
-            f"{seeds.sum():,}"
-        )
+        print(f"[skeliner.pre] Seed faces (inward side of rim): {len(seeds):,}")
 
     # Flood-fill from seeds, blocked by rim faces and grow_threshold
     pocket = np.zeros(n_faces, dtype=bool)
     visited = np.zeros(n_faces, dtype=bool)
-    queue = deque(np.where(seeds)[0].tolist())
+    queue = deque(seeds)
 
     while queue:
         fi = queue.popleft()
