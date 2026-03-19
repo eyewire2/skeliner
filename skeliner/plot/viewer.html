@@ -797,10 +797,15 @@ function onRecenter(event) {
   const isCtrlLeft = event.button === 0 && (event.ctrlKey || event.metaKey);
   if (!isRight && !isCtrlLeft) return;
   pointerDownPos = { x: event.clientX, y: event.clientY };
+  const savedTarget = controls.target.clone();
+  const savedCamPos = camera.position.clone();
   const onUp = (upEvent) => {
     renderer.domElement.removeEventListener('pointerup', onUp);
     if (!pointerDownPos) return;
     if (Math.sqrt((upEvent.clientX - pointerDownPos.x)**2 + (upEvent.clientY - pointerDownPos.y)**2) > 5) return;
+    // Undo any pan that OrbitControls applied during this click
+    controls.target.copy(savedTarget);
+    camera.position.copy(savedCamPos);
     mouse.x = (upEvent.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
