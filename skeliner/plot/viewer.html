@@ -54,6 +54,10 @@
     background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
     font-size: 12px;
   }
+  #lasso-rect {
+    position: fixed; border: 2px dashed #4af; background: rgba(0,120,255,0.1);
+    pointer-events: none; display: none; z-index: 100;
+  }
   #empty-hint {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
     font-size: 16px; color: #555; text-align: center; line-height: 2;
@@ -65,6 +69,7 @@
 <div id="canvas-container"></div>
 <div id="empty-hint">Drop mesh (.obj, .ply) or skeleton (.swc, .npz) here</div>
 <div id="drop-overlay">Drop file to load</div>
+<div id="lasso-rect"></div>
 
 <div id="info">
   <div><span class="label">Vertices: </span><span class="value" id="nVerts">-</span></div>
@@ -96,7 +101,7 @@
 </div>
 
 <div id="selection-info">
-  <div><span class="label">Click: select | Shift+click: highlight</span></div>
+  <div><span class="label">Click: select | Shift+click: highlight | Shift+drag: lasso</span></div>
   <div id="selDetail"></div>
   <div><span class="label">Highlighted: </span><span class="value" id="hlCount">0</span> <button id="hlClear" style="font-size:11px;cursor:pointer;">Clear</button></div>
   <div id="hlSaveRow" style="display:none;margin-top:4px;">
@@ -197,6 +202,7 @@ async function init() {
   setupDragDrop();
 
   renderer.domElement.addEventListener('click', onClickSelect);
+  setupLassoSelection();
   document.getElementById('hlClear').addEventListener('click', () => {
     manualHighlightFaces.clear();
     rebuildManualHighlight();
@@ -830,6 +836,88 @@ function saveHighlightAsAnnotation() {
   rebuildManualHighlight();
   syncManualHighlight();
   nameInput.value = '';
+}
+
+// ── Lasso (rectangle) selection ───────────────────────────────────
+function setupLassoSelection() {
+  const rect = document.getElementById('lasso-rect');
+  let dragging = false;
+  let startX = 0, startY = 0;
+
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    if (!e.shiftKey || e.button !== 0) return;
+    // Prevent orbit controls from handling shift+drag
+    controls.enabled = false;
+    dragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    rect.style.left = startX + 'px';
+    rect.style.top = startY + 'px';
+    rect.style.width = '0px';
+    rect.style.height = '0px';
+    rect.style.display = 'block';
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  window.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const x = Math.min(startX, e.clientX);
+    const y = Math.min(startY, e.clientY);
+    const w = Math.abs(e.clientX - startX);
+    const h = Math.abs(e.clientY - startY);
+    rect.style.left = x + 'px';
+    rect.style.top = y + 'px';
+    rect.style.width = w + 'px';
+    rect.style.height = h + 'px';
+  });
+
+  window.addEventListener('pointerup', (e) => {
+    if (!dragging) return;
+    dragging = false;
+    rect.style.display = 'none';
+    controls.enabled = true;
+
+    const x0 = Math.min(startX, e.clientX);
+    const y0 = Math.min(startY, e.clientY);
+    const x1 = Math.max(startX, e.clientX);
+    const y1 = Math.max(startY, e.clientY);
+
+    // Ignore tiny drags (clicks)
+    if (x1 - x0 < 5 && y1 - y0 < 5) return;
+
+    if (!meshGeometry) return;
+    const posAttr = meshGeometry.getAttribute('position');
+    const nFaces = posAttr.count / 3;
+
+    // Project each face centroid to screen and check if inside rectangle
+    const vp = new THREE.Vector3();
+    let count = 0;
+    for (let i = 0; i < nFaces; i++) {
+      const base = i * 9;
+      vp.set(
+        (posAttr.array[base] + posAttr.array[base+3] + posAttr.array[base+6]) / 3,
+        (posAttr.array[base+1] + posAttr.array[base+4] + posAttr.array[base+7]) / 3,
+        (posAttr.array[base+2] + posAttr.array[base+5] + posAttr.array[base+8]) / 3,
+      );
+
+      // Check clip plane
+      if (clipPlane.distanceToPoint(vp) < 0) continue;
+
+      // Project to screen
+      vp.project(camera);
+      const sx = (vp.x * 0.5 + 0.5) * window.innerWidth;
+      const sy = (-vp.y * 0.5 + 0.5) * window.innerHeight;
+
+      if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && vp.z >= 0 && vp.z <= 1) {
+        manualHighlightFaces.add(i);
+        count++;
+      }
+    }
+
+    rebuildManualHighlight();
+    syncManualHighlight();
+  });
 }
 
 // ── Right-click / Ctrl+click to recenter ─────────────────────────
