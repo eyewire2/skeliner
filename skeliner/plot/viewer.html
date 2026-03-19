@@ -101,6 +101,7 @@
   <span style="color:#888;margin-left:12px;">Remove:</span>
   <button id="removeOrganellesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Organelles</button>
   <button id="removeFusionsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Fusions</button>
+  <button id="fillHolesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Holes</button>
   <span style="color:#888;margin-left:12px;">Skeleton:</span>
   <button id="skeletonizeBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Skeletonize</button>
   <button id="skelParamsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Set Params</button>
@@ -268,6 +269,7 @@ async function init() {
   document.getElementById('detectFusionsBtn').addEventListener('click', runDetectFusions);
   document.getElementById('removeOrganellesBtn').addEventListener('click', runRemoveOrganelles);
   document.getElementById('removeFusionsBtn').addEventListener('click', runRemoveFusions);
+  document.getElementById('fillHolesBtn').addEventListener('click', runFillHoles);
   document.getElementById('saveBtn').addEventListener('click', openSaveDialog);
   document.getElementById('saveDialogClose').addEventListener('click', closeSaveDialog);
   document.getElementById('save-dialog-backdrop').addEventListener('click', closeSaveDialog);
@@ -875,6 +877,16 @@ async function runRemoveFusions() {
     const resp = await fetch('/remove_fusions', { method: 'POST' });
     const data = await resp.json();
     btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : 'Error';
+  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
+}
+
+async function runFillHoles() {
+  const btn = document.getElementById('fillHolesBtn');
+  btn.textContent = 'Filling...'; btn.disabled = true;
+  try {
+    const resp = await fetch('/fill_holes', { method: 'POST' });
+    const data = await resp.json();
+    btn.textContent = data.ok ? `Filled (${data.facesAfter.toLocaleString()}f)` : 'Error';
   } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
 }
 

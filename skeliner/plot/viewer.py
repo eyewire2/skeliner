@@ -792,6 +792,31 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "facesRemoved": n_before - n_after,
         })
 
+    async def do_fill_holes(request):
+        """Fill holes in the mesh."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        from skeliner.pre import fill_holes
+
+        mesh = mesh_state["mesh"]
+        n_before = len(mesh.faces)
+
+        loop = asyncio.get_event_loop()
+        new_mesh = await loop.run_in_executor(
+            None, lambda: fill_holes(mesh, verbose=True)
+        )
+        n_after = len(new_mesh.faces)
+
+        await _apply_new_mesh(new_mesh)
+        print(f"Fill holes: {n_before:,} → {n_after:,} faces ({n_after - n_before:,} added)")
+        return JSONResponse({
+            "ok": True,
+            "facesBefore": n_before,
+            "facesAfter": n_after,
+        })
+
     async def export_mesh(request):
         """Export the current mesh as a downloadable OBJ file."""
         from starlette.responses import Response
@@ -1070,6 +1095,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/detect_holes", detect_holes, methods=["POST"]),
             Route("/remove_organelles", do_remove_organelles, methods=["POST"]),
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
+            Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
