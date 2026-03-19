@@ -229,6 +229,7 @@
         <div id="empty-hint">Drop mesh (.obj, .ply) or skeleton (.swc, .npz) here</div>
         <div id="drop-overlay">Drop file to load</div>
         <div id="lasso-rect"></div>
+        <div id="lockIndicator" style="display:none;position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(200,50,50,0.7);color:#fff;padding:4px 12px;border-radius:4px;font-size:12px;font-family:monospace;z-index:100;cursor:pointer;" onclick="this.style.display='none'">Camera Locked (L to unlock) x</div>
 
         <div id="info">
             <div><span class="label">Vertices: </span><span class="value" id="nVerts">-</span></div>
@@ -240,6 +241,8 @@
               <div>Click: select</div>
               <div>Shift+click: highlight</div>
               <div>Shift+drag: lasso</div>
+              <div>H: toggle UI</div>
+              <div>L: lock camera</div>
             </div>
         </div>
 
@@ -606,6 +609,7 @@ let meshCentroid = [0, 0, 0];
                     .catch(() => {});
 
                 window.addEventListener("resize", onResize);
+                window.addEventListener("keydown", onKeyDown);
                 animate();
             }
 
@@ -2400,6 +2404,31 @@ let meshCentroid = [0, 0, 0];
                     console.log("[skeliner] WebSocket closed, reconnecting in 2s...");
                     setTimeout(connectWebSocket, 2000);
                 };
+            }
+
+            const UI_PANELS = ['info', 'controls', 'detect-panel', 'selection-info', 'loaded-panel'];
+            let panelsVisible = true;
+            function togglePanels() {
+              panelsVisible = !panelsVisible;
+              const display = panelsVisible ? '' : 'none';
+              for (const id of UI_PANELS) {
+                const el = document.getElementById(id);
+                if (el) el.style.display = display;
+              }
+            }
+
+            let cameraLocked = false;
+            function toggleCameraLock() {
+              cameraLocked = !cameraLocked;
+              controls.enabled = !cameraLocked;
+              document.getElementById('lockIndicator').style.display = cameraLocked ? 'block' : 'none';
+            }
+
+            function onKeyDown(e) {
+              // Ignore when typing in inputs
+              if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+              if (e.key === 'h' || e.key === 'H') togglePanels();
+              if (e.key === 'l' || e.key === 'L') toggleCameraLock();
             }
 
             function onResize() {
