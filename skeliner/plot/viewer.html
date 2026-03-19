@@ -1,1805 +1,2406 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Skeliner Viewer</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0a0a0a; overflow: hidden; font-family: monospace; color: #ccc; }
-  #canvas-container { width: 100vw; height: 100vh; }
-  #info {
-    position: absolute; top: 10px; left: 10px;
-    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
-    font-size: 12px; line-height: 1.6; pointer-events: none;
-    max-width: 400px;
-  }
-  #info .label { color: #888; }
-  #info .value { color: #eee; }
-  #controls {
-    position: absolute; bottom: 10px; left: 10px;
-    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
-    font-size: 12px;
-  }
-  #controls label { margin-right: 12px; cursor: pointer; }
-  #controls input[type=range] { width: 120px; vertical-align: middle; }
-  #selection-info {
-    position: absolute; top: 10px; right: 10px;
-    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
-    font-size: 12px; line-height: 1.6; max-width: 300px;
-  }
-  .hl-item { display: flex; justify-content: space-between; align-items: center; }
-  .hl-item button { font-size: 10px; cursor: pointer; margin-left: 8px; }
-  .hl-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; cursor: pointer; border: 1px solid #666; }
-  input.hl-color-input { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border: 1px solid #666; border-radius: 2px; padding: 0; margin-right: 6px; cursor: pointer; background: none; vertical-align: middle; }
-  input.hl-color-input::-webkit-color-swatch-wrapper { padding: 0; }
-  input.hl-color-input::-webkit-color-swatch { border: none; border-radius: 1px; }
-  input.hl-color-input::-moz-color-swatch { border: none; border-radius: 1px; }
-  #loaded-panel {
-    position: absolute; bottom: 50px; right: 10px;
-    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
-    font-size: 12px; line-height: 1.8; max-width: 300px;
-  }
-  #loaded-panel .item { display: flex; justify-content: space-between; align-items: center; }
-  #loaded-panel .item button { font-size: 10px; cursor: pointer; margin-left: 8px; }
-  #loaded-panel .item .name { color: #adf; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #drop-overlay {
-    display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-    background: rgba(0, 120, 255, 0.15); border: 3px dashed rgba(0, 120, 255, 0.6);
-    z-index: 999; pointer-events: none;
-    justify-content: center; align-items: center;
-    font-size: 24px; color: #4af;
-  }
-  #detect-panel {
-    position: absolute; bottom: 50px; left: 10px;
-    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
-    font-size: 12px;
-  }
-  #detect-panel button, #skel-params-dialog button, #save-dialog button {
-    background: #2a2a3e; color: #ccc; border: 1px solid #555; border-radius: 4px;
-    padding: 3px 10px; font-size: 11px; font-family: monospace; cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
-  }
-  #detect-panel button:hover, #skel-params-dialog button:hover, #save-dialog button:hover {
-    background: #3a3a52; border-color: #7af;
-  }
-  #detect-panel button:active, #skel-params-dialog button:active, #save-dialog button:active {
-    background: #4a4a62;
-  }
-  #detect-panel button:disabled {
-    opacity: 0.5; cursor: default;
-  }
-  #detect-panel button:disabled:hover {
-    background: #2a2a3e; border-color: #555;
-  }
-  #saveBtn {
-    background: #1a3a2a !important; border-color: #4a8 !important; color: #8dc !important;
-  }
-  #saveBtn:hover {
-    background: #2a4a3a !important; border-color: #6ca !important;
-  }
-  #lasso-rect {
-    position: fixed; border: 2px dashed #4af; background: rgba(0,120,255,0.1);
-    pointer-events: none; display: none; z-index: 100;
-  }
-  #empty-hint {
-    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    font-size: 16px; color: #555; text-align: center; line-height: 2;
-  }
-</style>
-</head>
-<body>
-
-<div id="canvas-container"></div>
-<div id="empty-hint">Drop mesh (.obj, .ply) or skeleton (.swc, .npz) here</div>
-<div id="drop-overlay">Drop file to load</div>
-<div id="lasso-rect"></div>
-
-<div id="info">
-  <div><span class="label">Vertices: </span><span class="value" id="nVerts">-</span></div>
-  <div><span class="label">Faces: </span><span class="value" id="nFaces">-</span></div>
-  <div><span class="label">Skel nodes: </span><span class="value" id="nNodes">-</span></div>
-  <div><span class="label">Camera: </span><span class="value" id="camPos">-</span></div>
-  <div><span class="label">Visible faces: </span><span class="value" id="visCount">-</span></div>
-</div>
-
-<div id="controls">
-  <label><input type="checkbox" id="wireToggle" checked> Wireframe</label>
-  <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50"></label>
-  <label>Ann: <input type="range" id="annOpacitySlider" min="0" max="100" value="90"></label>
-  <label><input type="checkbox" id="tubeToggle"> Tubes</label>
-  <label style="margin-left:8px;">Pick: <select id="pickTarget" style="font-size:11px;">
-    <option value="mesh">Mesh</option>
-  </select></label>
-</div>
-
-<div id="detect-panel">
-  <div style="white-space:nowrap;">
-    <span style="color:#888;">Detect:</span>
-    <button id="detectBtn" style="margin-left:4px;">All Organelles</button>
-    <button id="detectSurfaceBtn" style="margin-left:4px;">Pocket Org.</button>
-    <button id="detectIsolatedBtn" style="margin-left:4px;">Isolated Org.</button>
-    <button id="detectRimsBtn" style="margin-left:4px;">Rims</button>
-    <button id="detectHolesBtn" style="margin-left:4px;">Holes</button>
-    <button id="detectFusionsBtn" style="margin-left:4px;">Fusions</button>
-    <span style="color:#888;margin-left:12px;">Skeleton:</span>
-    <button id="skeletonizeBtn" style="margin-left:4px;">Skeletonize</button>
-    <button id="skelParamsBtn" style="margin-left:4px;">Set Params</button>
-  </div>
-  <div style="white-space:nowrap;margin-top:4px;display:flex;justify-content:space-between;align-items:center;">
-    <span>
-      <span style="color:#888;">Remove:</span>
-      <button id="removeOrganellesBtn" style="margin-left:4px;">Organelles</button>
-      <button id="removeFusionsBtn" style="margin-left:4px;">Fusions</button>
-      <button id="fillHolesBtn" style="margin-left:4px;">Holes</button>
-      <span style="color:#888;margin-left:12px;">Path:</span>
-      <button id="findPathBtn" style="margin-left:4px;">Edge</button>
-      <button id="findPathVertBtn" style="margin-left:4px;">Vertex</button>
-    </span>
-    <button id="saveBtn">Save</button>
-  </div>
-</div>
-
-<div id="skel-params-dialog" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;border:1px solid #555;border-radius:6px;padding:16px;z-index:1000;font-size:12px;min-width:360px;max-height:80vh;overflow-y:auto;">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-    <span style="color:#adf;font-weight:bold;">Skeletonize Parameters</span>
-    <button id="skelParamsClose" style="cursor:pointer;font-size:14px;">x</button>
-  </div>
-  <div id="skelParamsBody" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;align-items:center;"></div>
-  <div style="margin-top:10px;text-align:right;">
-    <button id="skelParamsReset" style="font-size:11px;cursor:pointer;">Reset Defaults</button>
-  </div>
-</div>
-<div id="skel-params-backdrop" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:999;"></div>
-
-<div id="save-dialog" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;border:1px solid #555;border-radius:6px;padding:16px;z-index:1000;font-size:12px;">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-    <span style="color:#adf;font-weight:bold;">Save</span>
-    <button id="saveDialogClose" style="cursor:pointer;font-size:14px;">x</button>
-  </div>
-  <div style="color:#888;margin-bottom:6px;">Mesh</div>
-  <div style="margin-bottom:12px;">
-    <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:6px 20px;">OBJ</button>
-  </div>
-  <div style="color:#888;margin-bottom:6px;">Skeleton</div>
-  <div style="margin-bottom:12px;">
-    <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:6px 20px;">SWC</button>
-    <button id="saveSkelNpz" style="font-size:12px;cursor:pointer;padding:6px 20px;margin-left:8px;">NPZ</button>
-  </div>
-  <div>
-    <button id="saveAll" style="font-size:12px;cursor:pointer;padding:6px 20px;">All</button>
-  </div>
-  <div id="saveDialogStatus" style="margin-top:8px;font-size:11px;color:#6f6;"></div>
-</div>
-<div id="save-dialog-backdrop" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:999;"></div>
-
-<div id="selection-info">
-  <div><span class="label">Click: select | Shift+click: highlight | Shift+drag: lasso</span></div>
-  <div id="selDetail"></div>
-  <div><span class="label">Highlighted: </span><span class="value" id="hlCount">0</span> <button id="hlClear" style="font-size:11px;cursor:pointer;">Clear</button></div>
-  <div id="hlSaveRow" style="display:none;margin-top:4px;">
-    <input id="hlSaveName" type="text" placeholder="annotation name" style="font-size:11px;width:120px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:2px 4px;">
-    <button id="hlSaveBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Save</button>
-    <button id="hlCheckFusion" style="font-size:11px;cursor:pointer;margin-left:4px;">Check Fusion</button>
-  </div>
-  <div id="fusionResult" style="margin-top:4px;font-size:11px;color:#adf;display:none;"></div>
-  <div id="hlList" style="margin-top:4px;max-height:200px;overflow-y:auto;"></div>
-  <div id="hlClearAllRow" style="display:none;margin-top:2px;"><button id="hlClearAll" style="font-size:10px;cursor:pointer;">Clear All Annotations</button></div>
-</div>
-
-<div id="loaded-panel">
-  <div style="color:#888;margin-bottom:4px;">Loaded:</div>
-  <div id="loadedMesh" class="item" style="display:none;">
-    <span class="name" id="meshName">-</span>
-    <button id="toggleMesh" style="font-size:10px;cursor:pointer;margin-left:4px;">hide</button>
-    <button id="removeMesh">x</button>
-  </div>
-  <div id="loadedSkel"></div>
-</div>
-
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
-  }
-}
-</script>
-
-<script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-
-// ── Globals ──────────────────────────────────────────────────────────
-let scene, camera, renderer, controls;
-let meshObj, wireframeObj, meshGeometry, clipPlane;
-let skelGroups = {};  // keyed by skeleton name
-let ws = null;
-let stateDebounceTimer = null;
-const STATE_DEBOUNCE_MS = 300;
-
-let annotationMeshes = [];
-let markerMeshes = [];
-let edgeGroupMeshes = [];
-let manualHighlightFaces = new Set();
-let manualHighlightMesh = null;
-
-// ── Init ─────────────────────────────────────────────────────────────
-async function init() {
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0a0f1a);
-
-  camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
-  camera.position.set(0, 0, 500);
-
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.localClippingEnabled = true;
-  document.getElementById('canvas-container').appendChild(renderer.domElement);
-
-  clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 99999);
-
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.1;
-  controls.addEventListener('change', scheduleStateUpdate);
-
-  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
-  const dl1 = new THREE.DirectionalLight(0xffffff, 0.8);
-  dl1.position.set(1, 1, 1);
-  scene.add(dl1);
-  const dl2 = new THREE.DirectionalLight(0xffffff, 0.3);
-  dl2.position.set(-1, -0.5, -1);
-  scene.add(dl2);
-
-  // Try loading pre-loaded mesh
-  const meshResp = await fetch('/mesh');
-  const meshData = await meshResp.json();
-  if (meshData) {
-    buildMesh(meshData);
-    document.getElementById('empty-hint').style.display = 'none';
-  }
-
-  // Try loading pre-loaded skeletons
-  const skelResp = await fetch('/skeletons');
-  const skelDataAll = await skelResp.json();
-  if (skelDataAll) {
-    for (const [name, data] of Object.entries(skelDataAll)) {
-      buildSkeleton({ name, ...data });
-    }
-  }
-
-  // Update loaded panel
-  updateLoadedPanel();
-
-  setupControls();
-  setupDragDrop();
-
-  renderer.domElement.addEventListener('click', onClickSelect);
-  setupLassoSelection();
-  document.getElementById('hlClear').addEventListener('click', () => {
-    manualHighlightFaces.clear();
-    rebuildManualHighlight();
-    syncManualHighlight();
-  });
-  document.getElementById('hlSaveBtn').addEventListener('click', saveHighlightAsAnnotation);
-  document.getElementById('hlSaveName').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') saveHighlightAsAnnotation();
-  });
-  document.getElementById('hlCheckFusion').addEventListener('click', checkFusion);
-
-  renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
-  renderer.domElement.addEventListener('pointerdown', onRecenter);
-
-  document.getElementById('detectBtn').addEventListener('click', runDetectOrganelles);
-  document.getElementById('detectSurfaceBtn').addEventListener('click', () => runDetectOrganellesType('pocket'));
-  document.getElementById('detectIsolatedBtn').addEventListener('click', () => runDetectOrganellesType('isolated'));
-  document.getElementById('detectRimsBtn').addEventListener('click', runDetectRims);
-  document.getElementById('detectHolesBtn').addEventListener('click', runDetectHoles);
-  document.getElementById('detectFusionsBtn').addEventListener('click', runDetectFusions);
-  document.getElementById('removeOrganellesBtn').addEventListener('click', runRemoveOrganelles);
-  document.getElementById('removeFusionsBtn').addEventListener('click', runRemoveFusions);
-  document.getElementById('fillHolesBtn').addEventListener('click', runFillHoles);
-  document.getElementById('saveBtn').addEventListener('click', openSaveDialog);
-  document.getElementById('saveDialogClose').addEventListener('click', closeSaveDialog);
-  document.getElementById('save-dialog-backdrop').addEventListener('click', closeSaveDialog);
-  document.getElementById('saveMeshObj').addEventListener('click', () => doSave('mesh'));
-  document.getElementById('saveSkelSwc').addEventListener('click', () => doSave('swc'));
-  document.getElementById('saveSkelNpz').addEventListener('click', () => doSave('npz'));
-  document.getElementById('saveAll').addEventListener('click', () => doSave('all'));
-  document.getElementById('skeletonizeBtn').addEventListener('click', runSkeletonize);
-  document.getElementById('findPathBtn').addEventListener('click', () => runFindPath('edge'));
-  document.getElementById('findPathVertBtn').addEventListener('click', () => runFindPath('vertex'));
-  document.getElementById('skelParamsBtn').addEventListener('click', openSkelParams);
-  document.getElementById('skelParamsClose').addEventListener('click', closeSkelParams);
-  document.getElementById('skel-params-backdrop').addEventListener('click', closeSkelParams);
-  document.getElementById('skelParamsReset').addEventListener('click', resetSkelParams);
-  document.getElementById('removeMesh').addEventListener('click', () => removeItem('mesh'));
-  document.getElementById('toggleMesh').addEventListener('click', () => {
-    const btn = document.getElementById('toggleMesh');
-    if (meshObj) {
-      meshObj.visible = !meshObj.visible;
-      if (wireframeObj) wireframeObj.visible = meshObj.visible && document.getElementById('wireToggle').checked;
-      btn.textContent = meshObj.visible ? 'hide' : 'show';
-    }
-  });
-  document.getElementById('hlClearAll').addEventListener('click', clearAllAnnotations);
-
-  connectWebSocket();
-
-  fetch('/annotations').then(r => r.json()).then(ann => {
-    if (ann && (ann.highlights || ann.markers || ann.edges || ann.edge_groups)) applyAnnotations(ann);
-  }).catch(() => {});
-
-  window.addEventListener('resize', onResize);
-  animate();
-}
-
-// ── Loaded panel ─────────────────────────────────────────────────────
-async function updateLoadedPanel() {
-  try {
-    const resp = await fetch('/loaded');
-    const data = await resp.json();
-    const meshEl = document.getElementById('loadedMesh');
-    const skelEl = document.getElementById('loadedSkel');
-    if (data.mesh) {
-      meshEl.style.display = 'flex';
-      document.getElementById('meshName').textContent =
-        data.mesh.path.split('/').pop() + ` (${data.mesh.nVertices.toLocaleString()}v)`;
-    } else {
-      meshEl.style.display = 'none';
-    }
-    // Show all loaded skeletons
-    const skelContainer = document.getElementById('loadedSkel');
-    skelContainer.innerHTML = '';
-    if (data.skeletons) {
-      for (const [sname, sinfo] of Object.entries(data.skeletons)) {
-        const div = document.createElement('div');
-        div.className = 'item';
-        div.style.display = 'flex';
-        const c = sinfo.color || [1,1,1];
-        const rgb = `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`;
-        div.innerHTML = `<span class="name" style="color:${rgb}">${sname} (${sinfo.nNodes.toLocaleString()}n)</span>`;
-        const toggleBtn = document.createElement('button');
-        toggleBtn.textContent = 'hide';
-        toggleBtn.style.cssText = 'font-size:10px;cursor:pointer;margin-left:4px;';
-        toggleBtn.addEventListener('click', () => {
-          const sg = skelGroups[sname];
-          if (!sg) return;
-          const vis = !sg.group.visible;
-          sg.group.visible = vis;
-          toggleBtn.textContent = vis ? 'hide' : 'show';
-        });
-        div.appendChild(toggleBtn);
-        const btn = document.createElement('button');
-        btn.textContent = 'x';
-        btn.addEventListener('click', () => removeItem('skeleton', sname));
-        div.appendChild(btn);
-        skelContainer.appendChild(div);
-      }
-    }
-  } catch (e) {}
-}
-
-async function removeItem(type, name) {
-  await fetch('/remove', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type, name }),
-  });
-}
-
-// ── Drag & Drop ──────────────────────────────────────────────────────
-function setupDragDrop() {
-  const overlay = document.getElementById('drop-overlay');
-  let dragCounter = 0;
-
-  document.addEventListener('dragenter', (e) => {
-    e.preventDefault();
-    dragCounter++;
-    overlay.style.display = 'flex';
-  });
-  document.addEventListener('dragleave', (e) => {
-    e.preventDefault();
-    dragCounter--;
-    if (dragCounter <= 0) { overlay.style.display = 'none'; dragCounter = 0; }
-  });
-  document.addEventListener('dragover', (e) => e.preventDefault());
-  document.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    dragCounter = 0;
-    overlay.style.display = 'none';
-
-    for (const file of e.dataTransfer.files) {
-      const formData = new FormData();
-      formData.append('file', file);
-      try {
-        const resp = await fetch('/upload', { method: 'POST', body: formData });
-        const data = await resp.json();
-        if (data.ok) {
-          console.log(`[skeliner] Loaded ${data.type}: ${data.name}`);
-        } else {
-          console.error(`[skeliner] Upload failed: ${data.error}`);
-        }
-      } catch (err) {
-        console.error('[skeliner] Upload error:', err);
-      }
-    }
-  });
-}
-
-// ── Build mesh ───────────────────────────────────────────────────────
-function buildMesh(data) {
-  // Remove old mesh
-  if (meshObj) { scene.remove(meshObj); meshObj.geometry.dispose(); meshObj.material.dispose(); meshObj = null; }
-  if (wireframeObj) { scene.remove(wireframeObj); wireframeObj.geometry.dispose(); wireframeObj.material.dispose(); wireframeObj = null; }
-  meshGeometry = null;
-
-  const { vertices, faces, nVertices, nFaces } = data;
-
-  document.getElementById('nVerts').textContent = nVertices.toLocaleString();
-  document.getElementById('nFaces').textContent = nFaces.toLocaleString();
-  document.getElementById('empty-hint').style.display = 'none';
-
-  meshGeometry = new THREE.BufferGeometry();
-  const positions = new Float32Array(nFaces * 9);
-  const colors = new Float32Array(nFaces * 9);
-  const verts = new Float32Array(vertices);
-
-  for (let i = 0; i < nFaces; i++) {
-    const a = faces[i * 3], b = faces[i * 3 + 1], c = faces[i * 3 + 2];
-    for (let k = 0; k < 3; k++) {
-      positions[i * 9 + k] = verts[a * 3 + k];
-      positions[i * 9 + 3 + k] = verts[b * 3 + k];
-      positions[i * 9 + 6 + k] = verts[c * 3 + k];
-    }
-    const r = 0.55, g = 0.55, bl = 0.6;
-    for (let v = 0; v < 3; v++) {
-      colors[i * 9 + v * 3] = r;
-      colors[i * 9 + v * 3 + 1] = g;
-      colors[i * 9 + v * 3 + 2] = bl;
-    }
-  }
-
-  meshGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  meshGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  meshGeometry.computeVertexNormals();
-
-  meshObj = new THREE.Mesh(meshGeometry, new THREE.MeshPhongMaterial({
-    vertexColors: true, side: THREE.DoubleSide, clippingPlanes: [clipPlane],
-    shininess: 30, transparent: true, opacity: 0.5, depthWrite: false,
-  }));
-  scene.add(meshObj);
-
-  wireframeObj = new THREE.Mesh(meshGeometry, new THREE.MeshBasicMaterial({
-    wireframe: true, color: 0x333333, transparent: true, opacity: 0.15,
-    clippingPlanes: [clipPlane],
-  }));
-  wireframeObj.visible = document.getElementById('wireToggle').checked;
-  scene.add(wireframeObj);
-
-  fitCamera();
-}
-
-// ── Build skeleton ───────────────────────────────────────────────────
-let selectedNodes = {};  // { "skelName:nodeIndex": { mesh, skelName, nodeIndex } }
-
-function buildSkeleton(data) {
-  const name = data.name || 'default';
-  const baseColor = data.color || [1.0, 0.4, 0.1];
-
-  // Remove old version of this skeleton
-  if (skelGroups[name]) {
-    scene.remove(skelGroups[name].group);
-    skelGroups[name] = null;
-    delete skelGroups[name];
-  }
-
-  const { nodes, positions, nNodes, nEdges, edgeRadii, radii } = data;
-  if (!nodes || nNodes === 0) return;
-
-  document.getElementById('nNodes').textContent =
-    Object.keys(skelGroups).length > 0
-      ? Object.values(skelGroups).reduce((s, g) => s + g.nNodes, nNodes).toLocaleString()
-      : nNodes.toLocaleString();
-  document.getElementById('empty-hint').style.display = 'none';
-
-  const group = new THREE.Group();
-  const nodesArr = new Float32Array(nodes);
-  const radiiArr = new Float32Array(radii);
-
-  // ── Node points (colored by skeleton identity) ─────────────────
-  const nodeGeo = new THREE.BufferGeometry();
-  nodeGeo.setAttribute('position', new THREE.BufferAttribute(nodesArr, 3));
-
-  const nodeColors = new Float32Array(nNodes * 3);
-  for (let i = 0; i < nNodes; i++) {
-    nodeColors[i*3] = baseColor[0];
-    nodeColors[i*3+1] = baseColor[1];
-    nodeColors[i*3+2] = baseColor[2];
-  }
-  nodeGeo.setAttribute('color', new THREE.BufferAttribute(nodeColors, 3));
-
-  const nodePoints = new THREE.Points(nodeGeo, new THREE.PointsMaterial({
-    vertexColors: true, size: 5, sizeAttenuation: false,
-    depthTest: true, depthWrite: true,
-  }));
-  group.add(nodePoints);
-
-  // ── Lines (colored by skeleton identity) ────────────────────────
-  let lines = null;
-  if (nEdges > 0 && positions) {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
-
-    const colorArr = new Float32Array(nEdges * 6);
-    for (let i = 0; i < nEdges; i++) {
-      colorArr[i*6]=baseColor[0]; colorArr[i*6+1]=baseColor[1]; colorArr[i*6+2]=baseColor[2];
-      colorArr[i*6+3]=baseColor[0]; colorArr[i*6+4]=baseColor[1]; colorArr[i*6+5]=baseColor[2];
-    }
-    geo.setAttribute('color', new THREE.BufferAttribute(colorArr, 3));
-    lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 }));
-    group.add(lines);
-  }
-
-  scene.add(group);
-
-  skelGroups[name] = {
-    group, nodePoints, lines, radii: radiiArr, nNodes, nEdges,
-    color: baseColor, data,
-  };
-
-  // Add to pick dropdown if not already there
-  const pickSelect = document.getElementById('pickTarget');
-  if (!pickSelect.querySelector(`option[value="skel:${name}"]`)) {
-    const opt = document.createElement('option');
-    opt.value = `skel:${name}`;
-    opt.textContent = name;
-    pickSelect.appendChild(opt);
-  }
-
-  if (!meshObj) fitCamera();
-  updateLoadedPanel();
-}
-
-function buildTubes(name) {
-  const sg = skelGroups[name];
-  if (!sg || sg.tubes) return;
-  const { nodes, edges, radii, nEdges } = sg.data;
-  const nodesArr = new Float32Array(nodes);
-  const radiiArr = new Float32Array(radii);
-  const baseColor = sg.color;
-  const tubes = new THREE.Group();
-  const segments = 6;
-
-  for (let i = 0; i < nEdges; i++) {
-    const a = edges[i * 2], b = edges[i * 2 + 1];
-    const ax = nodesArr[a*3], ay = nodesArr[a*3+1], az = nodesArr[a*3+2];
-    const bx = nodesArr[b*3], by = nodesArr[b*3+1], bz = nodesArr[b*3+2];
-    const rA = radiiArr[a], rB = radiiArr[b];
-    const dx = bx-ax, dy = by-ay, dz = bz-az;
-    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
-    if (len < 1e-6) continue;
-
-    const cylGeo = new THREE.CylinderGeometry(rB, rA, len, segments, 1, true);
-    const cylMat = new THREE.MeshPhongMaterial({
-      color: new THREE.Color(baseColor[0], baseColor[1], baseColor[2]),
-      transparent: true, opacity: 0.6,
-    });
-    const cyl = new THREE.Mesh(cylGeo, cylMat);
-    cyl.position.set((ax+bx)/2, (ay+by)/2, (az+bz)/2);
-    const dir = new THREE.Vector3(dx, dy, dz).normalize();
-    cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-    tubes.add(cyl);
-  }
-  sg.tubes = tubes;
-  sg.group.add(tubes);
-}
-
-// ── Fit camera ───────────────────────────────────────────────────────
-function fitCamera() {
-  // Find bounding sphere from whatever is loaded
-  let box = new THREE.Box3();
-  if (meshGeometry) {
-    meshGeometry.computeBoundingBox();
-    box.union(meshGeometry.boundingBox);
-  }
-  for (const sg of Object.values(skelGroups)) {
-    if (sg && sg.group) {
-      const skelBox = new THREE.Box3().setFromObject(sg.group);
-      box.union(skelBox);
-    }
-  }
-  if (box.isEmpty()) return;
-
-  const sphere = new THREE.Sphere();
-  box.getBoundingSphere(sphere);
-
-  camera.near = sphere.radius * 0.001;
-  camera.far = sphere.radius * 10;
-  camera.updateProjectionMatrix();
-  camera.position.set(sphere.center.x, sphere.center.y, sphere.center.z + sphere.radius * 2);
-  controls.target.copy(sphere.center);
-  controls.update();
-
-}
-
-// ── Controls ─────────────────────────────────────────────────────────
-function setupControls() {
-  document.getElementById('wireToggle').addEventListener('change', (e) => {
-    if (wireframeObj) wireframeObj.visible = e.target.checked;
-  });
-  document.getElementById('tubeToggle').addEventListener('change', (e) => {
-    for (const [name, sg] of Object.entries(skelGroups)) {
-      if (!sg) continue;
-      if (e.target.checked) {
-        buildTubes(name);
-        if (sg.lines) sg.lines.visible = false;
-        if (sg.tubes) sg.tubes.visible = true;
-      } else {
-        if (sg.lines) sg.lines.visible = true;
-        if (sg.tubes) sg.tubes.visible = false;
-      }
-    }
-  });
-  document.getElementById('opacitySlider').addEventListener('input', (e) => {
-    const val = parseInt(e.target.value) / 100;
-    if (meshObj) {
-      meshObj.material.transparent = val < 1.0;
-      meshObj.material.opacity = val;
-      meshObj.material.depthWrite = val >= 1.0;
-      meshObj.material.needsUpdate = true;
-    }
-  });
-  document.getElementById('annOpacitySlider').addEventListener('input', (e) => {
-    const val = parseInt(e.target.value) / 100;
-    for (const m of annotationMeshes) {
-      m.material.transparent = true;
-      m.material.opacity = val;
-      m.material.needsUpdate = true;
-    }
-  });
-}
-
-// ── Click selection ──────────────────────────────────────────────────
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-
-function onClickSelect(event) {
-  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-
-  const pickTarget = document.getElementById('pickTarget').value;
-
-  if (pickTarget.startsWith('skel:')) {
-    const targetSkelName = pickTarget.slice(5);
-    const sg = skelGroups[targetSkelName];
-    if (!sg || !sg.nodePoints) return;
-
-    const camDist = camera.position.distanceTo(controls.target);
-    raycaster.params.Points.threshold = camDist * 0.02;
-    const hits = raycaster.intersectObject(sg.nodePoints);
-    if (hits.length === 0) return;
-
-    const bestHit = hits[0];
-    const bestSkelName = targetSkelName;
-    const skelNodeRadii = sg.radii;
-    const skelColor = skelGroups[bestSkelName].color;
-
-    const nodeIndex = bestHit.index;
-    const point = bestHit.point;
-    const radius = skelNodeRadii ? skelNodeRadii[nodeIndex] : null;
-    const key = `${bestSkelName}:${nodeIndex}`;
-
-    // Click same node again → deselect
-    if (selectedNodes[key]) {
-      scene.remove(selectedNodes[key].mesh);
-      selectedNodes[key].mesh.geometry.dispose();
-      selectedNodes[key].mesh.material.dispose();
-      delete selectedNodes[key];
-      updateNodeSelectionDisplay();
-      syncNodeSelections();
-      return;
-    }
-
-    // Add to selection
-    const sphereR = radius !== null ? radius : 100;
-    const sphereGeo = new THREE.SphereGeometry(sphereR, 16, 12);
-    const sc = skelColor || [1, 0.3, 0.3];
-    const sphereMat = new THREE.MeshPhongMaterial({
-      color: new THREE.Color(sc[0], sc[1], sc[2]),
-      transparent: true, opacity: 0.4, depthTest: true,
-    });
-    const sphereMesh = new THREE.Mesh(sphereGeo, sphereMat);
-    sphereMesh.position.copy(point);
-    scene.add(sphereMesh);
-
-    selectedNodes[key] = {
-      mesh: sphereMesh, skelName: bestSkelName, nodeIndex, radius,
-      point: [point.x, point.y, point.z],
-    };
-
-    updateNodeSelectionDisplay();
-    syncNodeSelections();
-    return;
-  }
-
-  // Mesh picking
-  if (!meshObj) return;
-  const hits = raycaster.intersectObject(meshObj);
-  if (hits.length === 0) return;
-
-  const hit = hits[0];
-  const faceIndex = hit.faceIndex;
-  const point = hit.point;
-  if (event.shiftKey) {
-    if (manualHighlightFaces.has(faceIndex)) manualHighlightFaces.delete(faceIndex);
-    else manualHighlightFaces.add(faceIndex);
-    rebuildManualHighlight();
-    syncManualHighlight();
-    return;
-  }
-
-  const selInfo = { faceIndex, point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)] };
-  document.getElementById('selDetail').innerHTML =
-    `<div>Face: <b>${faceIndex}</b></div><div>Pos: ${selInfo.point.join(', ')}</div>`;
-
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'selection', payload: selInfo }));
-  else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selInfo) }).catch(() => {});
-}
-
-// ── Node selection display & sync ─────────────────────────────────────
-function updateNodeSelectionDisplay() {
-  const keys = Object.keys(selectedNodes);
-  if (keys.length === 0) {
-    document.getElementById('selDetail').innerHTML = '';
-    return;
-  }
-  const container = document.getElementById('selDetail');
-  container.innerHTML = '';
-  for (const key of keys) {
-    const s = selectedNodes[key];
-    const c = skelGroups[s.skelName] ? skelGroups[s.skelName].color : [1,1,1];
-    const rgb = `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`;
-    const div = document.createElement('div');
-    div.className = 'hl-item';
-    div.style.color = rgb;
-    div.innerHTML = `<span>Node ${s.nodeIndex} (${s.skelName}) r=${s.radius !== null ? s.radius.toFixed(0) : '?'}</span>`;
-    const btn = document.createElement('button');
-    btn.textContent = 'x';
-    btn.addEventListener('click', () => {
-      scene.remove(selectedNodes[key].mesh);
-      selectedNodes[key].mesh.geometry.dispose();
-      selectedNodes[key].mesh.material.dispose();
-      delete selectedNodes[key];
-      updateNodeSelectionDisplay();
-      syncNodeSelections();
-    });
-    div.appendChild(btn);
-    container.appendChild(div);
-  }
-}
-
-function syncNodeSelections() {
-  const payload = {};
-  for (const [key, s] of Object.entries(selectedNodes)) {
-    payload[key] = {
-      skelName: s.skelName, nodeIndex: s.nodeIndex,
-      radius: s.radius, point: s.point.map(v => v.toFixed(2)),
-    };
-  }
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'node_selection', payload }));
-  } else {
-    fetch('/update_selection', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodeSelections: payload }),
-    }).catch(() => {});
-  }
-}
-
-// ── Manual highlight ─────────────────────────────────────────────────
-function rebuildManualHighlight() {
-  if (manualHighlightMesh) { scene.remove(manualHighlightMesh); manualHighlightMesh.geometry.dispose(); manualHighlightMesh.material.dispose(); manualHighlightMesh = null; }
-  const faces = Array.from(manualHighlightFaces);
-  document.getElementById('hlCount').textContent = faces.length;
-  document.getElementById('hlSaveRow').style.display = faces.length > 0 ? 'block' : 'none';
-  if (faces.length === 0 || !meshGeometry) return;
-
-  const posAttr = meshGeometry.getAttribute('position');
-  const positions = new Float32Array(faces.length * 9);
-  for (let j = 0; j < faces.length; j++) { const base = faces[j] * 9; for (let k = 0; k < 9; k++) positions[j * 9 + k] = posAttr.array[base + k]; }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.computeVertexNormals();
-  manualHighlightMesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
-    color: new THREE.Color(1, 0.8, 0), side: THREE.DoubleSide, clippingPlanes: [clipPlane],
-    transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2,
-  }));
-  scene.add(manualHighlightMesh);
-}
-
-async function runDetectOrganelles() {
-  const btn = document.getElementById('detectBtn');
-  btn.textContent = 'Detecting...'; btn.disabled = true;
-  try {
-    const resp = await fetch('/detect_organelles', { method: 'POST' });
-    const data = await resp.json();
-    btn.textContent = data.ok ? `Organelles: ${data.nFaces} (A)` : 'Error';
-  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
-}
-
-async function runDetectOrganellesType(type) {
-  const btnId = type === 'pocket' ? 'detectSurfaceBtn' : 'detectIsolatedBtn';
-  const btn = document.getElementById(btnId);
-  const origText = btn.textContent;
-  btn.textContent = 'Detecting...'; btn.disabled = true;
-  try {
-    const resp = await fetch(`/detect_organelles?type=${type}`, { method: 'POST' });
-    const data = await resp.json();
-    btn.textContent = data.ok ? `${type}: ${data.nFaces}` : `Error`;
-  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
-}
-
-async function runDetectHoles() {
-  const btn = document.getElementById('detectHolesBtn');
-  btn.textContent = 'Detecting...'; btn.disabled = true;
-  try {
-    const resp = await fetch('/detect_holes', { method: 'POST' });
-    const data = await resp.json();
-    btn.textContent = data.ok ? `Holes: ${data.nHoles} (H)` : 'Error';
-  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
-}
-
-async function runDetectFusions() {
-  const btn = document.getElementById('detectFusionsBtn');
-  btn.textContent = 'Detecting...'; btn.disabled = true;
-  try {
-    const resp = await fetch('/detect_fusions', { method: 'POST' });
-    const data = await resp.json();
-    btn.textContent = data.ok ? `Fusions: ${data.nClusters} (F)` : 'Error';
-  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
-}
-
-async function runDetectRims() {
-  const btn = document.getElementById('detectRimsBtn');
-  btn.textContent = 'Detecting...'; btn.disabled = true;
-  try {
-    const resp = await fetch('/detect_rims', { method: 'POST' });
-    const data = await resp.json();
-    btn.textContent = data.ok ? `Rims: ${data.nFaces} (R)` : 'Error';
-  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
-}
-
-async function runRemoveOrganelles() {
-  const btn = document.getElementById('removeOrganellesBtn');
-  btn.textContent = 'Removing...'; btn.disabled = true;
-  try {
-    const resp = await fetch('/remove_organelles', { method: 'POST' });
-    const data = await resp.json();
-    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : 'Error';
-  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
-}
-
-async function runRemoveFusions() {
-  const btn = document.getElementById('removeFusionsBtn');
-  btn.textContent = 'Removing...'; btn.disabled = true;
-  try {
-    const resp = await fetch('/remove_fusions', { method: 'POST' });
-    const data = await resp.json();
-    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : 'Error';
-  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
-}
-
-async function runFillHoles() {
-  const btn = document.getElementById('fillHolesBtn');
-  btn.textContent = 'Filling...'; btn.disabled = true;
-  try {
-    const resp = await fetch('/fill_holes', { method: 'POST' });
-    const data = await resp.json();
-    btn.textContent = data.ok ? `Filled (${data.facesAfter.toLocaleString()}f)` : 'Error';
-  } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
-}
-
-function openSaveDialog() {
-  document.getElementById('saveDialogStatus').textContent = '';
-  document.getElementById('save-dialog').style.display = 'block';
-  document.getElementById('save-dialog-backdrop').style.display = 'block';
-}
-
-function closeSaveDialog() {
-  document.getElementById('save-dialog').style.display = 'none';
-  document.getElementById('save-dialog-backdrop').style.display = 'none';
-}
-
-function getSkelName() {
-  const names = Object.keys(skelGroups);
-  return names.includes('skeleton') ? 'skeleton' : names[0];
-}
-
-async function downloadFile(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) { const err = await resp.json(); throw new Error(err.error || 'Export failed'); }
-  const blob = await resp.blob();
-  const fname = resp.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'file';
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-  URL.revokeObjectURL(a.href);
-  return fname;
-}
-
-async function doSave(mode) {
-  const statusEl = document.getElementById('saveDialogStatus');
-  statusEl.textContent = 'Saving...'; statusEl.style.color = '#adf';
-  try {
-    const saved = [];
-    if (mode === 'mesh' || mode === 'all') {
-      saved.push(await downloadFile('/export_mesh'));
-    }
-    if (mode === 'swc' || mode === 'all') {
-      const name = getSkelName();
-      if (!name) throw new Error('No skeleton');
-      saved.push(await downloadFile(`/export_skeleton?name=${encodeURIComponent(name)}&format=swc`));
-    }
-    if (mode === 'npz' || mode === 'all') {
-      const name = getSkelName();
-      if (!name) throw new Error('No skeleton');
-      saved.push(await downloadFile(`/export_skeleton?name=${encodeURIComponent(name)}&format=npz`));
-    }
-    statusEl.textContent = `Downloaded: ${saved.join(', ')}`;
-    statusEl.style.color = '#6f6';
-  } catch (e) {
-    statusEl.textContent = e.message || 'Error';
-    statusEl.style.color = '#f66';
-  }
-}
-
-// ── Skeletonize ───────────────────────────────────────────────────
-const SKEL_DEFAULTS = {
-  geodesic_shell_count: { value: 1000, type: 'int', label: 'Shell count' },
-  min_shell_vertices: { value: 6, type: 'int', label: 'Min shell vertices' },
-  max_shell_width_factor: { value: 50, type: 'int', label: 'Max shell width factor' },
-  detect_soma: { value: true, type: 'bool', label: 'Detect soma' },
-  soma_radius_percentile_threshold: { value: 99.9, type: 'float', label: 'Soma radius percentile' },
-  soma_radius_distance_factor: { value: 4, type: 'float', label: 'Soma radius dist factor' },
-  soma_min_nodes: { value: 3, type: 'int', label: 'Soma min nodes' },
-  bridge_gaps: { value: true, type: 'bool', label: 'Bridge gaps' },
-  collapse_soma: { value: true, type: 'bool', label: 'Collapse soma' },
-  collapse_soma_dist_factor: { value: 1.2, type: 'float', label: 'Collapse soma dist factor' },
-  collapse_soma_radius_factor: { value: 0.2, type: 'float', label: 'Collapse soma radius factor' },
-  prune_tiny_neurites: { value: true, type: 'bool', label: 'Prune tiny neurites' },
-  prune_tip_extent_factor: { value: 1.2, type: 'float', label: 'Prune tip extent factor' },
-  prune_stem_extent_factor: { value: 3.0, type: 'float', label: 'Prune stem extent factor' },
-  merge_nodes_overlap_fraction: { value: 0.8, type: 'float', label: 'Merge nodes overlap frac' },
-  split_elongated_shells: { value: false, type: 'bool', label: 'Split elongated shells' },
-  split_aspect_thr: { value: 3.0, type: 'float', label: 'Split aspect threshold' },
-  postprocess: { value: true, type: 'bool', label: 'Postprocess' },
-};
-let skelParams = {};
-
-function getSkelParams() {
-  const params = {};
-  for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
-    if (key in skelParams && skelParams[key] !== def.value) {
-      params[key] = skelParams[key];
-    }
-  }
-  return params;
-}
-
-function openSkelParams() {
-  const body = document.getElementById('skelParamsBody');
-  body.innerHTML = '';
-  for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
-    const val = key in skelParams ? skelParams[key] : def.value;
-    const label = document.createElement('label');
-    label.textContent = def.label;
-    label.style.color = '#ccc';
-    body.appendChild(label);
-
-    if (def.type === 'bool') {
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.checked = val; cb.dataset.key = key;
-      cb.addEventListener('change', () => { skelParams[key] = cb.checked; });
-      body.appendChild(cb);
-    } else {
-      const inp = document.createElement('input');
-      inp.type = 'text'; inp.value = val; inp.dataset.key = key;
-      inp.style.cssText = 'width:80px;font-size:11px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:2px 4px;';
-      inp.addEventListener('change', () => {
-        skelParams[key] = def.type === 'int' ? parseInt(inp.value) : parseFloat(inp.value);
-      });
-      body.appendChild(inp);
-    }
-  }
-  document.getElementById('skel-params-dialog').style.display = 'block';
-  document.getElementById('skel-params-backdrop').style.display = 'block';
-}
-
-function closeSkelParams() {
-  document.getElementById('skel-params-dialog').style.display = 'none';
-  document.getElementById('skel-params-backdrop').style.display = 'none';
-}
-
-function resetSkelParams() {
-  skelParams = {};
-  openSkelParams();
-}
-
-async function runSkeletonize() {
-  const btn = document.getElementById('skeletonizeBtn');
-  btn.textContent = 'Running...'; btn.disabled = true;
-  try {
-    const resp = await fetch('/skeletonize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ params: getSkelParams() }),
-    });
-    const data = await resp.json();
-    if (data.ok) {
-      btn.textContent = `${data.nNodes}n ${data.nEdges}e`;
-      updateLoadedPanel();
-    } else {
-      btn.textContent = data.error || 'Error';
-    }
-  } catch (e) { btn.textContent = 'Error'; }
-  finally { btn.disabled = false; }
-}
-
-async function runFindPath(mode) {
-  const btnId = mode === 'vertex' ? 'findPathVertBtn' : 'findPathBtn';
-  const btn = document.getElementById(btnId);
-  const origText = btn.textContent;
-  btn.textContent = 'Computing...'; btn.disabled = true;
-
-  try {
-    let body;
-    const nNodes = Object.keys(selectedNodes).length;
-    const nFaces = manualHighlightFaces.size;
-
-    if (nNodes === 2) {
-      const keys = Object.keys(selectedNodes);
-      const s1 = selectedNodes[keys[0]];
-      const s2 = selectedNodes[keys[1]];
-      if (s1.skelName !== s2.skelName) {
-        btn.textContent = 'Diff skeletons'; setTimeout(() => { btn.textContent = origText; }, 2000);
-        return;
-      }
-      body = { type: 'skeleton', skelName: s1.skelName, node1: s1.nodeIndex, node2: s2.nodeIndex };
-    } else if (nFaces === 2) {
-      const faces = Array.from(manualHighlightFaces);
-      body = { type: 'mesh', face1: faces[0], face2: faces[1], mode };
-    } else {
-      btn.textContent = 'Select 2'; setTimeout(() => { btn.textContent = origText; }, 2000);
-      return;
-    }
-
-    const resp = await fetch('/shortest_path', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-
-    if (data.ok) {
-      if (!currentAnnotations) currentAnnotations = {};
-      if (data.type === 'mesh') {
-        if (!currentAnnotations.highlights) currentAnnotations.highlights = [];
-        currentAnnotations.highlights.push({
-          faces: data.path,
-          color: [0.2, 1.0, 0.8],
-          label: `path (${data.nFaces}f, ${data.length.toFixed(0)}nm)`,
-        });
-        manualHighlightFaces.clear();
-        rebuildManualHighlight();
-        syncManualHighlight();
-      } else {
-        if (!currentAnnotations.edge_groups) currentAnnotations.edge_groups = [];
-        currentAnnotations.edge_groups.push({
-          segments: data.segments,
-          color: [1.0, 1.0, 0.2],
-          label: `path (${data.nNodes}n, ${data.length.toFixed(0)}nm)`,
-        });
-      }
-      applyAnnotations(currentAnnotations);
-      syncAnnotationsToServer();
-      btn.textContent = data.type === 'mesh'
-        ? `${data.nFaces}f ${data.length.toFixed(0)}nm`
-        : `${data.nNodes}n ${data.length.toFixed(0)}nm`;
-    } else {
-      btn.textContent = data.error || 'No path';
-    }
-  } catch (e) {
-    btn.textContent = 'Error';
-  } finally {
-    btn.disabled = false;
-    setTimeout(() => { btn.textContent = origText; }, 3000);
-  }
-}
-
-function syncManualHighlight() {
-  const payload = { manualHighlight: Array.from(manualHighlightFaces) };
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'manual_highlight', payload }));
-  else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
-}
-
-const SAVE_COLORS = [
-  [0.2, 0.6, 1.0], [0.1, 0.9, 0.4], [0.9, 0.2, 0.8],
-  [1.0, 0.9, 0.1], [1.0, 0.4, 0.1], [0.4, 0.9, 0.9],
-];
-let saveColorIdx = 0;
-
-function saveHighlightAsAnnotation() {
-  if (manualHighlightFaces.size === 0) return;
-  const nameInput = document.getElementById('hlSaveName');
-  const label = nameInput.value.trim() || `selection ${Date.now()}`;
-  const faces = Array.from(manualHighlightFaces);
-  const color = SAVE_COLORS[saveColorIdx % SAVE_COLORS.length];
-  saveColorIdx++;
-
-  const payload = { faces, color, label };
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'save_highlight', payload }));
-  } else {
-    fetch('/save_highlight', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-  }
-
-  // Clear manual highlight
-  manualHighlightFaces.clear();
-  rebuildManualHighlight();
-  syncManualHighlight();
-  nameInput.value = '';
-}
-
-async function checkFusion() {
-  if (manualHighlightFaces.size === 0) return;
-  const resultDiv = document.getElementById('fusionResult');
-  resultDiv.style.display = 'block';
-  resultDiv.textContent = 'Analyzing...';
-  try {
-    const resp = await fetch('/check_fusion', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
-    });
-    const data = await resp.json();
-    if (data.ok) {
-      const lines = [];
-      if (data.nm_edges > 0) lines.push(`${data.nm_edges} non-manifold edges`);
-      if (data.duplicate_faces > 0) lines.push(`${data.duplicate_faces} duplicate faces`);
-      if (data.high_neighbor_faces > 0) lines.push(`${data.high_neighbor_faces} faces with >3 neighbors`);
-      if (data.fusion_faces && data.fusion_faces.length > 0) {
-        lines.push(`${data.fusion_faces.length} fusion face(s) found`);
-        // Add fusion faces to highlight
-        for (const fi of data.fusion_faces) manualHighlightFaces.add(fi);
-        rebuildManualHighlight();
-        syncManualHighlight();
-      }
-      resultDiv.textContent = lines.length > 0 ? lines.join(' | ') : 'No fusion signals found';
-    } else {
-      resultDiv.textContent = data.error || 'Error';
-    }
-  } catch (e) { resultDiv.textContent = 'Error: ' + e.message; }
-}
-
-// ── Lasso (rectangle) selection ───────────────────────────────────
-function setupLassoSelection() {
-  const rect = document.getElementById('lasso-rect');
-  let dragging = false;
-  let startX = 0, startY = 0;
-
-  renderer.domElement.addEventListener('pointerdown', (e) => {
-    if (!e.shiftKey || e.button !== 0) return;
-    // Prevent orbit controls from handling shift+drag
-    controls.enabled = false;
-    dragging = true;
-    startX = e.clientX;
-    startY = e.clientY;
-    rect.style.left = startX + 'px';
-    rect.style.top = startY + 'px';
-    rect.style.width = '0px';
-    rect.style.height = '0px';
-    rect.style.display = 'block';
-    e.preventDefault();
-    e.stopPropagation();
-  });
-
-  window.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    const x = Math.min(startX, e.clientX);
-    const y = Math.min(startY, e.clientY);
-    const w = Math.abs(e.clientX - startX);
-    const h = Math.abs(e.clientY - startY);
-    rect.style.left = x + 'px';
-    rect.style.top = y + 'px';
-    rect.style.width = w + 'px';
-    rect.style.height = h + 'px';
-  });
-
-  window.addEventListener('pointerup', (e) => {
-    if (!dragging) return;
-    dragging = false;
-    rect.style.display = 'none';
-    controls.enabled = true;
-
-    const x0 = Math.min(startX, e.clientX);
-    const y0 = Math.min(startY, e.clientY);
-    const x1 = Math.max(startX, e.clientX);
-    const y1 = Math.max(startY, e.clientY);
-
-    // Ignore tiny drags (clicks)
-    if (x1 - x0 < 5 && y1 - y0 < 5) return;
-
-    if (!meshGeometry) return;
-    const posAttr = meshGeometry.getAttribute('position');
-    const nFaces = posAttr.count / 3;
-
-    // Project each face centroid to screen and check if inside rectangle
-    const vp = new THREE.Vector3();
-    let count = 0;
-    for (let i = 0; i < nFaces; i++) {
-      const base = i * 9;
-      vp.set(
-        (posAttr.array[base] + posAttr.array[base+3] + posAttr.array[base+6]) / 3,
-        (posAttr.array[base+1] + posAttr.array[base+4] + posAttr.array[base+7]) / 3,
-        (posAttr.array[base+2] + posAttr.array[base+5] + posAttr.array[base+8]) / 3,
-      );
-
-      // Check clip plane
-      if (clipPlane.distanceToPoint(vp) < 0) continue;
-
-      // Project to screen
-      vp.project(camera);
-      const sx = (vp.x * 0.5 + 0.5) * window.innerWidth;
-      const sy = (-vp.y * 0.5 + 0.5) * window.innerHeight;
-
-      if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && vp.z >= 0 && vp.z <= 1) {
-        manualHighlightFaces.add(i);
-        count++;
-      }
-    }
-
-    rebuildManualHighlight();
-    syncManualHighlight();
-  });
-}
-
-// ── Right-click / Ctrl+click to recenter ─────────────────────────
-let pointerDownPos = null;
-function onRecenter(event) {
-  const isRight = event.button === 2;
-  const isCtrlLeft = event.button === 0 && (event.ctrlKey || event.metaKey);
-  if (!isRight && !isCtrlLeft) return;
-  pointerDownPos = { x: event.clientX, y: event.clientY };
-  const savedTarget = controls.target.clone();
-  const savedCamPos = camera.position.clone();
-  const onUp = (upEvent) => {
-    renderer.domElement.removeEventListener('pointerup', onUp);
-    if (!pointerDownPos) return;
-    if (Math.sqrt((upEvent.clientX - pointerDownPos.x)**2 + (upEvent.clientY - pointerDownPos.y)**2) > 5) return;
-    // Undo any pan that OrbitControls applied during this click
-    controls.target.copy(savedTarget);
-    camera.position.copy(savedCamPos);
-    mouse.x = (upEvent.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
-    if (!meshObj) return;
-    const hits = raycaster.intersectObject(meshObj);
-    if (hits.length === 0) return;
-    const pickPoint = hits[0].point;
-    const offset = camera.position.clone().sub(controls.target);
-    controls.target.copy(pickPoint);
-    camera.position.copy(pickPoint).add(offset);
-    controls.update();
-    scheduleStateUpdate();
-  };
-  renderer.domElement.addEventListener('pointerup', onUp);
-}
-
-// ── Visible face computation ─────────────────────────────────────────
-function computeVisibleFaceCount() {
-  if (!meshGeometry) return 0;
-  const frustum = new THREE.Frustum();
-  const m = new THREE.Matrix4();
-  m.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-  frustum.setFromProjectionMatrix(m);
-  const pos = meshGeometry.getAttribute('position');
-  const nFaces = pos.count / 3;
-  let visible = 0;
-  const c = new THREE.Vector3();
-  const step = Math.max(1, Math.floor(nFaces / 10000));
-  let sampled = 0;
-  for (let i = 0; i < nFaces; i += step) {
-    const b = i * 9;
-    c.set((pos.array[b]+pos.array[b+3]+pos.array[b+6])/3, (pos.array[b+1]+pos.array[b+4]+pos.array[b+7])/3, (pos.array[b+2]+pos.array[b+5]+pos.array[b+8])/3);
-    if (frustum.containsPoint(c) && clipPlane.distanceToPoint(c) >= 0) visible++;
-    sampled++;
-  }
-  return Math.round((visible / sampled) * nFaces);
-}
-
-// ── State updates ────────────────────────────────────────────────────
-function scheduleStateUpdate() { if (stateDebounceTimer) clearTimeout(stateDebounceTimer); stateDebounceTimer = setTimeout(sendStateUpdate, STATE_DEBOUNCE_MS); }
-
-function sendStateUpdate() {
-  const visCount = computeVisibleFaceCount();
-  document.getElementById('visCount').textContent = visCount.toLocaleString();
-  document.getElementById('camPos').textContent = `(${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)})`;
-  const state = {
-    camera: { position: camera.position.toArray(), target: controls.target.toArray(), up: camera.up.toArray(), fov: camera.fov, near: camera.near, far: camera.far },
-    clipPlane: { normal: [clipPlane.normal.x, clipPlane.normal.y, clipPlane.normal.z], constant: clipPlane.constant },
-    ui: { opacity: meshObj ? meshObj.material.opacity : 1.0, wireframe: wireframeObj ? wireframeObj.visible : false },
-    visibleFaceCount: visCount,
-  };
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'state_update', payload: state }));
-  else fetch('/update_state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state) }).catch(() => {});
-}
-
-// ── Annotations ──────────────────────────────────────────────────────
-let currentAnnotations = null;  // cached for panel rebuild
-
-function applyAnnotations(annotations) {
-  for (const m of annotationMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
-  annotationMeshes = [];
-  for (const m of markerMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
-  markerMeshes = [];
-  for (const m of edgeGroupMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
-  edgeGroupMeshes = [];
-  currentAnnotations = annotations;
-  updateHighlightsPanel();
-  if (!annotations) return;
-  // Face highlights
-  if (annotations.highlights && meshGeometry) {
-    const posAttr = meshGeometry.getAttribute('position');
-    for (const group of annotations.highlights) {
-      const fi = group.faces || []; if (fi.length === 0) continue;
-      const color = group.color || [1, 0, 0];
-      const pos = new Float32Array(fi.length * 9);
-      for (let j = 0; j < fi.length; j++) { const base = fi[j] * 9; for (let k = 0; k < 9; k++) pos[j * 9 + k] = posAttr.array[base + k]; }
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      geo.computeVertexNormals();
-      const mat = new THREE.MeshPhongMaterial({ color: new THREE.Color(color[0], color[1], color[2]), side: THREE.DoubleSide, clippingPlanes: [clipPlane], transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -1 });
-      const hlm = new THREE.Mesh(geo, mat);
-      scene.add(hlm); annotationMeshes.push(hlm);
-    }
-  }
-  // Markers (spheres at arbitrary positions)
-  if (annotations.markers) {
-    for (const mk of annotations.markers) {
-      const pos = mk.position || [0,0,0];
-      const color = mk.color || [1,1,1];
-      const radius = mk.radius || 50;
-      const geo = new THREE.SphereGeometry(radius, 12, 8);
-      const mat = new THREE.MeshPhongMaterial({
-        color: new THREE.Color(color[0], color[1], color[2]),
-        transparent: true, opacity: mk.opacity !== undefined ? mk.opacity : 0.8,
-        depthTest: true,
-      });
-      const sphere = new THREE.Mesh(geo, mat);
-      sphere.position.set(pos[0], pos[1], pos[2]);
-      scene.add(sphere);
-      markerMeshes.push(sphere);
-    }
-  }
-  // Flat edges (legacy)
-  if (annotations.edges) {
-    for (const edge of annotations.edges) {
-      const a = edge[0], b = edge[1];
-      const color = edge[2] || [1,1,1];
-      const pts = new Float32Array([a[0],a[1],a[2], b[0],b[1],b[2]]);
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(pts, 3));
-      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color[0], color[1], color[2]), linewidth: 2 });
-      const line = new THREE.LineSegments(geo, mat);
-      scene.add(line);
-      markerMeshes.push(line);
-    }
-  }
-  // Edge groups (grouped line segments with labels)
-  if (annotations.edge_groups) {
-    for (const group of annotations.edge_groups) {
-      const segs = group.segments || []; if (segs.length === 0) continue;
-      const color = group.color || [1,1,1];
-      const pts = new Float32Array(segs.length * 6);
-      for (let i = 0; i < segs.length; i++) {
-        const a = segs[i][0], b = segs[i][1];
-        pts[i*6] = a[0]; pts[i*6+1] = a[1]; pts[i*6+2] = a[2];
-        pts[i*6+3] = b[0]; pts[i*6+4] = b[1]; pts[i*6+5] = b[2];
-      }
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(pts, 3));
-      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color[0], color[1], color[2]), linewidth: 2 });
-      const line = new THREE.LineSegments(geo, mat);
-      scene.add(line);
-      edgeGroupMeshes.push(line);
-    }
-  }
-}
-
-function rgbToHex(c) {
-  const r = Math.round(c[0]*255), g = Math.round(c[1]*255), b = Math.round(c[2]*255);
-  return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
-}
-function hexToRgb01(hex) {
-  const m = hex.match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-  return [parseInt(m[1],16)/255, parseInt(m[2],16)/255, parseInt(m[3],16)/255];
-}
-function syncAnnotationsToServer() {
-  if (!currentAnnotations) return;
-  fetch('/update_annotations', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(currentAnnotations),
-  }).catch(() => {});
-}
-
-function focusOnAnnotation(idx) {
-  const mesh = annotationMeshes[idx];
-  if (!mesh) return;
-  mesh.geometry.computeBoundingBox();
-  const box = mesh.geometry.boundingBox;
-  const center = new THREE.Vector3();
-  box.getCenter(center);
-  const size = new THREE.Vector3();
-  box.getSize(size);
-  const radius = size.length() / 2;
-
-  const offset = camera.position.clone().sub(controls.target).normalize();
-  controls.target.copy(center);
-  camera.position.copy(center).addScaledVector(offset, radius * 3);
-  controls.update();
-  scheduleStateUpdate();
-}
-
-function focusOnEdgeGroup(idx) {
-  const line = edgeGroupMeshes[idx];
-  if (!line) return;
-  line.geometry.computeBoundingBox();
-  const box = line.geometry.boundingBox;
-  const center = new THREE.Vector3();
-  box.getCenter(center);
-  const size = new THREE.Vector3();
-  box.getSize(size);
-  const radius = size.length() / 2;
-
-  const offset = camera.position.clone().sub(controls.target).normalize();
-  controls.target.copy(center);
-  camera.position.copy(center).addScaledVector(offset, Math.max(radius * 3, 500));
-  controls.update();
-  scheduleStateUpdate();
-}
-
-function removeEdgeGroup(idx) {
-  if (!currentAnnotations || !currentAnnotations.edge_groups) return;
-  currentAnnotations.edge_groups.splice(idx, 1);
-  if (edgeGroupMeshes[idx]) {
-    scene.remove(edgeGroupMeshes[idx]);
-    edgeGroupMeshes[idx].geometry.dispose();
-    edgeGroupMeshes[idx].material.dispose();
-    edgeGroupMeshes.splice(idx, 1);
-  }
-  updateHighlightsPanel();
-  syncAnnotationsToServer();
-}
-
-function updateHighlightsPanel() {
-  const list = document.getElementById('hlList');
-  list.innerHTML = '';
-  const clearRow = document.getElementById('hlClearAllRow');
-  const hasHighlights = currentAnnotations && currentAnnotations.highlights && currentAnnotations.highlights.length > 0;
-  const hasMarkers = currentAnnotations && currentAnnotations.markers && currentAnnotations.markers.length > 0;
-  const hasEdgeGroups = currentAnnotations && currentAnnotations.edge_groups && currentAnnotations.edge_groups.length > 0;
-  if (!hasHighlights && !hasMarkers && !hasEdgeGroups) {
-    clearRow.style.display = 'none';
-    return;
-  }
-  clearRow.style.display = 'block';
-  if (hasHighlights) {
-    currentAnnotations.highlights.forEach((group, idx) => {
-      const n = (group.faces || []).length;
-      if (n === 0) return;
-      const color = group.color || [1, 0, 0];
-      const label = group.label || `Group ${idx}`;
-      const div = document.createElement('div');
-      div.className = 'hl-item';
-      const rgb = `rgb(${Math.round(color[0]*255)},${Math.round(color[1]*255)},${Math.round(color[2]*255)})`;
-
-      const picker = document.createElement('input');
-      picker.type = 'color';
-      picker.className = 'hl-color-input';
-      picker.value = rgbToHex(color);
-      picker.title = 'Click to change color';
-      picker.addEventListener('input', () => {
-        const nc = hexToRgb01(picker.value);
-        group.color = nc;
-        if (annotationMeshes[idx]) {
-          annotationMeshes[idx].material.color.setRGB(nc[0], nc[1], nc[2]);
-          annotationMeshes[idx].material.needsUpdate = true;
-        }
-      });
-      picker.addEventListener('change', () => syncAnnotationsToServer());
-
-      const left = document.createElement('span');
-      left.style.cssText = 'display:flex;align-items:center;';
-      left.appendChild(picker);
-
-      const nameSpan = document.createElement('span');
-      nameSpan.textContent = label;
-      nameSpan.title = 'Click to rename, double-click to center';
-      nameSpan.style.cssText = 'cursor:pointer;border-bottom:1px dashed #555;';
-      nameSpan.addEventListener('click', () => {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.value = group.label || '';
-        input.style.cssText = 'font-size:11px;width:100px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:1px 3px;';
-        const commit = () => {
-          const newName = input.value.trim();
-          if (newName) group.label = newName;
-          syncAnnotationsToServer();
-          updateHighlightsPanel();
-        };
-        input.addEventListener('blur', commit);
-        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
-        nameSpan.replaceWith(input);
-        input.focus();
-        input.select();
-      });
-      nameSpan.addEventListener('dblclick', () => focusOnAnnotation(idx));
-      left.appendChild(nameSpan);
-
-      const countSpan = document.createElement('span');
-      countSpan.textContent = ` (${n.toLocaleString()})`;
-      countSpan.style.color = '#888';
-      left.appendChild(countSpan);
-
-      const focusBtn = document.createElement('button');
-      focusBtn.textContent = '⌖';
-      focusBtn.title = 'Center camera on this annotation';
-      focusBtn.style.cssText = 'font-size:12px;cursor:pointer;margin-left:4px;';
-      focusBtn.addEventListener('click', () => focusOnAnnotation(idx));
-      left.appendChild(focusBtn);
-
-      div.appendChild(left);
-
-      const toggleBtn = document.createElement('button');
-      toggleBtn.textContent = annotationMeshes[idx] && !annotationMeshes[idx].visible ? 'show' : 'hide';
-      toggleBtn.style.cssText = 'font-size:10px;cursor:pointer;margin-left:4px;';
-      toggleBtn.addEventListener('click', () => {
-        if (!annotationMeshes[idx]) return;
-        annotationMeshes[idx].visible = !annotationMeshes[idx].visible;
-        toggleBtn.textContent = annotationMeshes[idx].visible ? 'hide' : 'show';
-      });
-      div.appendChild(toggleBtn);
-
-      const btn = document.createElement('button');
-      btn.textContent = 'x';
-      btn.addEventListener('click', () => removeAnnotationGroup(idx));
-      div.appendChild(btn);
-      list.appendChild(div);
-    });
-  }
-  if (hasMarkers) {
-    currentAnnotations.markers.forEach((mk, idx) => {
-      const color = mk.color || [1, 1, 1];
-      const label = mk.label || `Marker ${idx}`;
-      const div = document.createElement('div');
-      div.className = 'hl-item';
-      const rgb = `rgb(${Math.round(color[0]*255)},${Math.round(color[1]*255)},${Math.round(color[2]*255)})`;
-      div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}; border-radius:50%"></span>${label}</span>`;
-
-      const toggleBtn = document.createElement('button');
-      toggleBtn.textContent = markerMeshes[idx] && !markerMeshes[idx].visible ? 'show' : 'hide';
-      toggleBtn.style.cssText = 'font-size:10px;cursor:pointer;margin-left:4px;';
-      toggleBtn.addEventListener('click', () => {
-        if (!markerMeshes[idx]) return;
-        markerMeshes[idx].visible = !markerMeshes[idx].visible;
-        toggleBtn.textContent = markerMeshes[idx].visible ? 'hide' : 'show';
-      });
-      div.appendChild(toggleBtn);
-
-      const btn = document.createElement('button');
-      btn.textContent = 'x';
-      btn.addEventListener('click', () => removeMarker(idx));
-      div.appendChild(btn);
-      list.appendChild(div);
-    });
-  }
-  if (hasEdgeGroups) {
-    currentAnnotations.edge_groups.forEach((group, idx) => {
-      const segs = group.segments || [];
-      if (segs.length === 0) return;
-      const color = group.color || [1, 1, 1];
-      const label = group.label || `Edges ${idx}`;
-      const div = document.createElement('div');
-      div.className = 'hl-item';
-
-      const picker = document.createElement('input');
-      picker.type = 'color';
-      picker.className = 'hl-color-input';
-      picker.value = rgbToHex(color);
-      picker.title = 'Click to change color';
-      picker.addEventListener('input', () => {
-        const nc = hexToRgb01(picker.value);
-        group.color = nc;
-        if (edgeGroupMeshes[idx]) {
-          edgeGroupMeshes[idx].material.color.setRGB(nc[0], nc[1], nc[2]);
-          edgeGroupMeshes[idx].material.needsUpdate = true;
-        }
-      });
-      picker.addEventListener('change', () => syncAnnotationsToServer());
-
-      const left = document.createElement('span');
-      left.style.cssText = 'display:flex;align-items:center;';
-      left.appendChild(picker);
-
-      const nameSpan = document.createElement('span');
-      nameSpan.textContent = label;
-      nameSpan.title = 'Click to rename, double-click to center';
-      nameSpan.style.cssText = 'cursor:pointer;border-bottom:1px dashed #555;';
-      nameSpan.addEventListener('click', () => {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.value = group.label || '';
-        input.style.cssText = 'font-size:11px;width:100px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:1px 3px;';
-        const commit = () => {
-          const newName = input.value.trim();
-          if (newName) group.label = newName;
-          syncAnnotationsToServer();
-          updateHighlightsPanel();
-        };
-        input.addEventListener('blur', commit);
-        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
-        nameSpan.replaceWith(input);
-        input.focus();
-        input.select();
-      });
-      nameSpan.addEventListener('dblclick', () => focusOnEdgeGroup(idx));
-      left.appendChild(nameSpan);
-
-      const focusBtn = document.createElement('button');
-      focusBtn.textContent = '⌖';
-      focusBtn.title = 'Center camera on this edge group';
-      focusBtn.style.cssText = 'font-size:12px;cursor:pointer;margin-left:4px;';
-      focusBtn.addEventListener('click', () => focusOnEdgeGroup(idx));
-      left.appendChild(focusBtn);
-
-      div.appendChild(left);
-
-      const toggleBtn = document.createElement('button');
-      toggleBtn.textContent = edgeGroupMeshes[idx] && !edgeGroupMeshes[idx].visible ? 'show' : 'hide';
-      toggleBtn.style.cssText = 'font-size:10px;cursor:pointer;margin-left:4px;';
-      toggleBtn.addEventListener('click', () => {
-        if (!edgeGroupMeshes[idx]) return;
-        edgeGroupMeshes[idx].visible = !edgeGroupMeshes[idx].visible;
-        toggleBtn.textContent = edgeGroupMeshes[idx].visible ? 'hide' : 'show';
-      });
-      div.appendChild(toggleBtn);
-
-      const btn = document.createElement('button');
-      btn.textContent = 'x';
-      btn.addEventListener('click', () => removeEdgeGroup(idx));
-      div.appendChild(btn);
-      list.appendChild(div);
-    });
-  }
-}
-
-function removeMarker(idx) {
-  if (!currentAnnotations || !currentAnnotations.markers) return;
-  currentAnnotations.markers.splice(idx, 1);
-  if (markerMeshes[idx]) {
-    scene.remove(markerMeshes[idx]);
-    markerMeshes[idx].geometry.dispose();
-    markerMeshes[idx].material.dispose();
-    markerMeshes.splice(idx, 1);
-  }
-  updateHighlightsPanel();
-  fetch('/update_annotations', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(currentAnnotations),
-  }).catch(() => {});
-}
-
-function removeAnnotationGroup(idx) {
-  if (!currentAnnotations || !currentAnnotations.highlights) return;
-  currentAnnotations.highlights.splice(idx, 1);
-  // Remove from scene
-  if (annotationMeshes[idx]) {
-    scene.remove(annotationMeshes[idx]);
-    annotationMeshes[idx].geometry.dispose();
-    annotationMeshes[idx].material.dispose();
-    annotationMeshes.splice(idx, 1);
-  }
-  updateHighlightsPanel();
-  // Sync to server
-  fetch('/update_annotations', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(currentAnnotations),
-  }).catch(() => {});
-}
-
-function clearAllAnnotations() {
-  for (const m of annotationMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
-  annotationMeshes = [];
-  for (const m of markerMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
-  markerMeshes = [];
-  for (const m of edgeGroupMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
-  edgeGroupMeshes = [];
-  currentAnnotations = { highlights: [], markers: [], edge_groups: [] };
-  updateHighlightsPanel();
-  fetch('/update_annotations', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(currentAnnotations),
-  }).catch(() => {});
-}
-
-function applyCameraCommand(cmd) {
-  if (cmd.position) camera.position.fromArray(cmd.position);
-  if (cmd.target) controls.target.fromArray(cmd.target);
-  if (cmd.up) camera.up.fromArray(cmd.up);
-  if (cmd.fov) { camera.fov = cmd.fov; camera.updateProjectionMatrix(); }
-  controls.update(); scheduleStateUpdate();
-}
-
-// ── WebSocket ────────────────────────────────────────────────────────
-function connectWebSocket() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-  ws.onopen = () => console.log('[skeliner] WebSocket connected');
-  ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data);
-    if (msg.type === 'annotations') applyAnnotations(msg.payload);
-    else if (msg.type === 'camera_command') applyCameraCommand(msg.payload);
-    else if (msg.type === 'reload') window.location.reload();
-    else if (msg.type === 'mesh_loaded') { buildMesh(msg.payload); updateLoadedPanel(); }
-    else if (msg.type === 'skeleton_loaded') { buildSkeleton(msg.payload); }
-    else if (msg.type === 'skeleton_removed') {
-      const sname = msg.payload && msg.payload.name;
-      if (sname && skelGroups[sname]) {
-        scene.remove(skelGroups[sname].group);
-        delete skelGroups[sname];
-        const opt = document.querySelector(`#pickTarget option[value="skel:${sname}"]`);
-        if (opt) opt.remove();
-      }
-      updateLoadedPanel();
-      if (Object.keys(skelGroups).length === 0 && !meshObj) document.getElementById('empty-hint').style.display = 'block';
-    }
-    else if (msg.type === 'all_skeletons_removed') {
-      for (const sg of Object.values(skelGroups)) scene.remove(sg.group);
-      for (const k of Object.keys(skelGroups)) delete skelGroups[k];
-      document.querySelectorAll('#pickTarget option[value^="skel:"]').forEach(o => o.remove());
-      updateLoadedPanel();
-      if (!meshObj) document.getElementById('empty-hint').style.display = 'block';
-    }
-    else if (msg.type === 'mesh_removed') {
-      if (meshObj) { scene.remove(meshObj); meshObj.geometry.dispose(); meshObj.material.dispose(); meshObj = null; }
-      if (wireframeObj) { scene.remove(wireframeObj); wireframeObj.geometry.dispose(); wireframeObj.material.dispose(); wireframeObj = null; }
-      meshGeometry = null;
-      document.getElementById('nVerts').textContent = '-';
-      document.getElementById('nFaces').textContent = '-';
-      updateLoadedPanel();
-      if (Object.keys(skelGroups).length === 0) document.getElementById('empty-hint').style.display = 'block';
-    }
-  };
-  ws.onerror = (err) => console.error('[skeliner] WebSocket error:', err);
-  ws.onclose = () => { console.log('[skeliner] WebSocket closed, reconnecting in 2s...'); setTimeout(connectWebSocket, 2000); };
-}
-
-function onResize() { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
-function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
-
-init();
-</script>
-</body>
+    <head>
+        <meta charset="utf-8" />
+        <title>Skeliner Viewer</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                background: #0a0a0a;
+                overflow: hidden;
+                font-family: monospace;
+                color: #ccc;
+            }
+            #canvas-container {
+                width: 100vw;
+                height: 100vh;
+            }
+            #info {
+                position: absolute;
+                top: 10px;
+                left: 10px;
+                background: rgba(0, 0, 0, 0.7);
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 12px;
+                line-height: 1.6;
+                pointer-events: none;
+                max-width: 400px;
+            }
+            #info .label {
+                color: #888;
+            }
+            #info .value {
+                color: #eee;
+            }
+            #controls {
+                position: absolute;
+                bottom: 10px;
+                left: 10px;
+                background: rgba(0, 0, 0, 0.7);
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            #controls label {
+                margin-right: 12px;
+                cursor: pointer;
+            }
+            #controls input[type="range"] {
+                width: 120px;
+                vertical-align: middle;
+            }
+            #selection-info {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                background: rgba(0, 0, 0, 0.7);
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 12px;
+                line-height: 1.6;
+                max-width: 300px;
+            }
+            .hl-item {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .hl-item button {
+                font-size: 10px;
+                cursor: pointer;
+                margin-left: 8px;
+            }
+            .hl-swatch {
+                display: inline-block;
+                width: 10px;
+                height: 10px;
+                border-radius: 2px;
+                margin-right: 6px;
+                cursor: pointer;
+                border: 1px solid #666;
+            }
+            input.hl-color-input {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 14px;
+                height: 14px;
+                border: 1px solid #666;
+                border-radius: 2px;
+                padding: 0;
+                margin-right: 6px;
+                cursor: pointer;
+                background: none;
+                vertical-align: middle;
+            }
+            input.hl-color-input::-webkit-color-swatch-wrapper {
+                padding: 0;
+            }
+            input.hl-color-input::-webkit-color-swatch {
+                border: none;
+                border-radius: 1px;
+            }
+            input.hl-color-input::-moz-color-swatch {
+                border: none;
+                border-radius: 1px;
+            }
+            #loaded-panel {
+                position: absolute;
+                bottom: 50px;
+                right: 10px;
+                background: rgba(0, 0, 0, 0.7);
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 12px;
+                line-height: 1.8;
+                max-width: 300px;
+            }
+            #loaded-panel .item {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            #loaded-panel .item button {
+                font-size: 10px;
+                cursor: pointer;
+                margin-left: 8px;
+            }
+            #loaded-panel .item .name {
+                color: #adf;
+                max-width: 200px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            #drop-overlay {
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100vw;
+                height: 100vh;
+                background: rgba(0, 120, 255, 0.15);
+                border: 3px dashed rgba(0, 120, 255, 0.6);
+                z-index: 999;
+                pointer-events: none;
+                justify-content: center;
+                align-items: center;
+                font-size: 24px;
+                color: #4af;
+            }
+            #detect-panel {
+                position: absolute;
+                bottom: 50px;
+                left: 10px;
+                background: rgba(0, 0, 0, 0.7);
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            #detect-panel button,
+            #skel-params-dialog button,
+            #save-dialog button {
+                background: #2a2a3e;
+                color: #ccc;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 3px 10px;
+                font-size: 11px;
+                font-family: monospace;
+                cursor: pointer;
+                transition:
+                    background 0.15s,
+                    border-color 0.15s;
+            }
+            #detect-panel button:hover,
+            #skel-params-dialog button:hover,
+            #save-dialog button:hover {
+                background: #3a3a52;
+                border-color: #7af;
+            }
+            #detect-panel button:active,
+            #skel-params-dialog button:active,
+            #save-dialog button:active {
+                background: #4a4a62;
+            }
+            #detect-panel button:disabled {
+                opacity: 0.5;
+                cursor: default;
+            }
+            #detect-panel button:disabled:hover {
+                background: #2a2a3e;
+                border-color: #555;
+            }
+            #saveBtn {
+                background: #1a3a2a !important;
+                border-color: #4a8 !important;
+                color: #8dc !important;
+            }
+            #saveBtn:hover {
+                background: #2a4a3a !important;
+                border-color: #6ca !important;
+            }
+            #lasso-rect {
+                position: fixed;
+                border: 2px dashed #4af;
+                background: rgba(0, 120, 255, 0.1);
+                pointer-events: none;
+                display: none;
+                z-index: 100;
+            }
+            #empty-hint {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                font-size: 16px;
+                color: #555;
+                text-align: center;
+                line-height: 2;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="canvas-container"></div>
+        <div id="empty-hint">Drop mesh (.obj, .ply) or skeleton (.swc, .npz) here</div>
+        <div id="drop-overlay">Drop file to load</div>
+        <div id="lasso-rect"></div>
+
+        <div id="info">
+            <div><span class="label">Vertices: </span><span class="value" id="nVerts">-</span></div>
+            <div><span class="label">Faces: </span><span class="value" id="nFaces">-</span></div>
+            <div><span class="label">Skel nodes: </span><span class="value" id="nNodes">-</span></div>
+            <div><span class="label">Camera: </span><span class="value" id="camPos">-</span></div>
+            <div><span class="label">Visible faces: </span><span class="value" id="visCount">-</span></div>
+        </div>
+
+        <div id="controls">
+            <label><input type="checkbox" id="wireToggle" checked /> Wireframe</label>
+            <label>Opacity: <input type="range" id="opacitySlider" min="0" max="100" value="50" /></label>
+            <label>Ann: <input type="range" id="annOpacitySlider" min="0" max="100" value="90" /></label>
+            <label><input type="checkbox" id="tubeToggle" /> Tubes</label>
+            <label style="margin-left: 8px"
+                >Pick:
+                <select id="pickTarget" style="font-size: 11px">
+                    <option value="mesh">Mesh</option>
+                </select></label
+            >
+        </div>
+
+        <div id="detect-panel">
+            <div style="white-space: nowrap">
+                <span style="color: #888">Detect:</span>
+                <button id="detectBtn" style="margin-left: 4px">All Organelles</button>
+                <button id="detectSurfaceBtn" style="margin-left: 4px">Pocket Org.</button>
+                <button id="detectIsolatedBtn" style="margin-left: 4px">Isolated Org.</button>
+                <button id="detectFusionsBtn" style="margin-left: 4px">Fusions</button>
+                <button id="detectRimsBtn" style="margin-left: 4px">Rims</button>
+                <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
+                <span style="color: #888; margin-left: 12px">Skeleton:</span>
+                <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
+                <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
+            </div>
+            <div
+                style="
+                    white-space: nowrap;
+                    margin-top: 4px;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                "
+            >
+                <span>
+                    <span style="color: #888">Remove:</span>
+                    <button id="removeOrganellesBtn" style="margin-left: 4px">Organelles</button>
+                    <button id="removeFusionsBtn" style="margin-left: 4px">Fusions</button>
+                    <button id="fillHolesBtn" style="margin-left: 4px">Holes</button>
+                    <span style="color: #888; margin-left: 12px">Path:</span>
+                    <button id="findPathBtn" style="margin-left: 4px">Edge</button>
+                    <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
+                </span>
+                <button id="saveBtn">Save</button>
+            </div>
+        </div>
+
+        <div
+            id="skel-params-dialog"
+            style="
+                display: none;
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: #1a1a2e;
+                border: 1px solid #555;
+                border-radius: 6px;
+                padding: 16px;
+                z-index: 1000;
+                font-size: 12px;
+                min-width: 360px;
+                max-height: 80vh;
+                overflow-y: auto;
+            "
+        >
+            <div
+                style="
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 10px;
+                "
+            >
+                <span style="color: #adf; font-weight: bold">Skeletonize Parameters</span>
+                <button id="skelParamsClose" style="cursor: pointer; font-size: 14px">x</button>
+            </div>
+            <div
+                id="skelParamsBody"
+                style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; align-items: center"
+            ></div>
+            <div style="margin-top: 10px; text-align: right">
+                <button id="skelParamsReset" style="font-size: 11px; cursor: pointer">Reset Defaults</button>
+            </div>
+        </div>
+        <div
+            id="skel-params-backdrop"
+            style="
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100vw;
+                height: 100vh;
+                background: rgba(0, 0, 0, 0.4);
+                z-index: 999;
+            "
+        ></div>
+
+        <div
+            id="save-dialog"
+            style="
+                display: none;
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: #1a1a2e;
+                border: 1px solid #555;
+                border-radius: 6px;
+                padding: 16px;
+                z-index: 1000;
+                font-size: 12px;
+            "
+        >
+            <div
+                style="
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 12px;
+                "
+            >
+                <span style="color: #adf; font-weight: bold">Save</span>
+                <button id="saveDialogClose" style="cursor: pointer; font-size: 14px">x</button>
+            </div>
+            <div style="color: #888; margin-bottom: 6px">Mesh</div>
+            <div style="margin-bottom: 12px">
+                <button id="saveMeshObj" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
+                    OBJ
+                </button>
+            </div>
+            <div style="color: #888; margin-bottom: 6px">Skeleton</div>
+            <div style="margin-bottom: 12px">
+                <button id="saveSkelSwc" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
+                    SWC
+                </button>
+                <button
+                    id="saveSkelNpz"
+                    style="font-size: 12px; cursor: pointer; padding: 6px 20px; margin-left: 8px"
+                >
+                    NPZ
+                </button>
+            </div>
+            <div>
+                <button id="saveAll" style="font-size: 12px; cursor: pointer; padding: 6px 20px">All</button>
+            </div>
+            <div id="saveDialogStatus" style="margin-top: 8px; font-size: 11px; color: #6f6"></div>
+        </div>
+        <div
+            id="save-dialog-backdrop"
+            style="
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100vw;
+                height: 100vh;
+                background: rgba(0, 0, 0, 0.4);
+                z-index: 999;
+            "
+        ></div>
+
+        <div id="selection-info">
+            <div><span class="label">Click: select | Shift+click: highlight | Shift+drag: lasso</span></div>
+            <div id="selDetail"></div>
+            <div>
+                <span class="label">Highlighted: </span><span class="value" id="hlCount">0</span>
+                <button id="hlClear" style="font-size: 11px; cursor: pointer">Clear</button>
+            </div>
+            <div id="hlSaveRow" style="display: none; margin-top: 4px">
+                <input
+                    id="hlSaveName"
+                    type="text"
+                    placeholder="annotation name"
+                    style="
+                        font-size: 11px;
+                        width: 120px;
+                        font-family: monospace;
+                        background: #222;
+                        color: #ccc;
+                        border: 1px solid #555;
+                        padding: 2px 4px;
+                    "
+                />
+                <button id="hlSaveBtn" style="font-size: 11px; cursor: pointer; margin-left: 4px">
+                    Save
+                </button>
+                <button id="hlCheckFusion" style="font-size: 11px; cursor: pointer; margin-left: 4px">
+                    Check Fusion
+                </button>
+            </div>
+            <div id="fusionResult" style="margin-top: 4px; font-size: 11px; color: #adf; display: none"></div>
+            <div id="hlList" style="margin-top: 4px; max-height: 200px; overflow-y: auto"></div>
+            <div id="hlClearAllRow" style="display: none; margin-top: 2px">
+                <button id="hlClearAll" style="font-size: 10px; cursor: pointer">
+                    Clear All Annotations
+                </button>
+            </div>
+        </div>
+
+        <div id="loaded-panel">
+            <div style="color: #888; margin-bottom: 4px">Loaded:</div>
+            <div id="loadedMesh" class="item" style="display: none">
+                <span class="name" id="meshName">-</span>
+                <button id="toggleMesh" style="font-size: 10px; cursor: pointer; margin-left: 4px">
+                    hide
+                </button>
+                <button id="removeMesh">x</button>
+            </div>
+            <div id="loadedSkel"></div>
+        </div>
+
+        <script type="importmap">
+            {
+                "imports": {
+                    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+                    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+                }
+            }
+        </script>
+
+        <script type="module">
+            import * as THREE from "three";
+            import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+            // ── Globals ──────────────────────────────────────────────────────────
+            let scene, camera, renderer, controls;
+            let meshObj, wireframeObj, meshGeometry, clipPlane;
+            let skelGroups = {}; // keyed by skeleton name
+            let ws = null;
+            let stateDebounceTimer = null;
+            const STATE_DEBOUNCE_MS = 300;
+
+            let annotationMeshes = [];
+            let markerMeshes = [];
+            let edgeGroupMeshes = [];
+            let manualHighlightFaces = new Set();
+            let manualHighlightMesh = null;
+
+            // ── Init ─────────────────────────────────────────────────────────────
+            async function init() {
+                scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x0a0f1a);
+
+                camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
+                camera.position.set(0, 0, 500);
+
+                renderer = new THREE.WebGLRenderer({ antialias: true });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                renderer.localClippingEnabled = true;
+                document.getElementById("canvas-container").appendChild(renderer.domElement);
+
+                clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 99999);
+
+                controls = new OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.1;
+                controls.addEventListener("change", scheduleStateUpdate);
+
+                scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+                const dl1 = new THREE.DirectionalLight(0xffffff, 0.8);
+                dl1.position.set(1, 1, 1);
+                scene.add(dl1);
+                const dl2 = new THREE.DirectionalLight(0xffffff, 0.3);
+                dl2.position.set(-1, -0.5, -1);
+                scene.add(dl2);
+
+                // Try loading pre-loaded mesh
+                const meshResp = await fetch("/mesh");
+                const meshData = await meshResp.json();
+                if (meshData) {
+                    buildMesh(meshData);
+                    document.getElementById("empty-hint").style.display = "none";
+                }
+
+                // Try loading pre-loaded skeletons
+                const skelResp = await fetch("/skeletons");
+                const skelDataAll = await skelResp.json();
+                if (skelDataAll) {
+                    for (const [name, data] of Object.entries(skelDataAll)) {
+                        buildSkeleton({ name, ...data });
+                    }
+                }
+
+                // Update loaded panel
+                updateLoadedPanel();
+
+                setupControls();
+                setupDragDrop();
+
+                renderer.domElement.addEventListener("click", onClickSelect);
+                setupLassoSelection();
+                document.getElementById("hlClear").addEventListener("click", () => {
+                    manualHighlightFaces.clear();
+                    rebuildManualHighlight();
+                    syncManualHighlight();
+                });
+                document.getElementById("hlSaveBtn").addEventListener("click", saveHighlightAsAnnotation);
+                document.getElementById("hlSaveName").addEventListener("keydown", (e) => {
+                    if (e.key === "Enter") saveHighlightAsAnnotation();
+                });
+                document.getElementById("hlCheckFusion").addEventListener("click", checkFusion);
+
+                renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+                renderer.domElement.addEventListener("pointerdown", onRecenter);
+
+                document.getElementById("detectBtn").addEventListener("click", runDetectOrganelles);
+                document
+                    .getElementById("detectSurfaceBtn")
+                    .addEventListener("click", () => runDetectOrganellesType("pocket"));
+                document
+                    .getElementById("detectIsolatedBtn")
+                    .addEventListener("click", () => runDetectOrganellesType("isolated"));
+                document.getElementById("detectRimsBtn").addEventListener("click", runDetectRims);
+                document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
+                document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
+                document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
+                document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
+                document.getElementById("fillHolesBtn").addEventListener("click", runFillHoles);
+                document.getElementById("saveBtn").addEventListener("click", openSaveDialog);
+                document.getElementById("saveDialogClose").addEventListener("click", closeSaveDialog);
+                document.getElementById("save-dialog-backdrop").addEventListener("click", closeSaveDialog);
+                document.getElementById("saveMeshObj").addEventListener("click", () => doSave("mesh"));
+                document.getElementById("saveSkelSwc").addEventListener("click", () => doSave("swc"));
+                document.getElementById("saveSkelNpz").addEventListener("click", () => doSave("npz"));
+                document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
+                document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
+                document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
+                document
+                    .getElementById("findPathVertBtn")
+                    .addEventListener("click", () => runFindPath("vertex"));
+                document.getElementById("skelParamsBtn").addEventListener("click", openSkelParams);
+                document.getElementById("skelParamsClose").addEventListener("click", closeSkelParams);
+                document.getElementById("skel-params-backdrop").addEventListener("click", closeSkelParams);
+                document.getElementById("skelParamsReset").addEventListener("click", resetSkelParams);
+                document.getElementById("removeMesh").addEventListener("click", () => removeItem("mesh"));
+                document.getElementById("toggleMesh").addEventListener("click", () => {
+                    const btn = document.getElementById("toggleMesh");
+                    if (meshObj) {
+                        meshObj.visible = !meshObj.visible;
+                        if (wireframeObj)
+                            wireframeObj.visible =
+                                meshObj.visible && document.getElementById("wireToggle").checked;
+                        btn.textContent = meshObj.visible ? "hide" : "show";
+                    }
+                });
+                document.getElementById("hlClearAll").addEventListener("click", clearAllAnnotations);
+
+                connectWebSocket();
+
+                fetch("/annotations")
+                    .then((r) => r.json())
+                    .then((ann) => {
+                        if (ann && (ann.highlights || ann.markers || ann.edges || ann.edge_groups))
+                            applyAnnotations(ann);
+                    })
+                    .catch(() => {});
+
+                window.addEventListener("resize", onResize);
+                animate();
+            }
+
+            // ── Loaded panel ─────────────────────────────────────────────────────
+            async function updateLoadedPanel() {
+                try {
+                    const resp = await fetch("/loaded");
+                    const data = await resp.json();
+                    const meshEl = document.getElementById("loadedMesh");
+                    const skelEl = document.getElementById("loadedSkel");
+                    if (data.mesh) {
+                        meshEl.style.display = "flex";
+                        document.getElementById("meshName").textContent =
+                            data.mesh.path.split("/").pop() + ` (${data.mesh.nVertices.toLocaleString()}v)`;
+                    } else {
+                        meshEl.style.display = "none";
+                    }
+                    // Show all loaded skeletons
+                    const skelContainer = document.getElementById("loadedSkel");
+                    skelContainer.innerHTML = "";
+                    if (data.skeletons) {
+                        for (const [sname, sinfo] of Object.entries(data.skeletons)) {
+                            const div = document.createElement("div");
+                            div.className = "item";
+                            div.style.display = "flex";
+                            const c = sinfo.color || [1, 1, 1];
+                            const rgb = `rgb(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)})`;
+                            div.innerHTML = `<span class="name" style="color:${rgb}">${sname} (${sinfo.nNodes.toLocaleString()}n)</span>`;
+                            const toggleBtn = document.createElement("button");
+                            toggleBtn.textContent = "hide";
+                            toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
+                            toggleBtn.addEventListener("click", () => {
+                                const sg = skelGroups[sname];
+                                if (!sg) return;
+                                const vis = !sg.group.visible;
+                                sg.group.visible = vis;
+                                toggleBtn.textContent = vis ? "hide" : "show";
+                            });
+                            div.appendChild(toggleBtn);
+                            const btn = document.createElement("button");
+                            btn.textContent = "x";
+                            btn.addEventListener("click", () => removeItem("skeleton", sname));
+                            div.appendChild(btn);
+                            skelContainer.appendChild(div);
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            async function removeItem(type, name) {
+                await fetch("/remove", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ type, name }),
+                });
+            }
+
+            // ── Drag & Drop ──────────────────────────────────────────────────────
+            function setupDragDrop() {
+                const overlay = document.getElementById("drop-overlay");
+                let dragCounter = 0;
+
+                document.addEventListener("dragenter", (e) => {
+                    e.preventDefault();
+                    dragCounter++;
+                    overlay.style.display = "flex";
+                });
+                document.addEventListener("dragleave", (e) => {
+                    e.preventDefault();
+                    dragCounter--;
+                    if (dragCounter <= 0) {
+                        overlay.style.display = "none";
+                        dragCounter = 0;
+                    }
+                });
+                document.addEventListener("dragover", (e) => e.preventDefault());
+                document.addEventListener("drop", async (e) => {
+                    e.preventDefault();
+                    dragCounter = 0;
+                    overlay.style.display = "none";
+
+                    for (const file of e.dataTransfer.files) {
+                        const formData = new FormData();
+                        formData.append("file", file);
+                        try {
+                            const resp = await fetch("/upload", { method: "POST", body: formData });
+                            const data = await resp.json();
+                            if (data.ok) {
+                                console.log(`[skeliner] Loaded ${data.type}: ${data.name}`);
+                            } else {
+                                console.error(`[skeliner] Upload failed: ${data.error}`);
+                            }
+                        } catch (err) {
+                            console.error("[skeliner] Upload error:", err);
+                        }
+                    }
+                });
+            }
+
+            // ── Build mesh ───────────────────────────────────────────────────────
+            function buildMesh(data) {
+                // Remove old mesh
+                if (meshObj) {
+                    scene.remove(meshObj);
+                    meshObj.geometry.dispose();
+                    meshObj.material.dispose();
+                    meshObj = null;
+                }
+                if (wireframeObj) {
+                    scene.remove(wireframeObj);
+                    wireframeObj.geometry.dispose();
+                    wireframeObj.material.dispose();
+                    wireframeObj = null;
+                }
+                meshGeometry = null;
+
+                const { vertices, faces, nVertices, nFaces } = data;
+
+                document.getElementById("nVerts").textContent = nVertices.toLocaleString();
+                document.getElementById("nFaces").textContent = nFaces.toLocaleString();
+                document.getElementById("empty-hint").style.display = "none";
+
+                meshGeometry = new THREE.BufferGeometry();
+                const positions = new Float32Array(nFaces * 9);
+                const colors = new Float32Array(nFaces * 9);
+                const verts = new Float32Array(vertices);
+
+                for (let i = 0; i < nFaces; i++) {
+                    const a = faces[i * 3],
+                        b = faces[i * 3 + 1],
+                        c = faces[i * 3 + 2];
+                    for (let k = 0; k < 3; k++) {
+                        positions[i * 9 + k] = verts[a * 3 + k];
+                        positions[i * 9 + 3 + k] = verts[b * 3 + k];
+                        positions[i * 9 + 6 + k] = verts[c * 3 + k];
+                    }
+                    const r = 0.55,
+                        g = 0.55,
+                        bl = 0.6;
+                    for (let v = 0; v < 3; v++) {
+                        colors[i * 9 + v * 3] = r;
+                        colors[i * 9 + v * 3 + 1] = g;
+                        colors[i * 9 + v * 3 + 2] = bl;
+                    }
+                }
+
+                meshGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+                meshGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+                meshGeometry.computeVertexNormals();
+
+                meshObj = new THREE.Mesh(
+                    meshGeometry,
+                    new THREE.MeshPhongMaterial({
+                        vertexColors: true,
+                        side: THREE.DoubleSide,
+                        clippingPlanes: [clipPlane],
+                        shininess: 30,
+                        transparent: true,
+                        opacity: 0.5,
+                        depthWrite: false,
+                    }),
+                );
+                scene.add(meshObj);
+
+                wireframeObj = new THREE.Mesh(
+                    meshGeometry,
+                    new THREE.MeshBasicMaterial({
+                        wireframe: true,
+                        color: 0x333333,
+                        transparent: true,
+                        opacity: 0.15,
+                        clippingPlanes: [clipPlane],
+                    }),
+                );
+                wireframeObj.visible = document.getElementById("wireToggle").checked;
+                scene.add(wireframeObj);
+
+                fitCamera();
+            }
+
+            // ── Build skeleton ───────────────────────────────────────────────────
+            let selectedNodes = {}; // { "skelName:nodeIndex": { mesh, skelName, nodeIndex } }
+
+            function buildSkeleton(data) {
+                const name = data.name || "default";
+                const baseColor = data.color || [1.0, 0.4, 0.1];
+
+                // Remove old version of this skeleton
+                if (skelGroups[name]) {
+                    scene.remove(skelGroups[name].group);
+                    skelGroups[name] = null;
+                    delete skelGroups[name];
+                }
+
+                const { nodes, positions, nNodes, nEdges, edgeRadii, radii } = data;
+                if (!nodes || nNodes === 0) return;
+
+                document.getElementById("nNodes").textContent =
+                    Object.keys(skelGroups).length > 0
+                        ? Object.values(skelGroups)
+                              .reduce((s, g) => s + g.nNodes, nNodes)
+                              .toLocaleString()
+                        : nNodes.toLocaleString();
+                document.getElementById("empty-hint").style.display = "none";
+
+                const group = new THREE.Group();
+                const nodesArr = new Float32Array(nodes);
+                const radiiArr = new Float32Array(radii);
+
+                // ── Node points (colored by skeleton identity) ─────────────────
+                const nodeGeo = new THREE.BufferGeometry();
+                nodeGeo.setAttribute("position", new THREE.BufferAttribute(nodesArr, 3));
+
+                const nodeColors = new Float32Array(nNodes * 3);
+                for (let i = 0; i < nNodes; i++) {
+                    nodeColors[i * 3] = baseColor[0];
+                    nodeColors[i * 3 + 1] = baseColor[1];
+                    nodeColors[i * 3 + 2] = baseColor[2];
+                }
+                nodeGeo.setAttribute("color", new THREE.BufferAttribute(nodeColors, 3));
+
+                const nodePoints = new THREE.Points(
+                    nodeGeo,
+                    new THREE.PointsMaterial({
+                        vertexColors: true,
+                        size: 5,
+                        sizeAttenuation: false,
+                        depthTest: true,
+                        depthWrite: true,
+                    }),
+                );
+                group.add(nodePoints);
+
+                // ── Lines (colored by skeleton identity) ────────────────────────
+                let lines = null;
+                if (nEdges > 0 && positions) {
+                    const geo = new THREE.BufferGeometry();
+                    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+
+                    const colorArr = new Float32Array(nEdges * 6);
+                    for (let i = 0; i < nEdges; i++) {
+                        colorArr[i * 6] = baseColor[0];
+                        colorArr[i * 6 + 1] = baseColor[1];
+                        colorArr[i * 6 + 2] = baseColor[2];
+                        colorArr[i * 6 + 3] = baseColor[0];
+                        colorArr[i * 6 + 4] = baseColor[1];
+                        colorArr[i * 6 + 5] = baseColor[2];
+                    }
+                    geo.setAttribute("color", new THREE.BufferAttribute(colorArr, 3));
+                    lines = new THREE.LineSegments(
+                        geo,
+                        new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 }),
+                    );
+                    group.add(lines);
+                }
+
+                scene.add(group);
+
+                skelGroups[name] = {
+                    group,
+                    nodePoints,
+                    lines,
+                    radii: radiiArr,
+                    nNodes,
+                    nEdges,
+                    color: baseColor,
+                    data,
+                };
+
+                // Add to pick dropdown if not already there
+                const pickSelect = document.getElementById("pickTarget");
+                if (!pickSelect.querySelector(`option[value="skel:${name}"]`)) {
+                    const opt = document.createElement("option");
+                    opt.value = `skel:${name}`;
+                    opt.textContent = name;
+                    pickSelect.appendChild(opt);
+                }
+
+                if (!meshObj) fitCamera();
+                updateLoadedPanel();
+            }
+
+            function buildTubes(name) {
+                const sg = skelGroups[name];
+                if (!sg || sg.tubes) return;
+                const { nodes, edges, radii, nEdges } = sg.data;
+                const nodesArr = new Float32Array(nodes);
+                const radiiArr = new Float32Array(radii);
+                const baseColor = sg.color;
+                const tubes = new THREE.Group();
+                const segments = 6;
+
+                for (let i = 0; i < nEdges; i++) {
+                    const a = edges[i * 2],
+                        b = edges[i * 2 + 1];
+                    const ax = nodesArr[a * 3],
+                        ay = nodesArr[a * 3 + 1],
+                        az = nodesArr[a * 3 + 2];
+                    const bx = nodesArr[b * 3],
+                        by = nodesArr[b * 3 + 1],
+                        bz = nodesArr[b * 3 + 2];
+                    const rA = radiiArr[a],
+                        rB = radiiArr[b];
+                    const dx = bx - ax,
+                        dy = by - ay,
+                        dz = bz - az;
+                    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    if (len < 1e-6) continue;
+
+                    const cylGeo = new THREE.CylinderGeometry(rB, rA, len, segments, 1, true);
+                    const cylMat = new THREE.MeshPhongMaterial({
+                        color: new THREE.Color(baseColor[0], baseColor[1], baseColor[2]),
+                        transparent: true,
+                        opacity: 0.6,
+                    });
+                    const cyl = new THREE.Mesh(cylGeo, cylMat);
+                    cyl.position.set((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
+                    const dir = new THREE.Vector3(dx, dy, dz).normalize();
+                    cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+                    tubes.add(cyl);
+                }
+                sg.tubes = tubes;
+                sg.group.add(tubes);
+            }
+
+            // ── Fit camera ───────────────────────────────────────────────────────
+            function fitCamera() {
+                // Find bounding sphere from whatever is loaded
+                let box = new THREE.Box3();
+                if (meshGeometry) {
+                    meshGeometry.computeBoundingBox();
+                    box.union(meshGeometry.boundingBox);
+                }
+                for (const sg of Object.values(skelGroups)) {
+                    if (sg && sg.group) {
+                        const skelBox = new THREE.Box3().setFromObject(sg.group);
+                        box.union(skelBox);
+                    }
+                }
+                if (box.isEmpty()) return;
+
+                const sphere = new THREE.Sphere();
+                box.getBoundingSphere(sphere);
+
+                camera.near = sphere.radius * 0.001;
+                camera.far = sphere.radius * 10;
+                camera.updateProjectionMatrix();
+                camera.position.set(sphere.center.x, sphere.center.y, sphere.center.z + sphere.radius * 2);
+                controls.target.copy(sphere.center);
+                controls.update();
+            }
+
+            // ── Controls ─────────────────────────────────────────────────────────
+            function setupControls() {
+                document.getElementById("wireToggle").addEventListener("change", (e) => {
+                    if (wireframeObj) wireframeObj.visible = e.target.checked;
+                });
+                document.getElementById("tubeToggle").addEventListener("change", (e) => {
+                    for (const [name, sg] of Object.entries(skelGroups)) {
+                        if (!sg) continue;
+                        if (e.target.checked) {
+                            buildTubes(name);
+                            if (sg.lines) sg.lines.visible = false;
+                            if (sg.tubes) sg.tubes.visible = true;
+                        } else {
+                            if (sg.lines) sg.lines.visible = true;
+                            if (sg.tubes) sg.tubes.visible = false;
+                        }
+                    }
+                });
+                document.getElementById("opacitySlider").addEventListener("input", (e) => {
+                    const val = parseInt(e.target.value) / 100;
+                    if (meshObj) {
+                        meshObj.material.transparent = val < 1.0;
+                        meshObj.material.opacity = val;
+                        meshObj.material.depthWrite = val >= 1.0;
+                        meshObj.material.needsUpdate = true;
+                    }
+                });
+                document.getElementById("annOpacitySlider").addEventListener("input", (e) => {
+                    const val = parseInt(e.target.value) / 100;
+                    for (const m of annotationMeshes) {
+                        m.material.transparent = true;
+                        m.material.opacity = val;
+                        m.material.needsUpdate = true;
+                    }
+                });
+            }
+
+            // ── Click selection ──────────────────────────────────────────────────
+            const raycaster = new THREE.Raycaster();
+            const mouse = new THREE.Vector2();
+
+            function onClickSelect(event) {
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+
+                const pickTarget = document.getElementById("pickTarget").value;
+
+                if (pickTarget.startsWith("skel:")) {
+                    const targetSkelName = pickTarget.slice(5);
+                    const sg = skelGroups[targetSkelName];
+                    if (!sg || !sg.nodePoints) return;
+
+                    const camDist = camera.position.distanceTo(controls.target);
+                    raycaster.params.Points.threshold = camDist * 0.02;
+                    const hits = raycaster.intersectObject(sg.nodePoints);
+                    if (hits.length === 0) return;
+
+                    const bestHit = hits[0];
+                    const bestSkelName = targetSkelName;
+                    const skelNodeRadii = sg.radii;
+                    const skelColor = skelGroups[bestSkelName].color;
+
+                    const nodeIndex = bestHit.index;
+                    const point = bestHit.point;
+                    const radius = skelNodeRadii ? skelNodeRadii[nodeIndex] : null;
+                    const key = `${bestSkelName}:${nodeIndex}`;
+
+                    // Click same node again → deselect
+                    if (selectedNodes[key]) {
+                        scene.remove(selectedNodes[key].mesh);
+                        selectedNodes[key].mesh.geometry.dispose();
+                        selectedNodes[key].mesh.material.dispose();
+                        delete selectedNodes[key];
+                        updateNodeSelectionDisplay();
+                        syncNodeSelections();
+                        return;
+                    }
+
+                    // Add to selection
+                    const sphereR = radius !== null ? radius : 100;
+                    const sphereGeo = new THREE.SphereGeometry(sphereR, 16, 12);
+                    const sc = skelColor || [1, 0.3, 0.3];
+                    const sphereMat = new THREE.MeshPhongMaterial({
+                        color: new THREE.Color(sc[0], sc[1], sc[2]),
+                        transparent: true,
+                        opacity: 0.4,
+                        depthTest: true,
+                    });
+                    const sphereMesh = new THREE.Mesh(sphereGeo, sphereMat);
+                    sphereMesh.position.copy(point);
+                    scene.add(sphereMesh);
+
+                    selectedNodes[key] = {
+                        mesh: sphereMesh,
+                        skelName: bestSkelName,
+                        nodeIndex,
+                        radius,
+                        point: [point.x, point.y, point.z],
+                    };
+
+                    updateNodeSelectionDisplay();
+                    syncNodeSelections();
+                    return;
+                }
+
+                // Mesh picking
+                if (!meshObj) return;
+                const hits = raycaster.intersectObject(meshObj);
+                if (hits.length === 0) return;
+
+                const hit = hits[0];
+                const faceIndex = hit.faceIndex;
+                const point = hit.point;
+                if (event.shiftKey) {
+                    if (manualHighlightFaces.has(faceIndex)) manualHighlightFaces.delete(faceIndex);
+                    else manualHighlightFaces.add(faceIndex);
+                    rebuildManualHighlight();
+                    syncManualHighlight();
+                    return;
+                }
+
+                const selInfo = {
+                    faceIndex,
+                    point: [point.x.toFixed(2), point.y.toFixed(2), point.z.toFixed(2)],
+                };
+                document.getElementById("selDetail").innerHTML =
+                    `<div>Face: <b>${faceIndex}</b></div><div>Pos: ${selInfo.point.join(", ")}</div>`;
+
+                if (ws && ws.readyState === WebSocket.OPEN)
+                    ws.send(JSON.stringify({ type: "selection", payload: selInfo }));
+                else
+                    fetch("/update_selection", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(selInfo),
+                    }).catch(() => {});
+            }
+
+            // ── Node selection display & sync ─────────────────────────────────────
+            function updateNodeSelectionDisplay() {
+                const keys = Object.keys(selectedNodes);
+                if (keys.length === 0) {
+                    document.getElementById("selDetail").innerHTML = "";
+                    return;
+                }
+                const container = document.getElementById("selDetail");
+                container.innerHTML = "";
+                for (const key of keys) {
+                    const s = selectedNodes[key];
+                    const c = skelGroups[s.skelName] ? skelGroups[s.skelName].color : [1, 1, 1];
+                    const rgb = `rgb(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)})`;
+                    const div = document.createElement("div");
+                    div.className = "hl-item";
+                    div.style.color = rgb;
+                    div.innerHTML = `<span>Node ${s.nodeIndex} (${s.skelName}) r=${s.radius !== null ? s.radius.toFixed(0) : "?"}</span>`;
+                    const btn = document.createElement("button");
+                    btn.textContent = "x";
+                    btn.addEventListener("click", () => {
+                        scene.remove(selectedNodes[key].mesh);
+                        selectedNodes[key].mesh.geometry.dispose();
+                        selectedNodes[key].mesh.material.dispose();
+                        delete selectedNodes[key];
+                        updateNodeSelectionDisplay();
+                        syncNodeSelections();
+                    });
+                    div.appendChild(btn);
+                    container.appendChild(div);
+                }
+            }
+
+            function syncNodeSelections() {
+                const payload = {};
+                for (const [key, s] of Object.entries(selectedNodes)) {
+                    payload[key] = {
+                        skelName: s.skelName,
+                        nodeIndex: s.nodeIndex,
+                        radius: s.radius,
+                        point: s.point.map((v) => v.toFixed(2)),
+                    };
+                }
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "node_selection", payload }));
+                } else {
+                    fetch("/update_selection", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ nodeSelections: payload }),
+                    }).catch(() => {});
+                }
+            }
+
+            // ── Manual highlight ─────────────────────────────────────────────────
+            function rebuildManualHighlight() {
+                if (manualHighlightMesh) {
+                    scene.remove(manualHighlightMesh);
+                    manualHighlightMesh.geometry.dispose();
+                    manualHighlightMesh.material.dispose();
+                    manualHighlightMesh = null;
+                }
+                const faces = Array.from(manualHighlightFaces);
+                document.getElementById("hlCount").textContent = faces.length;
+                document.getElementById("hlSaveRow").style.display = faces.length > 0 ? "block" : "none";
+                if (faces.length === 0 || !meshGeometry) return;
+
+                const posAttr = meshGeometry.getAttribute("position");
+                const positions = new Float32Array(faces.length * 9);
+                for (let j = 0; j < faces.length; j++) {
+                    const base = faces[j] * 9;
+                    for (let k = 0; k < 9; k++) positions[j * 9 + k] = posAttr.array[base + k];
+                }
+
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+                geo.computeVertexNormals();
+                manualHighlightMesh = new THREE.Mesh(
+                    geo,
+                    new THREE.MeshPhongMaterial({
+                        color: new THREE.Color(1, 0.8, 0),
+                        side: THREE.DoubleSide,
+                        clippingPlanes: [clipPlane],
+                        transparent: true,
+                        opacity: 0.9,
+                        polygonOffset: true,
+                        polygonOffsetFactor: -2,
+                    }),
+                );
+                scene.add(manualHighlightMesh);
+            }
+
+            async function runDetectOrganelles() {
+                const btn = document.getElementById("detectBtn");
+                btn.textContent = "Detecting...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/detect_organelles", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Organelles: ${data.nFaces} (A)` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runDetectOrganellesType(type) {
+                const btnId = type === "pocket" ? "detectSurfaceBtn" : "detectIsolatedBtn";
+                const btn = document.getElementById(btnId);
+                const origText = btn.textContent;
+                btn.textContent = "Detecting...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch(`/detect_organelles?type=${type}`, { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `${type}: ${data.nFaces}` : `Error`;
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runDetectHoles() {
+                const btn = document.getElementById("detectHolesBtn");
+                btn.textContent = "Detecting...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/detect_holes", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Holes: ${data.nHoles} (H)` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runDetectFusions() {
+                const btn = document.getElementById("detectFusionsBtn");
+                btn.textContent = "Detecting...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/detect_fusions", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Fusions: ${data.nClusters} (F)` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runDetectRims() {
+                const btn = document.getElementById("detectRimsBtn");
+                btn.textContent = "Detecting...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/detect_rims", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Rims: ${data.nFaces} (R)` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runRemoveOrganelles() {
+                const btn = document.getElementById("removeOrganellesBtn");
+                btn.textContent = "Removing...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/remove_organelles", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runRemoveFusions() {
+                const btn = document.getElementById("removeFusionsBtn");
+                btn.textContent = "Removing...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/remove_fusions", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runFillHoles() {
+                const btn = document.getElementById("fillHolesBtn");
+                btn.textContent = "Filling...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/fill_holes", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Filled (${data.facesAfter.toLocaleString()}f)` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            function openSaveDialog() {
+                document.getElementById("saveDialogStatus").textContent = "";
+                document.getElementById("save-dialog").style.display = "block";
+                document.getElementById("save-dialog-backdrop").style.display = "block";
+            }
+
+            function closeSaveDialog() {
+                document.getElementById("save-dialog").style.display = "none";
+                document.getElementById("save-dialog-backdrop").style.display = "none";
+            }
+
+            function getSkelName() {
+                const names = Object.keys(skelGroups);
+                return names.includes("skeleton") ? "skeleton" : names[0];
+            }
+
+            async function downloadFile(url) {
+                const resp = await fetch(url);
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.error || "Export failed");
+                }
+                const blob = await resp.blob();
+                const fname =
+                    resp.headers.get("Content-Disposition")?.match(/filename="(.+)"/)?.[1] || "file";
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = fname;
+                a.click();
+                URL.revokeObjectURL(a.href);
+                return fname;
+            }
+
+            async function doSave(mode) {
+                const statusEl = document.getElementById("saveDialogStatus");
+                statusEl.textContent = "Saving...";
+                statusEl.style.color = "#adf";
+                try {
+                    const saved = [];
+                    if (mode === "mesh" || mode === "all") {
+                        saved.push(await downloadFile("/export_mesh"));
+                    }
+                    if (mode === "swc" || mode === "all") {
+                        const name = getSkelName();
+                        if (!name) throw new Error("No skeleton");
+                        saved.push(
+                            await downloadFile(
+                                `/export_skeleton?name=${encodeURIComponent(name)}&format=swc`,
+                            ),
+                        );
+                    }
+                    if (mode === "npz" || mode === "all") {
+                        const name = getSkelName();
+                        if (!name) throw new Error("No skeleton");
+                        saved.push(
+                            await downloadFile(
+                                `/export_skeleton?name=${encodeURIComponent(name)}&format=npz`,
+                            ),
+                        );
+                    }
+                    statusEl.textContent = `Downloaded: ${saved.join(", ")}`;
+                    statusEl.style.color = "#6f6";
+                } catch (e) {
+                    statusEl.textContent = e.message || "Error";
+                    statusEl.style.color = "#f66";
+                }
+            }
+
+            // ── Skeletonize ───────────────────────────────────────────────────
+            const SKEL_DEFAULTS = {
+                geodesic_shell_count: { value: 1000, type: "int", label: "Shell count" },
+                min_shell_vertices: { value: 6, type: "int", label: "Min shell vertices" },
+                max_shell_width_factor: { value: 50, type: "int", label: "Max shell width factor" },
+                detect_soma: { value: true, type: "bool", label: "Detect soma" },
+                soma_radius_percentile_threshold: {
+                    value: 99.9,
+                    type: "float",
+                    label: "Soma radius percentile",
+                },
+                soma_radius_distance_factor: { value: 4, type: "float", label: "Soma radius dist factor" },
+                soma_min_nodes: { value: 3, type: "int", label: "Soma min nodes" },
+                bridge_gaps: { value: true, type: "bool", label: "Bridge gaps" },
+                collapse_soma: { value: true, type: "bool", label: "Collapse soma" },
+                collapse_soma_dist_factor: { value: 1.2, type: "float", label: "Collapse soma dist factor" },
+                collapse_soma_radius_factor: {
+                    value: 0.2,
+                    type: "float",
+                    label: "Collapse soma radius factor",
+                },
+                prune_tiny_neurites: { value: true, type: "bool", label: "Prune tiny neurites" },
+                prune_tip_extent_factor: { value: 1.2, type: "float", label: "Prune tip extent factor" },
+                prune_stem_extent_factor: { value: 3.0, type: "float", label: "Prune stem extent factor" },
+                merge_nodes_overlap_fraction: {
+                    value: 0.8,
+                    type: "float",
+                    label: "Merge nodes overlap frac",
+                },
+                split_elongated_shells: { value: false, type: "bool", label: "Split elongated shells" },
+                split_aspect_thr: { value: 3.0, type: "float", label: "Split aspect threshold" },
+                postprocess: { value: true, type: "bool", label: "Postprocess" },
+            };
+            let skelParams = {};
+
+            function getSkelParams() {
+                const params = {};
+                for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
+                    if (key in skelParams && skelParams[key] !== def.value) {
+                        params[key] = skelParams[key];
+                    }
+                }
+                return params;
+            }
+
+            function openSkelParams() {
+                const body = document.getElementById("skelParamsBody");
+                body.innerHTML = "";
+                for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
+                    const val = key in skelParams ? skelParams[key] : def.value;
+                    const label = document.createElement("label");
+                    label.textContent = def.label;
+                    label.style.color = "#ccc";
+                    body.appendChild(label);
+
+                    if (def.type === "bool") {
+                        const cb = document.createElement("input");
+                        cb.type = "checkbox";
+                        cb.checked = val;
+                        cb.dataset.key = key;
+                        cb.addEventListener("change", () => {
+                            skelParams[key] = cb.checked;
+                        });
+                        body.appendChild(cb);
+                    } else {
+                        const inp = document.createElement("input");
+                        inp.type = "text";
+                        inp.value = val;
+                        inp.dataset.key = key;
+                        inp.style.cssText =
+                            "width:80px;font-size:11px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:2px 4px;";
+                        inp.addEventListener("change", () => {
+                            skelParams[key] =
+                                def.type === "int" ? parseInt(inp.value) : parseFloat(inp.value);
+                        });
+                        body.appendChild(inp);
+                    }
+                }
+                document.getElementById("skel-params-dialog").style.display = "block";
+                document.getElementById("skel-params-backdrop").style.display = "block";
+            }
+
+            function closeSkelParams() {
+                document.getElementById("skel-params-dialog").style.display = "none";
+                document.getElementById("skel-params-backdrop").style.display = "none";
+            }
+
+            function resetSkelParams() {
+                skelParams = {};
+                openSkelParams();
+            }
+
+            async function runSkeletonize() {
+                const btn = document.getElementById("skeletonizeBtn");
+                btn.textContent = "Running...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/skeletonize", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ params: getSkelParams() }),
+                    });
+                    const data = await resp.json();
+                    if (data.ok) {
+                        btn.textContent = `${data.nNodes}n ${data.nEdges}e`;
+                        updateLoadedPanel();
+                    } else {
+                        btn.textContent = data.error || "Error";
+                    }
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runFindPath(mode) {
+                const btnId = mode === "vertex" ? "findPathVertBtn" : "findPathBtn";
+                const btn = document.getElementById(btnId);
+                const origText = btn.textContent;
+                btn.textContent = "Computing...";
+                btn.disabled = true;
+
+                try {
+                    let body;
+                    const nNodes = Object.keys(selectedNodes).length;
+                    const nFaces = manualHighlightFaces.size;
+
+                    if (nNodes === 2) {
+                        const keys = Object.keys(selectedNodes);
+                        const s1 = selectedNodes[keys[0]];
+                        const s2 = selectedNodes[keys[1]];
+                        if (s1.skelName !== s2.skelName) {
+                            btn.textContent = "Diff skeletons";
+                            setTimeout(() => {
+                                btn.textContent = origText;
+                            }, 2000);
+                            return;
+                        }
+                        body = {
+                            type: "skeleton",
+                            skelName: s1.skelName,
+                            node1: s1.nodeIndex,
+                            node2: s2.nodeIndex,
+                        };
+                    } else if (nFaces === 2) {
+                        const faces = Array.from(manualHighlightFaces);
+                        body = { type: "mesh", face1: faces[0], face2: faces[1], mode };
+                    } else {
+                        btn.textContent = "Select 2";
+                        setTimeout(() => {
+                            btn.textContent = origText;
+                        }, 2000);
+                        return;
+                    }
+
+                    const resp = await fetch("/shortest_path", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body),
+                    });
+                    const data = await resp.json();
+
+                    if (data.ok) {
+                        if (!currentAnnotations) currentAnnotations = {};
+                        if (data.type === "mesh") {
+                            if (!currentAnnotations.highlights) currentAnnotations.highlights = [];
+                            currentAnnotations.highlights.push({
+                                faces: data.path,
+                                color: [0.2, 1.0, 0.8],
+                                label: `path (${data.nFaces}f, ${data.length.toFixed(0)}nm)`,
+                            });
+                            manualHighlightFaces.clear();
+                            rebuildManualHighlight();
+                            syncManualHighlight();
+                        } else {
+                            if (!currentAnnotations.edge_groups) currentAnnotations.edge_groups = [];
+                            currentAnnotations.edge_groups.push({
+                                segments: data.segments,
+                                color: [1.0, 1.0, 0.2],
+                                label: `path (${data.nNodes}n, ${data.length.toFixed(0)}nm)`,
+                            });
+                        }
+                        applyAnnotations(currentAnnotations);
+                        syncAnnotationsToServer();
+                        btn.textContent =
+                            data.type === "mesh"
+                                ? `${data.nFaces}f ${data.length.toFixed(0)}nm`
+                                : `${data.nNodes}n ${data.length.toFixed(0)}nm`;
+                    } else {
+                        btn.textContent = data.error || "No path";
+                    }
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                    setTimeout(() => {
+                        btn.textContent = origText;
+                    }, 3000);
+                }
+            }
+
+            function syncManualHighlight() {
+                const payload = { manualHighlight: Array.from(manualHighlightFaces) };
+                if (ws && ws.readyState === WebSocket.OPEN)
+                    ws.send(JSON.stringify({ type: "manual_highlight", payload }));
+                else
+                    fetch("/update_selection", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    }).catch(() => {});
+            }
+
+            const SAVE_COLORS = [
+                [0.2, 0.6, 1.0],
+                [0.1, 0.9, 0.4],
+                [0.9, 0.2, 0.8],
+                [1.0, 0.9, 0.1],
+                [1.0, 0.4, 0.1],
+                [0.4, 0.9, 0.9],
+            ];
+            let saveColorIdx = 0;
+
+            function saveHighlightAsAnnotation() {
+                if (manualHighlightFaces.size === 0) return;
+                const nameInput = document.getElementById("hlSaveName");
+                const label = nameInput.value.trim() || `selection ${Date.now()}`;
+                const faces = Array.from(manualHighlightFaces);
+                const color = SAVE_COLORS[saveColorIdx % SAVE_COLORS.length];
+                saveColorIdx++;
+
+                const payload = { faces, color, label };
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "save_highlight", payload }));
+                } else {
+                    fetch("/save_highlight", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    }).catch(() => {});
+                }
+
+                // Clear manual highlight
+                manualHighlightFaces.clear();
+                rebuildManualHighlight();
+                syncManualHighlight();
+                nameInput.value = "";
+            }
+
+            async function checkFusion() {
+                if (manualHighlightFaces.size === 0) return;
+                const resultDiv = document.getElementById("fusionResult");
+                resultDiv.style.display = "block";
+                resultDiv.textContent = "Analyzing...";
+                try {
+                    const resp = await fetch("/check_fusion", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
+                    });
+                    const data = await resp.json();
+                    if (data.ok) {
+                        const lines = [];
+                        if (data.nm_edges > 0) lines.push(`${data.nm_edges} non-manifold edges`);
+                        if (data.duplicate_faces > 0) lines.push(`${data.duplicate_faces} duplicate faces`);
+                        if (data.high_neighbor_faces > 0)
+                            lines.push(`${data.high_neighbor_faces} faces with >3 neighbors`);
+                        if (data.fusion_faces && data.fusion_faces.length > 0) {
+                            lines.push(`${data.fusion_faces.length} fusion face(s) found`);
+                            // Add fusion faces to highlight
+                            for (const fi of data.fusion_faces) manualHighlightFaces.add(fi);
+                            rebuildManualHighlight();
+                            syncManualHighlight();
+                        }
+                        resultDiv.textContent =
+                            lines.length > 0 ? lines.join(" | ") : "No fusion signals found";
+                    } else {
+                        resultDiv.textContent = data.error || "Error";
+                    }
+                } catch (e) {
+                    resultDiv.textContent = "Error: " + e.message;
+                }
+            }
+
+            // ── Lasso (rectangle) selection ───────────────────────────────────
+            function setupLassoSelection() {
+                const rect = document.getElementById("lasso-rect");
+                let dragging = false;
+                let startX = 0,
+                    startY = 0;
+
+                renderer.domElement.addEventListener("pointerdown", (e) => {
+                    if (!e.shiftKey || e.button !== 0) return;
+                    // Prevent orbit controls from handling shift+drag
+                    controls.enabled = false;
+                    dragging = true;
+                    startX = e.clientX;
+                    startY = e.clientY;
+                    rect.style.left = startX + "px";
+                    rect.style.top = startY + "px";
+                    rect.style.width = "0px";
+                    rect.style.height = "0px";
+                    rect.style.display = "block";
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+
+                window.addEventListener("pointermove", (e) => {
+                    if (!dragging) return;
+                    const x = Math.min(startX, e.clientX);
+                    const y = Math.min(startY, e.clientY);
+                    const w = Math.abs(e.clientX - startX);
+                    const h = Math.abs(e.clientY - startY);
+                    rect.style.left = x + "px";
+                    rect.style.top = y + "px";
+                    rect.style.width = w + "px";
+                    rect.style.height = h + "px";
+                });
+
+                window.addEventListener("pointerup", (e) => {
+                    if (!dragging) return;
+                    dragging = false;
+                    rect.style.display = "none";
+                    controls.enabled = true;
+
+                    const x0 = Math.min(startX, e.clientX);
+                    const y0 = Math.min(startY, e.clientY);
+                    const x1 = Math.max(startX, e.clientX);
+                    const y1 = Math.max(startY, e.clientY);
+
+                    // Ignore tiny drags (clicks)
+                    if (x1 - x0 < 5 && y1 - y0 < 5) return;
+
+                    if (!meshGeometry) return;
+                    const posAttr = meshGeometry.getAttribute("position");
+                    const nFaces = posAttr.count / 3;
+
+                    // Project each face centroid to screen and check if inside rectangle
+                    const vp = new THREE.Vector3();
+                    let count = 0;
+                    for (let i = 0; i < nFaces; i++) {
+                        const base = i * 9;
+                        vp.set(
+                            (posAttr.array[base] + posAttr.array[base + 3] + posAttr.array[base + 6]) / 3,
+                            (posAttr.array[base + 1] + posAttr.array[base + 4] + posAttr.array[base + 7]) / 3,
+                            (posAttr.array[base + 2] + posAttr.array[base + 5] + posAttr.array[base + 8]) / 3,
+                        );
+
+                        // Check clip plane
+                        if (clipPlane.distanceToPoint(vp) < 0) continue;
+
+                        // Project to screen
+                        vp.project(camera);
+                        const sx = (vp.x * 0.5 + 0.5) * window.innerWidth;
+                        const sy = (-vp.y * 0.5 + 0.5) * window.innerHeight;
+
+                        if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && vp.z >= 0 && vp.z <= 1) {
+                            manualHighlightFaces.add(i);
+                            count++;
+                        }
+                    }
+
+                    rebuildManualHighlight();
+                    syncManualHighlight();
+                });
+            }
+
+            // ── Right-click / Ctrl+click to recenter ─────────────────────────
+            let pointerDownPos = null;
+            function onRecenter(event) {
+                const isRight = event.button === 2;
+                const isCtrlLeft = event.button === 0 && (event.ctrlKey || event.metaKey);
+                if (!isRight && !isCtrlLeft) return;
+                pointerDownPos = { x: event.clientX, y: event.clientY };
+                const savedTarget = controls.target.clone();
+                const savedCamPos = camera.position.clone();
+                const onUp = (upEvent) => {
+                    renderer.domElement.removeEventListener("pointerup", onUp);
+                    if (!pointerDownPos) return;
+                    if (
+                        Math.sqrt(
+                            (upEvent.clientX - pointerDownPos.x) ** 2 +
+                                (upEvent.clientY - pointerDownPos.y) ** 2,
+                        ) > 5
+                    )
+                        return;
+                    // Undo any pan that OrbitControls applied during this click
+                    controls.target.copy(savedTarget);
+                    camera.position.copy(savedCamPos);
+                    mouse.x = (upEvent.clientX / window.innerWidth) * 2 - 1;
+                    mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
+                    raycaster.setFromCamera(mouse, camera);
+                    if (!meshObj) return;
+                    const hits = raycaster.intersectObject(meshObj);
+                    if (hits.length === 0) return;
+                    const pickPoint = hits[0].point;
+                    const offset = camera.position.clone().sub(controls.target);
+                    controls.target.copy(pickPoint);
+                    camera.position.copy(pickPoint).add(offset);
+                    controls.update();
+                    scheduleStateUpdate();
+                };
+                renderer.domElement.addEventListener("pointerup", onUp);
+            }
+
+            // ── Visible face computation ─────────────────────────────────────────
+            function computeVisibleFaceCount() {
+                if (!meshGeometry) return 0;
+                const frustum = new THREE.Frustum();
+                const m = new THREE.Matrix4();
+                m.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+                frustum.setFromProjectionMatrix(m);
+                const pos = meshGeometry.getAttribute("position");
+                const nFaces = pos.count / 3;
+                let visible = 0;
+                const c = new THREE.Vector3();
+                const step = Math.max(1, Math.floor(nFaces / 10000));
+                let sampled = 0;
+                for (let i = 0; i < nFaces; i += step) {
+                    const b = i * 9;
+                    c.set(
+                        (pos.array[b] + pos.array[b + 3] + pos.array[b + 6]) / 3,
+                        (pos.array[b + 1] + pos.array[b + 4] + pos.array[b + 7]) / 3,
+                        (pos.array[b + 2] + pos.array[b + 5] + pos.array[b + 8]) / 3,
+                    );
+                    if (frustum.containsPoint(c) && clipPlane.distanceToPoint(c) >= 0) visible++;
+                    sampled++;
+                }
+                return Math.round((visible / sampled) * nFaces);
+            }
+
+            // ── State updates ────────────────────────────────────────────────────
+            function scheduleStateUpdate() {
+                if (stateDebounceTimer) clearTimeout(stateDebounceTimer);
+                stateDebounceTimer = setTimeout(sendStateUpdate, STATE_DEBOUNCE_MS);
+            }
+
+            function sendStateUpdate() {
+                const visCount = computeVisibleFaceCount();
+                document.getElementById("visCount").textContent = visCount.toLocaleString();
+                document.getElementById("camPos").textContent =
+                    `(${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)})`;
+                const state = {
+                    camera: {
+                        position: camera.position.toArray(),
+                        target: controls.target.toArray(),
+                        up: camera.up.toArray(),
+                        fov: camera.fov,
+                        near: camera.near,
+                        far: camera.far,
+                    },
+                    clipPlane: {
+                        normal: [clipPlane.normal.x, clipPlane.normal.y, clipPlane.normal.z],
+                        constant: clipPlane.constant,
+                    },
+                    ui: {
+                        opacity: meshObj ? meshObj.material.opacity : 1.0,
+                        wireframe: wireframeObj ? wireframeObj.visible : false,
+                    },
+                    visibleFaceCount: visCount,
+                };
+                if (ws && ws.readyState === WebSocket.OPEN)
+                    ws.send(JSON.stringify({ type: "state_update", payload: state }));
+                else
+                    fetch("/update_state", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(state),
+                    }).catch(() => {});
+            }
+
+            // ── Annotations ──────────────────────────────────────────────────────
+            let currentAnnotations = null; // cached for panel rebuild
+
+            function applyAnnotations(annotations) {
+                for (const m of annotationMeshes) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                annotationMeshes = [];
+                for (const m of markerMeshes) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                markerMeshes = [];
+                for (const m of edgeGroupMeshes) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                edgeGroupMeshes = [];
+                currentAnnotations = annotations;
+                updateHighlightsPanel();
+                if (!annotations) return;
+                // Face highlights
+                if (annotations.highlights && meshGeometry) {
+                    const posAttr = meshGeometry.getAttribute("position");
+                    for (const group of annotations.highlights) {
+                        const fi = group.faces || [];
+                        if (fi.length === 0) continue;
+                        const color = group.color || [1, 0, 0];
+                        const pos = new Float32Array(fi.length * 9);
+                        for (let j = 0; j < fi.length; j++) {
+                            const base = fi[j] * 9;
+                            for (let k = 0; k < 9; k++) pos[j * 9 + k] = posAttr.array[base + k];
+                        }
+                        const geo = new THREE.BufferGeometry();
+                        geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+                        geo.computeVertexNormals();
+                        const mat = new THREE.MeshPhongMaterial({
+                            color: new THREE.Color(color[0], color[1], color[2]),
+                            side: THREE.DoubleSide,
+                            clippingPlanes: [clipPlane],
+                            transparent: true,
+                            opacity: 0.9,
+                            polygonOffset: true,
+                            polygonOffsetFactor: -1,
+                        });
+                        const hlm = new THREE.Mesh(geo, mat);
+                        scene.add(hlm);
+                        annotationMeshes.push(hlm);
+                    }
+                }
+                // Markers (spheres at arbitrary positions)
+                if (annotations.markers) {
+                    for (const mk of annotations.markers) {
+                        const pos = mk.position || [0, 0, 0];
+                        const color = mk.color || [1, 1, 1];
+                        const radius = mk.radius || 50;
+                        const geo = new THREE.SphereGeometry(radius, 12, 8);
+                        const mat = new THREE.MeshPhongMaterial({
+                            color: new THREE.Color(color[0], color[1], color[2]),
+                            transparent: true,
+                            opacity: mk.opacity !== undefined ? mk.opacity : 0.8,
+                            depthTest: true,
+                        });
+                        const sphere = new THREE.Mesh(geo, mat);
+                        sphere.position.set(pos[0], pos[1], pos[2]);
+                        scene.add(sphere);
+                        markerMeshes.push(sphere);
+                    }
+                }
+                // Flat edges (legacy)
+                if (annotations.edges) {
+                    for (const edge of annotations.edges) {
+                        const a = edge[0],
+                            b = edge[1];
+                        const color = edge[2] || [1, 1, 1];
+                        const pts = new Float32Array([a[0], a[1], a[2], b[0], b[1], b[2]]);
+                        const geo = new THREE.BufferGeometry();
+                        geo.setAttribute("position", new THREE.BufferAttribute(pts, 3));
+                        const mat = new THREE.LineBasicMaterial({
+                            color: new THREE.Color(color[0], color[1], color[2]),
+                            linewidth: 2,
+                        });
+                        const line = new THREE.LineSegments(geo, mat);
+                        scene.add(line);
+                        markerMeshes.push(line);
+                    }
+                }
+                // Edge groups (grouped line segments with labels)
+                if (annotations.edge_groups) {
+                    for (const group of annotations.edge_groups) {
+                        const segs = group.segments || [];
+                        if (segs.length === 0) continue;
+                        const color = group.color || [1, 1, 1];
+                        const pts = new Float32Array(segs.length * 6);
+                        for (let i = 0; i < segs.length; i++) {
+                            const a = segs[i][0],
+                                b = segs[i][1];
+                            pts[i * 6] = a[0];
+                            pts[i * 6 + 1] = a[1];
+                            pts[i * 6 + 2] = a[2];
+                            pts[i * 6 + 3] = b[0];
+                            pts[i * 6 + 4] = b[1];
+                            pts[i * 6 + 5] = b[2];
+                        }
+                        const geo = new THREE.BufferGeometry();
+                        geo.setAttribute("position", new THREE.BufferAttribute(pts, 3));
+                        const mat = new THREE.LineBasicMaterial({
+                            color: new THREE.Color(color[0], color[1], color[2]),
+                            linewidth: 2,
+                        });
+                        const line = new THREE.LineSegments(geo, mat);
+                        scene.add(line);
+                        edgeGroupMeshes.push(line);
+                    }
+                }
+            }
+
+            function rgbToHex(c) {
+                const r = Math.round(c[0] * 255),
+                    g = Math.round(c[1] * 255),
+                    b = Math.round(c[2] * 255);
+                return "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+            }
+            function hexToRgb01(hex) {
+                const m = hex.match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+                return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
+            }
+            function syncAnnotationsToServer() {
+                if (!currentAnnotations) return;
+                fetch("/update_annotations", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(currentAnnotations),
+                }).catch(() => {});
+            }
+
+            function focusOnAnnotation(idx) {
+                const mesh = annotationMeshes[idx];
+                if (!mesh) return;
+                mesh.geometry.computeBoundingBox();
+                const box = mesh.geometry.boundingBox;
+                const center = new THREE.Vector3();
+                box.getCenter(center);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                const radius = size.length() / 2;
+
+                const offset = camera.position.clone().sub(controls.target).normalize();
+                controls.target.copy(center);
+                camera.position.copy(center).addScaledVector(offset, radius * 3);
+                controls.update();
+                scheduleStateUpdate();
+            }
+
+            function focusOnEdgeGroup(idx) {
+                const line = edgeGroupMeshes[idx];
+                if (!line) return;
+                line.geometry.computeBoundingBox();
+                const box = line.geometry.boundingBox;
+                const center = new THREE.Vector3();
+                box.getCenter(center);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                const radius = size.length() / 2;
+
+                const offset = camera.position.clone().sub(controls.target).normalize();
+                controls.target.copy(center);
+                camera.position.copy(center).addScaledVector(offset, Math.max(radius * 3, 500));
+                controls.update();
+                scheduleStateUpdate();
+            }
+
+            function removeEdgeGroup(idx) {
+                if (!currentAnnotations || !currentAnnotations.edge_groups) return;
+                currentAnnotations.edge_groups.splice(idx, 1);
+                if (edgeGroupMeshes[idx]) {
+                    scene.remove(edgeGroupMeshes[idx]);
+                    edgeGroupMeshes[idx].geometry.dispose();
+                    edgeGroupMeshes[idx].material.dispose();
+                    edgeGroupMeshes.splice(idx, 1);
+                }
+                updateHighlightsPanel();
+                syncAnnotationsToServer();
+            }
+
+            function updateHighlightsPanel() {
+                const list = document.getElementById("hlList");
+                list.innerHTML = "";
+                const clearRow = document.getElementById("hlClearAllRow");
+                const hasHighlights =
+                    currentAnnotations &&
+                    currentAnnotations.highlights &&
+                    currentAnnotations.highlights.length > 0;
+                const hasMarkers =
+                    currentAnnotations && currentAnnotations.markers && currentAnnotations.markers.length > 0;
+                const hasEdgeGroups =
+                    currentAnnotations &&
+                    currentAnnotations.edge_groups &&
+                    currentAnnotations.edge_groups.length > 0;
+                if (!hasHighlights && !hasMarkers && !hasEdgeGroups) {
+                    clearRow.style.display = "none";
+                    return;
+                }
+                clearRow.style.display = "block";
+                if (hasHighlights) {
+                    currentAnnotations.highlights.forEach((group, idx) => {
+                        const n = (group.faces || []).length;
+                        if (n === 0) return;
+                        const color = group.color || [1, 0, 0];
+                        const label = group.label || `Group ${idx}`;
+                        const div = document.createElement("div");
+                        div.className = "hl-item";
+                        const rgb = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
+
+                        const picker = document.createElement("input");
+                        picker.type = "color";
+                        picker.className = "hl-color-input";
+                        picker.value = rgbToHex(color);
+                        picker.title = "Click to change color";
+                        picker.addEventListener("input", () => {
+                            const nc = hexToRgb01(picker.value);
+                            group.color = nc;
+                            if (annotationMeshes[idx]) {
+                                annotationMeshes[idx].material.color.setRGB(nc[0], nc[1], nc[2]);
+                                annotationMeshes[idx].material.needsUpdate = true;
+                            }
+                        });
+                        picker.addEventListener("change", () => syncAnnotationsToServer());
+
+                        const left = document.createElement("span");
+                        left.style.cssText = "display:flex;align-items:center;";
+                        left.appendChild(picker);
+
+                        const nameSpan = document.createElement("span");
+                        nameSpan.textContent = label;
+                        nameSpan.title = "Click to rename, double-click to center";
+                        nameSpan.style.cssText = "cursor:pointer;border-bottom:1px dashed #555;";
+                        nameSpan.addEventListener("click", () => {
+                            const input = document.createElement("input");
+                            input.type = "text";
+                            input.value = group.label || "";
+                            input.style.cssText =
+                                "font-size:11px;width:100px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:1px 3px;";
+                            const commit = () => {
+                                const newName = input.value.trim();
+                                if (newName) group.label = newName;
+                                syncAnnotationsToServer();
+                                updateHighlightsPanel();
+                            };
+                            input.addEventListener("blur", commit);
+                            input.addEventListener("keydown", (e) => {
+                                if (e.key === "Enter") input.blur();
+                            });
+                            nameSpan.replaceWith(input);
+                            input.focus();
+                            input.select();
+                        });
+                        nameSpan.addEventListener("dblclick", () => focusOnAnnotation(idx));
+                        left.appendChild(nameSpan);
+
+                        const countSpan = document.createElement("span");
+                        countSpan.textContent = ` (${n.toLocaleString()})`;
+                        countSpan.style.color = "#888";
+                        left.appendChild(countSpan);
+
+                        const focusBtn = document.createElement("button");
+                        focusBtn.textContent = "⌖";
+                        focusBtn.title = "Center camera on this annotation";
+                        focusBtn.style.cssText = "font-size:12px;cursor:pointer;margin-left:4px;";
+                        focusBtn.addEventListener("click", () => focusOnAnnotation(idx));
+                        left.appendChild(focusBtn);
+
+                        div.appendChild(left);
+
+                        const toggleBtn = document.createElement("button");
+                        toggleBtn.textContent =
+                            annotationMeshes[idx] && !annotationMeshes[idx].visible ? "show" : "hide";
+                        toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
+                        toggleBtn.addEventListener("click", () => {
+                            if (!annotationMeshes[idx]) return;
+                            annotationMeshes[idx].visible = !annotationMeshes[idx].visible;
+                            toggleBtn.textContent = annotationMeshes[idx].visible ? "hide" : "show";
+                        });
+                        div.appendChild(toggleBtn);
+
+                        const btn = document.createElement("button");
+                        btn.textContent = "x";
+                        btn.addEventListener("click", () => removeAnnotationGroup(idx));
+                        div.appendChild(btn);
+                        list.appendChild(div);
+                    });
+                }
+                if (hasMarkers) {
+                    currentAnnotations.markers.forEach((mk, idx) => {
+                        const color = mk.color || [1, 1, 1];
+                        const label = mk.label || `Marker ${idx}`;
+                        const div = document.createElement("div");
+                        div.className = "hl-item";
+                        const rgb = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
+                        div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}; border-radius:50%"></span>${label}</span>`;
+
+                        const toggleBtn = document.createElement("button");
+                        toggleBtn.textContent =
+                            markerMeshes[idx] && !markerMeshes[idx].visible ? "show" : "hide";
+                        toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
+                        toggleBtn.addEventListener("click", () => {
+                            if (!markerMeshes[idx]) return;
+                            markerMeshes[idx].visible = !markerMeshes[idx].visible;
+                            toggleBtn.textContent = markerMeshes[idx].visible ? "hide" : "show";
+                        });
+                        div.appendChild(toggleBtn);
+
+                        const btn = document.createElement("button");
+                        btn.textContent = "x";
+                        btn.addEventListener("click", () => removeMarker(idx));
+                        div.appendChild(btn);
+                        list.appendChild(div);
+                    });
+                }
+                if (hasEdgeGroups) {
+                    currentAnnotations.edge_groups.forEach((group, idx) => {
+                        const segs = group.segments || [];
+                        if (segs.length === 0) return;
+                        const color = group.color || [1, 1, 1];
+                        const label = group.label || `Edges ${idx}`;
+                        const div = document.createElement("div");
+                        div.className = "hl-item";
+
+                        const picker = document.createElement("input");
+                        picker.type = "color";
+                        picker.className = "hl-color-input";
+                        picker.value = rgbToHex(color);
+                        picker.title = "Click to change color";
+                        picker.addEventListener("input", () => {
+                            const nc = hexToRgb01(picker.value);
+                            group.color = nc;
+                            if (edgeGroupMeshes[idx]) {
+                                edgeGroupMeshes[idx].material.color.setRGB(nc[0], nc[1], nc[2]);
+                                edgeGroupMeshes[idx].material.needsUpdate = true;
+                            }
+                        });
+                        picker.addEventListener("change", () => syncAnnotationsToServer());
+
+                        const left = document.createElement("span");
+                        left.style.cssText = "display:flex;align-items:center;";
+                        left.appendChild(picker);
+
+                        const nameSpan = document.createElement("span");
+                        nameSpan.textContent = label;
+                        nameSpan.title = "Click to rename, double-click to center";
+                        nameSpan.style.cssText = "cursor:pointer;border-bottom:1px dashed #555;";
+                        nameSpan.addEventListener("click", () => {
+                            const input = document.createElement("input");
+                            input.type = "text";
+                            input.value = group.label || "";
+                            input.style.cssText =
+                                "font-size:11px;width:100px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:1px 3px;";
+                            const commit = () => {
+                                const newName = input.value.trim();
+                                if (newName) group.label = newName;
+                                syncAnnotationsToServer();
+                                updateHighlightsPanel();
+                            };
+                            input.addEventListener("blur", commit);
+                            input.addEventListener("keydown", (e) => {
+                                if (e.key === "Enter") input.blur();
+                            });
+                            nameSpan.replaceWith(input);
+                            input.focus();
+                            input.select();
+                        });
+                        nameSpan.addEventListener("dblclick", () => focusOnEdgeGroup(idx));
+                        left.appendChild(nameSpan);
+
+                        const focusBtn = document.createElement("button");
+                        focusBtn.textContent = "⌖";
+                        focusBtn.title = "Center camera on this edge group";
+                        focusBtn.style.cssText = "font-size:12px;cursor:pointer;margin-left:4px;";
+                        focusBtn.addEventListener("click", () => focusOnEdgeGroup(idx));
+                        left.appendChild(focusBtn);
+
+                        div.appendChild(left);
+
+                        const toggleBtn = document.createElement("button");
+                        toggleBtn.textContent =
+                            edgeGroupMeshes[idx] && !edgeGroupMeshes[idx].visible ? "show" : "hide";
+                        toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
+                        toggleBtn.addEventListener("click", () => {
+                            if (!edgeGroupMeshes[idx]) return;
+                            edgeGroupMeshes[idx].visible = !edgeGroupMeshes[idx].visible;
+                            toggleBtn.textContent = edgeGroupMeshes[idx].visible ? "hide" : "show";
+                        });
+                        div.appendChild(toggleBtn);
+
+                        const btn = document.createElement("button");
+                        btn.textContent = "x";
+                        btn.addEventListener("click", () => removeEdgeGroup(idx));
+                        div.appendChild(btn);
+                        list.appendChild(div);
+                    });
+                }
+            }
+
+            function removeMarker(idx) {
+                if (!currentAnnotations || !currentAnnotations.markers) return;
+                currentAnnotations.markers.splice(idx, 1);
+                if (markerMeshes[idx]) {
+                    scene.remove(markerMeshes[idx]);
+                    markerMeshes[idx].geometry.dispose();
+                    markerMeshes[idx].material.dispose();
+                    markerMeshes.splice(idx, 1);
+                }
+                updateHighlightsPanel();
+                fetch("/update_annotations", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(currentAnnotations),
+                }).catch(() => {});
+            }
+
+            function removeAnnotationGroup(idx) {
+                if (!currentAnnotations || !currentAnnotations.highlights) return;
+                currentAnnotations.highlights.splice(idx, 1);
+                // Remove from scene
+                if (annotationMeshes[idx]) {
+                    scene.remove(annotationMeshes[idx]);
+                    annotationMeshes[idx].geometry.dispose();
+                    annotationMeshes[idx].material.dispose();
+                    annotationMeshes.splice(idx, 1);
+                }
+                updateHighlightsPanel();
+                // Sync to server
+                fetch("/update_annotations", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(currentAnnotations),
+                }).catch(() => {});
+            }
+
+            function clearAllAnnotations() {
+                for (const m of annotationMeshes) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                annotationMeshes = [];
+                for (const m of markerMeshes) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                markerMeshes = [];
+                for (const m of edgeGroupMeshes) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                edgeGroupMeshes = [];
+                currentAnnotations = { highlights: [], markers: [], edge_groups: [] };
+                updateHighlightsPanel();
+                fetch("/update_annotations", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(currentAnnotations),
+                }).catch(() => {});
+            }
+
+            function applyCameraCommand(cmd) {
+                if (cmd.position) camera.position.fromArray(cmd.position);
+                if (cmd.target) controls.target.fromArray(cmd.target);
+                if (cmd.up) camera.up.fromArray(cmd.up);
+                if (cmd.fov) {
+                    camera.fov = cmd.fov;
+                    camera.updateProjectionMatrix();
+                }
+                controls.update();
+                scheduleStateUpdate();
+            }
+
+            // ── WebSocket ────────────────────────────────────────────────────────
+            function connectWebSocket() {
+                const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+                ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+                ws.onopen = () => console.log("[skeliner] WebSocket connected");
+                ws.onmessage = (event) => {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === "annotations") applyAnnotations(msg.payload);
+                    else if (msg.type === "camera_command") applyCameraCommand(msg.payload);
+                    else if (msg.type === "reload") window.location.reload();
+                    else if (msg.type === "mesh_loaded") {
+                        buildMesh(msg.payload);
+                        updateLoadedPanel();
+                    } else if (msg.type === "skeleton_loaded") {
+                        buildSkeleton(msg.payload);
+                    } else if (msg.type === "skeleton_removed") {
+                        const sname = msg.payload && msg.payload.name;
+                        if (sname && skelGroups[sname]) {
+                            scene.remove(skelGroups[sname].group);
+                            delete skelGroups[sname];
+                            const opt = document.querySelector(`#pickTarget option[value="skel:${sname}"]`);
+                            if (opt) opt.remove();
+                        }
+                        updateLoadedPanel();
+                        if (Object.keys(skelGroups).length === 0 && !meshObj)
+                            document.getElementById("empty-hint").style.display = "block";
+                    } else if (msg.type === "all_skeletons_removed") {
+                        for (const sg of Object.values(skelGroups)) scene.remove(sg.group);
+                        for (const k of Object.keys(skelGroups)) delete skelGroups[k];
+                        document
+                            .querySelectorAll('#pickTarget option[value^="skel:"]')
+                            .forEach((o) => o.remove());
+                        updateLoadedPanel();
+                        if (!meshObj) document.getElementById("empty-hint").style.display = "block";
+                    } else if (msg.type === "mesh_removed") {
+                        if (meshObj) {
+                            scene.remove(meshObj);
+                            meshObj.geometry.dispose();
+                            meshObj.material.dispose();
+                            meshObj = null;
+                        }
+                        if (wireframeObj) {
+                            scene.remove(wireframeObj);
+                            wireframeObj.geometry.dispose();
+                            wireframeObj.material.dispose();
+                            wireframeObj = null;
+                        }
+                        meshGeometry = null;
+                        document.getElementById("nVerts").textContent = "-";
+                        document.getElementById("nFaces").textContent = "-";
+                        updateLoadedPanel();
+                        if (Object.keys(skelGroups).length === 0)
+                            document.getElementById("empty-hint").style.display = "block";
+                    }
+                };
+                ws.onerror = (err) => console.error("[skeliner] WebSocket error:", err);
+                ws.onclose = () => {
+                    console.log("[skeliner] WebSocket closed, reconnecting in 2s...");
+                    setTimeout(connectWebSocket, 2000);
+                };
+            }
+
+            function onResize() {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+            function animate() {
+                requestAnimationFrame(animate);
+                controls.update();
+                renderer.render(scene, camera);
+            }
+
+            init();
+        </script>
+    </body>
 </html>
