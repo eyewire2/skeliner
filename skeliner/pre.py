@@ -33,8 +33,10 @@ def _face_edge_components(mesh: trimesh.Trimesh) -> tuple[np.ndarray, int]:
     edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
     for fi, face in enumerate(mesh.faces):
         for i in range(3):
-            e = (min(int(face[i]), int(face[(i + 1) % 3])),
-                 max(int(face[i]), int(face[(i + 1) % 3])))
+            e = (
+                min(int(face[i]), int(face[(i + 1) % 3])),
+                max(int(face[i]), int(face[(i + 1) % 3])),
+            )
             edge_to_faces[e].append(fi)
 
     n = len(mesh.faces)
@@ -53,8 +55,10 @@ def _face_edge_components(mesh: trimesh.Trimesh) -> tuple[np.ndarray, int]:
             size += 1
             face = mesh.faces[fi]
             for i in range(3):
-                e = (min(int(face[i]), int(face[(i + 1) % 3])),
-                     max(int(face[i]), int(face[(i + 1) % 3])))
+                e = (
+                    min(int(face[i]), int(face[(i + 1) % 3])),
+                    max(int(face[i]), int(face[(i + 1) % 3])),
+                )
                 for nb in edge_to_faces[e]:
                     if labels[nb] < 0:
                         labels[nb] = comp_id
@@ -97,8 +101,10 @@ def find_holes(
     edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
     for fi, face in enumerate(mesh.faces):
         for i in range(3):
-            e = (min(int(face[i]), int(face[(i + 1) % 3])),
-                 max(int(face[i]), int(face[(i + 1) % 3])))
+            e = (
+                min(int(face[i]), int(face[(i + 1) % 3])),
+                max(int(face[i]), int(face[(i + 1) % 3])),
+            )
             edge_to_faces[e].append(fi)
 
     # Boundary edges whose face is in the main component
@@ -378,9 +384,7 @@ def _fill_single_hole(
                 new_2d[:, np.newaxis, :] - bnd_2d[np.newaxis, :, :], axis=2
             )
             weights = 1.0 / np.maximum(dists, 1e-10) ** 2
-            new_h = (weights * bnd_h[np.newaxis, :]).sum(axis=1) / weights.sum(
-                axis=1
-            )
+            new_h = (weights * bnd_h[np.newaxis, :]).sum(axis=1) / weights.sum(axis=1)
         new_3d = (
             centroid_3d
             + new_2d[:, 0:1] * u_ax
@@ -419,7 +423,8 @@ def _fill_single_hole(
     else:
         loop_set = set(loop)
         adj_fi = [
-            fi for fi, face in enumerate(mesh.faces)
+            fi
+            for fi, face in enumerate(mesh.faces)
             if set(int(v) for v in face) & loop_set
         ]
     if adj_fi:
@@ -579,13 +584,21 @@ def fill_holes(
         if method == "rbf":
             max_perimeter_mult = 50.0
         # advancing_front: no limit
-    max_perimeter = (max_perimeter_mult * target_edge
-                     if max_perimeter_mult is not None else float("inf"))
+    max_perimeter = (
+        max_perimeter_mult * target_edge
+        if max_perimeter_mult is not None
+        else float("inf")
+    )
 
     if verbose:
-        print(f"[skeliner.pre] Method: {method}, target edge: {target_edge:.1f}"
-              + (f", max perimeter: {max_perimeter:.0f}"
-                 if max_perimeter < float("inf") else ", no perimeter limit"))
+        print(
+            f"[skeliner.pre] Method: {method}, target edge: {target_edge:.1f}"
+            + (
+                f", max perimeter: {max_perimeter:.0f}"
+                if max_perimeter < float("inf")
+                else ", no perimeter limit"
+            )
+        )
 
     # Pre-build vert_to_faces for orientation
     vert_to_faces: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
@@ -598,17 +611,19 @@ def fill_holes(
     n_skipped = 0
     for loop in loops:
         pts = mesh.vertices[loop]
-        perimeter = float(np.linalg.norm(
-            np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1
-        ).sum())
+        perimeter = float(
+            np.linalg.norm(np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1).sum()
+        )
         if perimeter > max_perimeter:
             n_skipped += 1
         else:
             valid_loops.append(loop)
 
     if verbose:
-        print(f"[skeliner.pre] Filling {len(valid_loops)} holes"
-              + (f" (skipped {n_skipped} too large)" if n_skipped else ""))
+        print(
+            f"[skeliner.pre] Filling {len(valid_loops)} holes"
+            + (f" (skipped {n_skipped} too large)" if n_skipped else "")
+        )
 
     if method == "advancing_front":
         new_faces: list[np.ndarray] = []
@@ -623,9 +638,7 @@ def fill_holes(
             return mesh
 
         all_faces = np.vstack([mesh.faces] + new_faces)
-        result = trimesh.Trimesh(
-            vertices=mesh.vertices, faces=all_faces, process=False
-        )
+        result = trimesh.Trimesh(vertices=mesh.vertices, faces=all_faces, process=False)
 
     elif method == "rbf":
         vtree = KDTree(mesh.vertices)
@@ -691,14 +704,18 @@ def remove_fragments(
 
     # Count faces per component
     comp_ids, counts = np.unique(labels, return_counts=True)
-    small_comps = set(int(c) for c, n in zip(comp_ids, counts) if n < min_faces and c != main)
+    small_comps = set(
+        int(c) for c, n in zip(comp_ids, counts) if n < min_faces and c != main
+    )
 
     if not small_comps:
         if verbose:
             print("[skeliner.pre] No fragments to remove")
         return mesh
 
-    keep_mask = np.array([int(labels[fi]) not in small_comps for fi in range(len(mesh.faces))])
+    keep_mask = np.array(
+        [int(labels[fi]) not in small_comps for fi in range(len(mesh.faces))]
+    )
     n_removed = int((~keep_mask).sum())
 
     clean = mesh.submesh([np.where(keep_mask)[0]], append=True)
@@ -731,16 +748,20 @@ def _remove_fins(
         edge_count: dict[tuple[int, int], int] = defaultdict(int)
         for face in result.faces:
             for i in range(3):
-                e = (min(int(face[i]), int(face[(i + 1) % 3])),
-                     max(int(face[i]), int(face[(i + 1) % 3])))
+                e = (
+                    min(int(face[i]), int(face[(i + 1) % 3])),
+                    max(int(face[i]), int(face[(i + 1) % 3])),
+                )
                 edge_count[e] += 1
 
         fin_mask = np.zeros(len(result.faces), dtype=bool)
         for fi, face in enumerate(result.faces):
             n_bnd = 0
             for i in range(3):
-                e = (min(int(face[i]), int(face[(i + 1) % 3])),
-                     max(int(face[i]), int(face[(i + 1) % 3])))
+                e = (
+                    min(int(face[i]), int(face[(i + 1) % 3])),
+                    max(int(face[i]), int(face[(i + 1) % 3])),
+                )
                 if edge_count[e] == 1:
                     n_bnd += 1
             if n_bnd >= 2:
@@ -794,8 +815,9 @@ def ensure_watertight(
         if len(result.faces) == prev_faces:
             break
         if verbose:
-            print(f"[skeliner.pre] Iteration {iteration + 1}: "
-                  f"{len(result.faces):,} faces")
+            print(
+                f"[skeliner.pre] Iteration {iteration + 1}: {len(result.faces):,} faces"
+            )
 
     if verbose:
         wt = result.is_watertight
@@ -874,8 +896,10 @@ def _filter_small_clusters(
     for fi in flagged:
         f = mesh.faces[fi]
         for i in range(3):
-            e = (min(int(f[i]), int(f[(i + 1) % 3])),
-                 max(int(f[i]), int(f[(i + 1) % 3])))
+            e = (
+                min(int(f[i]), int(f[(i + 1) % 3])),
+                max(int(f[i]), int(f[(i + 1) % 3])),
+            )
             edge_to_faces[e].append(fi)
 
     int_list = sorted(flagged)
@@ -884,8 +908,10 @@ def _filter_small_clusters(
     for fi in int_list:
         f = mesh.faces[fi]
         for i in range(3):
-            e = (min(int(f[i]), int(f[(i + 1) % 3])),
-                 max(int(f[i]), int(f[(i + 1) % 3])))
+            e = (
+                min(int(f[i]), int(f[(i + 1) % 3])),
+                max(int(f[i]), int(f[(i + 1) % 3])),
+            )
             for nfi in edge_to_faces[e]:
                 if nfi != fi:
                     a, b = int_remap[fi], int_remap[nfi]
@@ -953,13 +979,44 @@ def _organelle_precompute(
     return outward_dots, face_comp, main_ci, main_face_mask
 
 
+def _count_edge_loops(edges: list[tuple[int, int]]) -> int:
+    """Count connected components of an edge list."""
+    from collections import defaultdict, deque
+
+    if not edges:
+        return 0
+    vert_to_idx: dict[int, list[int]] = defaultdict(list)
+    for i, e in enumerate(edges):
+        vert_to_idx[e[0]].append(i)
+        vert_to_idx[e[1]].append(i)
+
+    visited: set[int] = set()
+    n_loops = 0
+    for start in range(len(edges)):
+        if start in visited:
+            continue
+        queue = deque([start])
+        while queue:
+            ei = queue.popleft()
+            if ei in visited:
+                continue
+            visited.add(ei)
+            for v in edges[ei]:
+                for nei in vert_to_idx[v]:
+                    if nei not in visited:
+                        queue.append(nei)
+        n_loops += 1
+    return n_loops
+
+
 def find_rims(
     mesh: trimesh.Trimesh,
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
-    min_pocket_size: int = 100,
+    min_pocket_size: int = 30,
     verbose: bool = False,
+    _precomputed: tuple | None = None,
 ) -> list[list[tuple[int, int]]]:
     """Find rim edges — boundaries of negative-dot face clusters.
 
@@ -975,9 +1032,15 @@ def find_rims(
     """
     from collections import defaultdict, deque
 
-    outward_dots, _, _, main_face_mask = _organelle_precompute(
-        mesh, radius, radius_multiplier, verbose,
-    )
+    if _precomputed is not None:
+        outward_dots, _, _, main_face_mask = _precomputed
+    else:
+        outward_dots, _, _, main_face_mask = _organelle_precompute(
+            mesh,
+            radius,
+            radius_multiplier,
+            verbose,
+        )
     n_faces = len(mesh.faces)
     adj = _face_adjacency(mesh)
 
@@ -1008,19 +1071,23 @@ def find_rims(
                     queue.append(nfi)
         clusters.append(cluster)
 
-    # For each large-enough cluster, collect boundary edges
+    # For each cluster, collect boundary edges and count boundary loops.
+    # A real pocket has multiple boundary loops (multiple openings).
+    # A flat concave patch has exactly one boundary loop — not a pocket.
     rims: list[list[tuple[int, int]]] = []
     for cluster in clusters:
         if len(cluster) < min_pocket_size:
             continue
         cset = set(cluster)
-        rim_edges: list[tuple[int, int]] = []
+        boundary_edges: list[tuple[int, int]] = []
         seen_edges: set[tuple[int, int]] = set()
         for fi in cluster:
             f = mesh.faces[fi]
             for i in range(3):
-                e = (min(int(f[i]), int(f[(i + 1) % 3])),
-                     max(int(f[i]), int(f[(i + 1) % 3])))
+                e = (
+                    min(int(f[i]), int(f[(i + 1) % 3])),
+                    max(int(f[i]), int(f[(i + 1) % 3])),
+                )
                 if e in seen_edges:
                     continue
                 seen_edges.add(e)
@@ -1032,14 +1099,22 @@ def find_rims(
                         else faces_on_edge[0]
                     )
                     if other not in cset:
-                        rim_edges.append(e)
-        if rim_edges:
-            rims.append(rim_edges)
+                        boundary_edges.append(e)
+        if not boundary_edges:
+            continue
+
+        # Count boundary loops (connected components of boundary edges)
+        n_loops = _count_edge_loops(boundary_edges)
+        if n_loops <= 1:
+            continue  # single loop = flat patch, not a pocket
+
+        # Keep all boundary edges as rim for this pocket
+        rims.append(boundary_edges)
 
     if verbose:
         print(
             f"[skeliner.pre] Rims: {len(rims)} pockets "
-            f"(>= {min_pocket_size} faces), "
+            f"(>= {min_pocket_size} faces, multi-loop), "
             f"{sum(len(r) for r in rims):,} rim edges"
         )
 
@@ -1086,7 +1161,7 @@ def find_pocket_organelles(
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     grow_threshold: float = 0.1,
-    min_pocket_size: int = 100,
+    min_pocket_size: int = 5,
     min_cluster_size: int = 5,
     verbose: bool = False,
     _precomputed: tuple | None = None,
@@ -1130,10 +1205,34 @@ def find_pocket_organelles(
         outward_dots, _, _, main_face_mask = _precomputed
     else:
         outward_dots, _, _, main_face_mask = _organelle_precompute(
-            mesh, radius, radius_multiplier, verbose,
+            mesh,
+            radius,
+            radius_multiplier,
+            verbose,
         )
     n_faces = len(mesh.faces)
     adj = _face_adjacency(mesh)
+
+    # Use find_rims to get rim edges for each pocket
+    rims = find_rims(
+        mesh,
+        radius=radius,
+        radius_multiplier=radius_multiplier,
+        min_pocket_size=min_pocket_size,
+        verbose=verbose,
+        _precomputed=_precomputed,
+    )
+
+    if not rims:
+        if verbose:
+            print("[skeliner.pre] No pockets found")
+        return np.zeros(n_faces, dtype=bool)
+
+    # Collect all rim edges and seed faces
+    # Seeds = negative-dot faces adjacent to rim edges (inward side)
+    rim_edge_set: set[tuple[int, int]] = set()
+    for rim in rims:
+        rim_edge_set.update(rim)
 
     # Build edge-to-face map
     edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -1142,66 +1241,26 @@ def find_pocket_organelles(
             a, b = int(f[i]), int(f[(i + 1) % 3])
             edge_to_face[(min(a, b), max(a, b))].append(fi)
 
-    # Connected components of negative-dot faces on main component
-    neg_idx = set(np.where((outward_dots < 0) & main_face_mask)[0].tolist())
-    visited_cc: set[int] = set()
-    clusters: list[list[int]] = []
-    for fi in neg_idx:
-        if fi in visited_cc:
-            continue
-        cluster: list[int] = []
-        queue = deque([fi])
-        while queue:
-            curr = queue.popleft()
-            if curr in visited_cc:
-                continue
-            visited_cc.add(curr)
-            cluster.append(curr)
-            for nfi in adj.get(curr, set()):
-                if nfi in neg_idx and nfi not in visited_cc:
-                    queue.append(nfi)
-        clusters.append(cluster)
-
-    # Collect rim edges and seed faces from large-enough clusters
-    rim_edge_set: set[tuple[int, int]] = set()
+    # Seeds: negative-dot faces touching rim edges
     seeds: set[int] = set()
-    n_pockets = 0
+    for e in rim_edge_set:
+        for fi in edge_to_face.get(e, []):
+            if main_face_mask[fi] and outward_dots[fi] < 0:
+                seeds.add(fi)
 
-    for cluster in clusters:
-        if len(cluster) < min_pocket_size:
-            continue
-        n_pockets += 1
-        cset = set(cluster)
-        seeds.update(cluster)
-        for fi in cluster:
-            f = mesh.faces[fi]
-            for i in range(3):
-                e = (min(int(f[i]), int(f[(i + 1) % 3])),
-                     max(int(f[i]), int(f[(i + 1) % 3])))
-                faces_on_edge = edge_to_face.get(e, [])
-                if len(faces_on_edge) == 2:
-                    other = (
-                        faces_on_edge[1]
-                        if faces_on_edge[0] in cset
-                        else faces_on_edge[0]
-                    )
-                    if other not in cset:
-                        rim_edge_set.add(e)
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Pockets with rims: {n_pockets}, "
-            f"rim edges: {len(rim_edge_set):,}, "
-            f"seeds: {len(seeds):,}"
-        )
-
-    # Build set of faces on rim edges (faces that touch a rim edge from
-    # outside the pocket — these block the flood-fill)
+    # Rim faces: positive-dot faces touching rim edges (block flood-fill)
     rim_faces: set[int] = set()
     for e in rim_edge_set:
         for fi in edge_to_face.get(e, []):
             if fi not in seeds:
                 rim_faces.add(fi)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Pockets: {len(rims)}, "
+            f"rim edges: {len(rim_edge_set):,}, "
+            f"seeds: {len(seeds):,}"
+        )
 
     # Flood-fill from seeds, blocked by rim faces and grow_threshold
     pocket = np.zeros(n_faces, dtype=bool)
@@ -1257,7 +1316,10 @@ def find_isolated_organelles(
         outward_dots, face_comp, main_ci, _ = _precomputed
     else:
         outward_dots, face_comp, main_ci, _ = _organelle_precompute(
-            mesh, radius, radius_multiplier, verbose,
+            mesh,
+            radius,
+            radius_multiplier,
+            verbose,
         )
     n_comps = face_comp.max() + 1
     isolated = np.zeros(len(mesh.faces), dtype=bool)
@@ -1329,7 +1391,10 @@ def find_organelles(
         Boolean mask ``(nFaces,)`` — isolated internal fragment faces.
     """
     precomputed = _organelle_precompute(
-        mesh, radius, radius_multiplier, verbose,
+        mesh,
+        radius,
+        radius_multiplier,
+        verbose,
     )
 
     pocket = find_pocket_organelles(
@@ -1507,8 +1572,10 @@ def remove_nucleus(
     for fi in inside_idx:
         face = mesh.faces[fi]
         for i in range(3):
-            e = (min(int(face[i]), int(face[(i + 1) % 3])),
-                 max(int(face[i]), int(face[(i + 1) % 3])))
+            e = (
+                min(int(face[i]), int(face[(i + 1) % 3])),
+                max(int(face[i]), int(face[(i + 1) % 3])),
+            )
             edge_to_faces[e].append(int(fi))
 
     edges: set[tuple[int, int]] = set()
@@ -1517,8 +1584,10 @@ def remove_nucleus(
         local_i = fi_remap[fi_int]
         face = mesh.faces[fi]
         for i in range(3):
-            e = (min(int(face[i]), int(face[(i + 1) % 3])),
-                 max(int(face[i]), int(face[(i + 1) % 3])))
+            e = (
+                min(int(face[i]), int(face[(i + 1) % 3])),
+                max(int(face[i]), int(face[(i + 1) % 3])),
+            )
             for nfi in edge_to_faces[e]:
                 if nfi != fi_int and nfi in inside_set:
                     local_j = fi_remap[nfi]
