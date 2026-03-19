@@ -228,7 +228,7 @@ async function init() {
   connectWebSocket();
 
   fetch('/annotations').then(r => r.json()).then(ann => {
-    if (ann && ann.highlights) applyAnnotations(ann);
+    if (ann && (ann.highlights || ann.markers || ann.edges || ann.edge_groups)) applyAnnotations(ann);
   }).catch(() => {});
 
   window.addEventListener('resize', onResize);

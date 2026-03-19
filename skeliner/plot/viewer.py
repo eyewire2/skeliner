@@ -495,9 +495,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         loop = asyncio.get_event_loop()
         faces = await loop.run_in_executor(None, _run)
 
-        ann = {"highlights": [
-            {"faces": faces, "color": [1, 0.15, 0.15], "label": "organelle"},
-        ]}
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+        ann["highlights"].append(
+            {"faces": faces, "color": [1, 0.15, 0.15], "label": "organelle"}
+        )
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nFaces": len(faces)})
 
@@ -538,7 +543,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         ev_loop = asyncio.get_event_loop()
         edge_groups, n_holes = await ev_loop.run_in_executor(None, _run)
 
-        ann = {"edge_groups": edge_groups}
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "edge_groups" not in ann:
+            ann["edge_groups"] = []
+        ann["edge_groups"].extend(edge_groups)
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nHoles": n_holes})
 
