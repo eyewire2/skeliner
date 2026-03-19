@@ -747,7 +747,7 @@ async function runDetectOrganelles() {
 }
 
 async function runDetectOrganellesType(type) {
-  const btnId = type === 'surface' ? 'detectSurfaceBtn' : 'detectIsolatedBtn';
+  const btnId = type === 'pocket' ? 'detectSurfaceBtn' : 'detectIsolatedBtn';
   const btn = document.getElementById(btnId);
   const origText = btn.textContent;
   btn.textContent = 'Detecting...'; btn.disabled = true;
