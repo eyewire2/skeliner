@@ -29,7 +29,11 @@
   }
   .hl-item { display: flex; justify-content: space-between; align-items: center; }
   .hl-item button { font-size: 10px; cursor: pointer; margin-left: 8px; }
-  .hl-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+  .hl-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; cursor: pointer; border: 1px solid #666; }
+  input.hl-color-input { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border: 1px solid #666; border-radius: 2px; padding: 0; margin-right: 6px; cursor: pointer; background: none; vertical-align: middle; }
+  input.hl-color-input::-webkit-color-swatch-wrapper { padding: 0; }
+  input.hl-color-input::-webkit-color-swatch { border: none; border-radius: 1px; }
+  input.hl-color-input::-moz-color-swatch { border: none; border-radius: 1px; }
   #loaded-panel {
     position: absolute; bottom: 50px; right: 10px;
     background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
@@ -81,6 +85,10 @@
   <div><span class="label">Click: select | Shift+click: highlight</span></div>
   <div id="selDetail"></div>
   <div><span class="label">Highlighted: </span><span class="value" id="hlCount">0</span> <button id="hlClear" style="font-size:11px;cursor:pointer;">Clear</button></div>
+  <div id="hlSaveRow" style="display:none;margin-top:4px;">
+    <input id="hlSaveName" type="text" placeholder="annotation name" style="font-size:11px;width:120px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:2px 4px;">
+    <button id="hlSaveBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Save</button>
+  </div>
   <div id="hlList" style="margin-top:4px;max-height:200px;overflow-y:auto;"></div>
   <div id="hlClearAllRow" style="display:none;margin-top:2px;"><button id="hlClearAll" style="font-size:10px;cursor:pointer;">Clear All Annotations</button></div>
 </div>
@@ -178,6 +186,10 @@ async function init() {
     manualHighlightFaces.clear();
     rebuildManualHighlight();
     syncManualHighlight();
+  });
+  document.getElementById('hlSaveBtn').addEventListener('click', saveHighlightAsAnnotation);
+  document.getElementById('hlSaveName').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveHighlightAsAnnotation();
   });
 
   renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -691,6 +703,7 @@ function rebuildManualHighlight() {
   if (manualHighlightMesh) { scene.remove(manualHighlightMesh); manualHighlightMesh.geometry.dispose(); manualHighlightMesh.material.dispose(); manualHighlightMesh = null; }
   const faces = Array.from(manualHighlightFaces);
   document.getElementById('hlCount').textContent = faces.length;
+  document.getElementById('hlSaveRow').style.display = faces.length > 0 ? 'block' : 'none';
   if (faces.length === 0 || !meshGeometry) return;
 
   const posAttr = meshGeometry.getAttribute('position');
@@ -721,6 +734,38 @@ function syncManualHighlight() {
   const payload = { manualHighlight: Array.from(manualHighlightFaces) };
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'manual_highlight', payload }));
   else fetch('/update_selection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
+}
+
+const SAVE_COLORS = [
+  [0.2, 0.6, 1.0], [0.1, 0.9, 0.4], [0.9, 0.2, 0.8],
+  [1.0, 0.9, 0.1], [1.0, 0.4, 0.1], [0.4, 0.9, 0.9],
+];
+let saveColorIdx = 0;
+
+function saveHighlightAsAnnotation() {
+  if (manualHighlightFaces.size === 0) return;
+  const nameInput = document.getElementById('hlSaveName');
+  const label = nameInput.value.trim() || `selection ${Date.now()}`;
+  const faces = Array.from(manualHighlightFaces);
+  const color = SAVE_COLORS[saveColorIdx % SAVE_COLORS.length];
+  saveColorIdx++;
+
+  const payload = { faces, color, label };
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'save_highlight', payload }));
+  } else {
+    fetch('/save_highlight', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+  }
+
+  // Clear manual highlight
+  manualHighlightFaces.clear();
+  rebuildManualHighlight();
+  syncManualHighlight();
+  nameInput.value = '';
 }
 
 // ── Right-click / Ctrl+click to recenter ─────────────────────────
@@ -850,6 +895,41 @@ function applyAnnotations(annotations) {
   }
 }
 
+function rgbToHex(c) {
+  const r = Math.round(c[0]*255), g = Math.round(c[1]*255), b = Math.round(c[2]*255);
+  return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+}
+function hexToRgb01(hex) {
+  const m = hex.match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  return [parseInt(m[1],16)/255, parseInt(m[2],16)/255, parseInt(m[3],16)/255];
+}
+function syncAnnotationsToServer() {
+  if (!currentAnnotations) return;
+  fetch('/update_annotations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(currentAnnotations),
+  }).catch(() => {});
+}
+
+function focusOnAnnotation(idx) {
+  const mesh = annotationMeshes[idx];
+  if (!mesh) return;
+  mesh.geometry.computeBoundingBox();
+  const box = mesh.geometry.boundingBox;
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const radius = size.length() / 2;
+
+  const offset = camera.position.clone().sub(controls.target).normalize();
+  controls.target.copy(center);
+  camera.position.copy(center).addScaledVector(offset, radius * 3);
+  controls.update();
+  scheduleStateUpdate();
+}
+
 function updateHighlightsPanel() {
   const list = document.getElementById('hlList');
   list.innerHTML = '';
@@ -870,7 +950,64 @@ function updateHighlightsPanel() {
       const div = document.createElement('div');
       div.className = 'hl-item';
       const rgb = `rgb(${Math.round(color[0]*255)},${Math.round(color[1]*255)},${Math.round(color[2]*255)})`;
-      div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}"></span>${label} (${n.toLocaleString()})</span>`;
+
+      const picker = document.createElement('input');
+      picker.type = 'color';
+      picker.className = 'hl-color-input';
+      picker.value = rgbToHex(color);
+      picker.title = 'Click to change color';
+      picker.addEventListener('input', () => {
+        const nc = hexToRgb01(picker.value);
+        group.color = nc;
+        if (annotationMeshes[idx]) {
+          annotationMeshes[idx].material.color.setRGB(nc[0], nc[1], nc[2]);
+          annotationMeshes[idx].material.needsUpdate = true;
+        }
+      });
+      picker.addEventListener('change', () => syncAnnotationsToServer());
+
+      const left = document.createElement('span');
+      left.style.cssText = 'display:flex;align-items:center;';
+      left.appendChild(picker);
+
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = label;
+      nameSpan.title = 'Click to rename, double-click to center';
+      nameSpan.style.cssText = 'cursor:pointer;border-bottom:1px dashed #555;';
+      nameSpan.addEventListener('click', () => {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = group.label || '';
+        input.style.cssText = 'font-size:11px;width:100px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:1px 3px;';
+        const commit = () => {
+          const newName = input.value.trim();
+          if (newName) group.label = newName;
+          syncAnnotationsToServer();
+          updateHighlightsPanel();
+        };
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
+        nameSpan.replaceWith(input);
+        input.focus();
+        input.select();
+      });
+      nameSpan.addEventListener('dblclick', () => focusOnAnnotation(idx));
+      left.appendChild(nameSpan);
+
+      const countSpan = document.createElement('span');
+      countSpan.textContent = ` (${n.toLocaleString()})`;
+      countSpan.style.color = '#888';
+      left.appendChild(countSpan);
+
+      const focusBtn = document.createElement('button');
+      focusBtn.textContent = '⌖';
+      focusBtn.title = 'Center camera on this annotation';
+      focusBtn.style.cssText = 'font-size:12px;cursor:pointer;margin-left:4px;';
+      focusBtn.addEventListener('click', () => focusOnAnnotation(idx));
+      left.appendChild(focusBtn);
+
+      div.appendChild(left);
+
       const btn = document.createElement('button');
       btn.textContent = 'x';
       btn.addEventListener('click', () => removeAnnotationGroup(idx));

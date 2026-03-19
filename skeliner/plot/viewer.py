@@ -506,6 +506,24 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     state_path.write_text(
                         json.dumps(current, indent=2), encoding="utf-8"
                     )
+                elif msg.get("type") == "save_highlight":
+                    # Append user-selected faces as a named annotation
+                    ann = {}
+                    if annotations_path.exists():
+                        ann = json.loads(
+                            annotations_path.read_text(encoding="utf-8")
+                        )
+                    if "highlights" not in ann:
+                        ann["highlights"] = []
+                    p = msg["payload"]
+                    ann["highlights"].append({
+                        "faces": p.get("faces", []),
+                        "color": p.get("color", [1, 0.8, 0]),
+                        "label": p.get("label", "selection"),
+                    })
+                    annotations_path.write_text(
+                        json.dumps(ann), encoding="utf-8"
+                    )
         except Exception:
             pass
         finally:
