@@ -101,10 +101,45 @@
   <span style="color:#888;margin-left:12px;">Remove:</span>
   <button id="removeOrganellesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Organelles</button>
   <button id="removeFusionsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Fusions</button>
+  <span style="color:#888;margin-left:12px;">Skeleton:</span>
+  <button id="skeletonizeBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Skeletonize</button>
+  <button id="skelParamsBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Set Params</button>
   <span style="color:#888;margin-left:12px;">Save:</span>
-  <button id="saveMeshBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Save Mesh</button>
-  <span id="saveStatus" style="font-size:11px;color:#6f6;margin-left:6px;"></span>
+  <button id="saveBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Save</button>
 </div>
+
+<div id="skel-params-dialog" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;border:1px solid #555;border-radius:6px;padding:16px;z-index:1000;font-size:12px;min-width:360px;max-height:80vh;overflow-y:auto;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+    <span style="color:#adf;font-weight:bold;">Skeletonize Parameters</span>
+    <button id="skelParamsClose" style="cursor:pointer;font-size:14px;">x</button>
+  </div>
+  <div id="skelParamsBody" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;align-items:center;"></div>
+  <div style="margin-top:10px;text-align:right;">
+    <button id="skelParamsReset" style="font-size:11px;cursor:pointer;">Reset Defaults</button>
+  </div>
+</div>
+<div id="skel-params-backdrop" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:999;"></div>
+
+<div id="save-dialog" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;border:1px solid #555;border-radius:6px;padding:16px;z-index:1000;font-size:12px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+    <span style="color:#adf;font-weight:bold;">Save</span>
+    <button id="saveDialogClose" style="cursor:pointer;font-size:14px;">x</button>
+  </div>
+  <div style="color:#888;margin-bottom:6px;">Mesh</div>
+  <div style="margin-bottom:12px;">
+    <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:6px 20px;">OBJ</button>
+  </div>
+  <div style="color:#888;margin-bottom:6px;">Skeleton</div>
+  <div style="margin-bottom:12px;">
+    <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:6px 20px;">SWC</button>
+    <button id="saveSkelNpz" style="font-size:12px;cursor:pointer;padding:6px 20px;margin-left:8px;">NPZ</button>
+  </div>
+  <div>
+    <button id="saveAll" style="font-size:12px;cursor:pointer;padding:6px 20px;">All</button>
+  </div>
+  <div id="saveDialogStatus" style="margin-top:8px;font-size:11px;color:#6f6;"></div>
+</div>
+<div id="save-dialog-backdrop" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);z-index:999;"></div>
 
 <div id="selection-info">
   <div><span class="label">Click: select | Shift+click: highlight | Shift+drag: lasso</span></div>
@@ -233,7 +268,18 @@ async function init() {
   document.getElementById('detectFusionsBtn').addEventListener('click', runDetectFusions);
   document.getElementById('removeOrganellesBtn').addEventListener('click', runRemoveOrganelles);
   document.getElementById('removeFusionsBtn').addEventListener('click', runRemoveFusions);
-  document.getElementById('saveMeshBtn').addEventListener('click', runSaveMesh);
+  document.getElementById('saveBtn').addEventListener('click', openSaveDialog);
+  document.getElementById('saveDialogClose').addEventListener('click', closeSaveDialog);
+  document.getElementById('save-dialog-backdrop').addEventListener('click', closeSaveDialog);
+  document.getElementById('saveMeshObj').addEventListener('click', () => doSave('mesh'));
+  document.getElementById('saveSkelSwc').addEventListener('click', () => doSave('swc'));
+  document.getElementById('saveSkelNpz').addEventListener('click', () => doSave('npz'));
+  document.getElementById('saveAll').addEventListener('click', () => doSave('all'));
+  document.getElementById('skeletonizeBtn').addEventListener('click', runSkeletonize);
+  document.getElementById('skelParamsBtn').addEventListener('click', openSkelParams);
+  document.getElementById('skelParamsClose').addEventListener('click', closeSkelParams);
+  document.getElementById('skel-params-backdrop').addEventListener('click', closeSkelParams);
+  document.getElementById('skelParamsReset').addEventListener('click', resetSkelParams);
   window.addEventListener('keydown', (e) => {
     if (e.target !== document.body || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key === 'a') runDetectOrganelles();
@@ -832,27 +878,149 @@ async function runRemoveFusions() {
   } catch (e) { btn.textContent = 'Error'; } finally { btn.disabled = false; }
 }
 
-async function runSaveMesh() {
-  const btn = document.getElementById('saveMeshBtn');
-  const status = document.getElementById('saveStatus');
-  btn.textContent = 'Saving...'; btn.disabled = true; status.textContent = '';
+function openSaveDialog() {
+  document.getElementById('saveDialogStatus').textContent = '';
+  document.getElementById('save-dialog').style.display = 'block';
+  document.getElementById('save-dialog-backdrop').style.display = 'block';
+}
+
+function closeSaveDialog() {
+  document.getElementById('save-dialog').style.display = 'none';
+  document.getElementById('save-dialog-backdrop').style.display = 'none';
+}
+
+function getSkelName() {
+  const names = Object.keys(skelGroups);
+  return names.includes('skeleton') ? 'skeleton' : names[0];
+}
+
+async function downloadFile(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) { const err = await resp.json(); throw new Error(err.error || 'Export failed'); }
+  const blob = await resp.blob();
+  const fname = resp.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'file';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = fname; a.click();
+  URL.revokeObjectURL(a.href);
+  return fname;
+}
+
+async function doSave(mode) {
+  const statusEl = document.getElementById('saveDialogStatus');
+  statusEl.textContent = 'Saving...'; statusEl.style.color = '#adf';
   try {
-    const resp = await fetch('/export_mesh');
-    if (!resp.ok) {
-      const err = await resp.json();
-      throw new Error(err.error || 'Export failed');
+    const saved = [];
+    if (mode === 'mesh' || mode === 'all') {
+      saved.push(await downloadFile('/export_mesh'));
     }
-    const blob = await resp.blob();
-    const name = resp.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'mesh.obj';
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = name; a.click();
-    URL.revokeObjectURL(url);
-    status.textContent = `Downloaded: ${name}`;
-    status.style.color = '#6f6';
+    if (mode === 'swc' || mode === 'all') {
+      const name = getSkelName();
+      if (!name) throw new Error('No skeleton');
+      saved.push(await downloadFile(`/export_skeleton?name=${encodeURIComponent(name)}&format=swc`));
+    }
+    if (mode === 'npz' || mode === 'all') {
+      const name = getSkelName();
+      if (!name) throw new Error('No skeleton');
+      saved.push(await downloadFile(`/export_skeleton?name=${encodeURIComponent(name)}&format=npz`));
+    }
+    statusEl.textContent = `Downloaded: ${saved.join(', ')}`;
+    statusEl.style.color = '#6f6';
   } catch (e) {
-    status.textContent = e.message || 'Error'; status.style.color = '#f66';
-  } finally { btn.textContent = 'Save Mesh'; btn.disabled = false; }
+    statusEl.textContent = e.message || 'Error';
+    statusEl.style.color = '#f66';
+  }
+}
+
+// ── Skeletonize ───────────────────────────────────────────────────
+const SKEL_DEFAULTS = {
+  geodesic_shell_count: { value: 1000, type: 'int', label: 'Shell count' },
+  min_shell_vertices: { value: 6, type: 'int', label: 'Min shell vertices' },
+  max_shell_width_factor: { value: 50, type: 'int', label: 'Max shell width factor' },
+  detect_soma: { value: true, type: 'bool', label: 'Detect soma' },
+  soma_radius_percentile_threshold: { value: 99.9, type: 'float', label: 'Soma radius percentile' },
+  soma_radius_distance_factor: { value: 4, type: 'float', label: 'Soma radius dist factor' },
+  soma_min_nodes: { value: 3, type: 'int', label: 'Soma min nodes' },
+  bridge_gaps: { value: true, type: 'bool', label: 'Bridge gaps' },
+  collapse_soma: { value: true, type: 'bool', label: 'Collapse soma' },
+  collapse_soma_dist_factor: { value: 1.2, type: 'float', label: 'Collapse soma dist factor' },
+  collapse_soma_radius_factor: { value: 0.2, type: 'float', label: 'Collapse soma radius factor' },
+  prune_tiny_neurites: { value: true, type: 'bool', label: 'Prune tiny neurites' },
+  prune_tip_extent_factor: { value: 1.2, type: 'float', label: 'Prune tip extent factor' },
+  prune_stem_extent_factor: { value: 3.0, type: 'float', label: 'Prune stem extent factor' },
+  merge_nodes_overlap_fraction: { value: 0.8, type: 'float', label: 'Merge nodes overlap frac' },
+  split_elongated_shells: { value: false, type: 'bool', label: 'Split elongated shells' },
+  split_aspect_thr: { value: 3.0, type: 'float', label: 'Split aspect threshold' },
+  postprocess: { value: true, type: 'bool', label: 'Postprocess' },
+};
+let skelParams = {};
+
+function getSkelParams() {
+  const params = {};
+  for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
+    if (key in skelParams && skelParams[key] !== def.value) {
+      params[key] = skelParams[key];
+    }
+  }
+  return params;
+}
+
+function openSkelParams() {
+  const body = document.getElementById('skelParamsBody');
+  body.innerHTML = '';
+  for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
+    const val = key in skelParams ? skelParams[key] : def.value;
+    const label = document.createElement('label');
+    label.textContent = def.label;
+    label.style.color = '#ccc';
+    body.appendChild(label);
+
+    if (def.type === 'bool') {
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = val; cb.dataset.key = key;
+      cb.addEventListener('change', () => { skelParams[key] = cb.checked; });
+      body.appendChild(cb);
+    } else {
+      const inp = document.createElement('input');
+      inp.type = 'text'; inp.value = val; inp.dataset.key = key;
+      inp.style.cssText = 'width:80px;font-size:11px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:2px 4px;';
+      inp.addEventListener('change', () => {
+        skelParams[key] = def.type === 'int' ? parseInt(inp.value) : parseFloat(inp.value);
+      });
+      body.appendChild(inp);
+    }
+  }
+  document.getElementById('skel-params-dialog').style.display = 'block';
+  document.getElementById('skel-params-backdrop').style.display = 'block';
+}
+
+function closeSkelParams() {
+  document.getElementById('skel-params-dialog').style.display = 'none';
+  document.getElementById('skel-params-backdrop').style.display = 'none';
+}
+
+function resetSkelParams() {
+  skelParams = {};
+  openSkelParams();
+}
+
+async function runSkeletonize() {
+  const btn = document.getElementById('skeletonizeBtn');
+  btn.textContent = 'Running...'; btn.disabled = true;
+  try {
+    const resp = await fetch('/skeletonize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ params: getSkelParams() }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      btn.textContent = `${data.nNodes}n ${data.nEdges}e`;
+      updateLoadedPanel();
+    } else {
+      btn.textContent = data.error || 'Error';
+    }
+  } catch (e) { btn.textContent = 'Error'; }
+  finally { btn.disabled = false; }
 }
 
 function syncManualHighlight() {

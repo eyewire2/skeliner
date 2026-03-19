@@ -818,6 +818,43 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             headers={"Content-Disposition": f'attachment; filename="{filename}.{fmt}"'},
         )
 
+    async def export_skeleton(request):
+        """Export a skeleton as a downloadable SWC or NPZ file."""
+        from starlette.responses import Response
+        import tempfile
+
+        name = request.query_params.get("name")
+        fmt = request.query_params.get("format", "swc")
+        if not name or name not in skeleton_states:
+            return JSONResponse(
+                {"ok": False, "error": "No skeleton found"}, status_code=400
+            )
+        sstate = skeleton_states[name]
+        skel = sstate.get("skeleton")
+        if skel is None:
+            return JSONResponse(
+                {"ok": False, "error": "Skeleton has no exportable data"},
+                status_code=400,
+            )
+
+        from skeliner.io import to_swc, to_npz
+
+        loop = asyncio.get_event_loop()
+        tmp = Path(tempfile.mktemp(suffix=f".{fmt}"))
+        if fmt == "npz":
+            await loop.run_in_executor(None, lambda: to_npz(skel, tmp))
+        else:
+            await loop.run_in_executor(None, lambda: to_swc(skel, tmp))
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+
+        stem = Path(name).stem if name else "skeleton"
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+        )
+
     async def detect_holes(request):
         """Run hole detection and write results to annotations."""
         if mesh_state["mesh"] is None:
@@ -863,6 +900,47 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         ann["edge_groups"].extend(edge_groups)
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nHoles": n_holes})
+
+    async def run_skeletonize(request):
+        """Run skeletonization on the current mesh."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.skeletonize import skeletonize
+
+        body = await request.json()
+        params = body.get("params", {})
+        mesh = mesh_state["mesh"]
+
+        loop = asyncio.get_event_loop()
+        skel = await loop.run_in_executor(
+            None, lambda: skeletonize(mesh, verbose=True, **params)
+        )
+        print(f"Skeletonized: {len(skel.nodes)} nodes, {len(skel.edges)} edges")
+
+        # Add as a skeleton layer
+        skel_name = "skeleton"
+        color = SKEL_COLORS[len(skeleton_states) % len(SKEL_COLORS)]
+        buffers = _skeleton_to_buffers(skel, mesh_state["centroid"])
+        buffers["color"] = color
+
+        skeleton_states[skel_name] = {
+            "skeleton": skel,
+            "path": "",
+            "buffers": buffers,
+            "color": color,
+        }
+
+        await broadcast({"type": "skeleton_loaded", "payload": {
+            "name": skel_name, **buffers
+        }})
+        return JSONResponse({
+            "ok": True,
+            "nNodes": len(skel.nodes),
+            "nEdges": len(skel.edges),
+        })
 
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
@@ -993,6 +1071,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove_organelles", do_remove_organelles, methods=["POST"]),
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
+            Route("/export_skeleton", export_skeleton, methods=["GET"]),
+            Route("/skeletonize", run_skeletonize, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],
         on_startup=[on_startup],
