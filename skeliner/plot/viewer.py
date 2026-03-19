@@ -443,18 +443,53 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return JSONResponse({"ok": True})
 
     async def detect_organelles(request):
-        """Run organelle detection and write results to annotations."""
+        """Run organelle detection matching remove_organelles() exactly."""
         if mesh_state["mesh"] is None:
             return JSONResponse({"ok": False, "error": "No mesh loaded"}, status_code=400)
 
         from skeliner.pre import _outward_dot, _filter_small_clusters
+        import igraph as ig
+
         mesh = mesh_state["mesh"]
 
         def _run():
+            # Step 1 – outward dot scoring
             median_edge = float(np.median(mesh.edges_unique_length))
             radius = 5.0 * median_edge
-            dots = _outward_dot(mesh, radius=radius)
-            organelle = _filter_small_clusters(mesh, dots < 0, min_cluster_size=5)
+            outward_dots = _outward_dot(mesh, radius=radius)
+            organelle = _filter_small_clusters(
+                mesh, outward_dots < 0, min_cluster_size=5
+            )
+
+            # Step 3 – flag internal disconnected fragments
+            edge_set = set()
+            for face in mesh.faces:
+                for i in range(3):
+                    a, b = int(face[i]), int(face[(i + 1) % 3])
+                    edge_set.add((min(a, b), max(a, b)))
+            g = ig.Graph(
+                n=len(mesh.vertices),
+                edges=list(edge_set),
+                directed=False,
+            )
+            comps = g.connected_components()
+            main_ci = max(range(len(comps)), key=lambda i: len(comps[i]))
+
+            if len(comps) > 1:
+                vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
+                for ci, cl in enumerate(comps):
+                    for v in cl:
+                        vert_comp[v] = ci
+                face_comp = vert_comp[mesh.faces[:, 0]]
+                for ci in range(len(comps)):
+                    if ci == main_ci:
+                        continue
+                    comp_face_idx = np.where(face_comp == ci)[0]
+                    if len(comp_face_idx) == 0:
+                        continue
+                    if outward_dots[comp_face_idx].mean() < 0:
+                        organelle[comp_face_idx] = True
+
             return [int(fi) for fi in np.where(organelle)[0]]
 
         loop = asyncio.get_event_loop()
@@ -465,6 +500,47 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         ]}
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nFaces": len(faces)})
+
+    async def detect_holes(request):
+        """Run hole detection and write results to annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import find_holes
+
+        mesh = mesh_state["mesh"]
+        centroid = mesh_state["centroid"]
+
+        def _run():
+            loops = find_holes(mesh)
+            verts = np.asarray(mesh.vertices, dtype=np.float32)
+            colors = [
+                [0.2, 0.6, 1.0], [0.1, 0.9, 0.4], [0.9, 0.2, 0.8],
+                [1.0, 0.9, 0.1], [1.0, 0.4, 0.1], [0.4, 0.9, 0.9],
+            ]
+            edge_groups = []
+            for i, loop in enumerate(loops):
+                color = colors[i % len(colors)]
+                segments = []
+                for j in range(len(loop)):
+                    a = (verts[loop[j]] - centroid).tolist()
+                    b = (verts[loop[(j + 1) % len(loop)]] - centroid).tolist()
+                    segments.append([a, b])
+                edge_groups.append({
+                    "segments": segments,
+                    "color": color,
+                    "label": f"hole {i} ({len(loop)}v)",
+                })
+            return edge_groups, len(loops)
+
+        ev_loop = asyncio.get_event_loop()
+        edge_groups, n_holes = await ev_loop.run_in_executor(None, _run)
+
+        ann = {"edge_groups": edge_groups}
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        return JSONResponse({"ok": True, "nHoles": n_holes})
 
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
@@ -588,6 +664,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
+            Route("/detect_holes", detect_holes, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],
         on_startup=[on_startup],

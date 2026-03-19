@@ -49,6 +49,11 @@
     justify-content: center; align-items: center;
     font-size: 24px; color: #4af;
   }
+  #detect-panel {
+    position: absolute; bottom: 50px; left: 10px;
+    background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
+    font-size: 12px;
+  }
   #empty-hint {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
     font-size: 16px; color: #555; text-align: center; line-height: 2;
@@ -78,7 +83,12 @@
   <label style="margin-left:8px;">Pick: <select id="pickTarget" style="font-size:11px;">
     <option value="mesh">Mesh</option>
   </select></label>
-  <button id="detectBtn" style="font-size:11px;cursor:pointer;margin-left:8px;">Detect Organelles (A)</button>
+</div>
+
+<div id="detect-panel">
+  <div style="color:#888;margin-bottom:4px;">Detect:</div>
+  <button id="detectBtn" style="font-size:11px;cursor:pointer;">Organelles (A)</button>
+  <button id="detectHolesBtn" style="font-size:11px;cursor:pointer;margin-left:4px;">Holes (H)</button>
 </div>
 
 <div id="selection-info">
@@ -126,6 +136,7 @@ const STATE_DEBOUNCE_MS = 300;
 
 let annotationMeshes = [];
 let markerMeshes = [];
+let edgeGroupMeshes = [];
 let manualHighlightFaces = new Set();
 let manualHighlightMesh = null;
 
@@ -196,10 +207,11 @@ async function init() {
   renderer.domElement.addEventListener('pointerdown', onRecenter);
 
   document.getElementById('detectBtn').addEventListener('click', runDetectOrganelles);
+  document.getElementById('detectHolesBtn').addEventListener('click', runDetectHoles);
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'a' && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.target === document.body) {
-      runDetectOrganelles();
-    }
+    if (e.target !== document.body || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key === 'a') runDetectOrganelles();
+    if (e.key === 'h') runDetectHoles();
   });
 
   document.getElementById('removeMesh').addEventListener('click', () => removeItem('mesh'));
@@ -730,6 +742,16 @@ async function runDetectOrganelles() {
   } catch (e) { btn.textContent = 'Error (A)'; } finally { btn.disabled = false; }
 }
 
+async function runDetectHoles() {
+  const btn = document.getElementById('detectHolesBtn');
+  btn.textContent = 'Detecting...'; btn.disabled = true;
+  try {
+    const resp = await fetch('/detect_holes', { method: 'POST' });
+    const data = await resp.json();
+    btn.textContent = data.ok ? `Holes: ${data.nHoles} (H)` : 'Error (H)';
+  } catch (e) { btn.textContent = 'Error (H)'; } finally { btn.disabled = false; }
+}
+
 function syncManualHighlight() {
   const payload = { manualHighlight: Array.from(manualHighlightFaces) };
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'manual_highlight', payload }));
@@ -842,6 +864,8 @@ function applyAnnotations(annotations) {
   annotationMeshes = [];
   for (const m of markerMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
   markerMeshes = [];
+  for (const m of edgeGroupMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+  edgeGroupMeshes = [];
   currentAnnotations = annotations;
   updateHighlightsPanel();
   if (!annotations) return;
@@ -879,7 +903,7 @@ function applyAnnotations(annotations) {
       markerMeshes.push(sphere);
     }
   }
-  // Edges between markers
+  // Flat edges (legacy)
   if (annotations.edges) {
     for (const edge of annotations.edges) {
       const a = edge[0], b = edge[1];
@@ -891,6 +915,25 @@ function applyAnnotations(annotations) {
       const line = new THREE.LineSegments(geo, mat);
       scene.add(line);
       markerMeshes.push(line);
+    }
+  }
+  // Edge groups (grouped line segments with labels)
+  if (annotations.edge_groups) {
+    for (const group of annotations.edge_groups) {
+      const segs = group.segments || []; if (segs.length === 0) continue;
+      const color = group.color || [1,1,1];
+      const pts = new Float32Array(segs.length * 6);
+      for (let i = 0; i < segs.length; i++) {
+        const a = segs[i][0], b = segs[i][1];
+        pts[i*6] = a[0]; pts[i*6+1] = a[1]; pts[i*6+2] = a[2];
+        pts[i*6+3] = b[0]; pts[i*6+4] = b[1]; pts[i*6+5] = b[2];
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color[0], color[1], color[2]), linewidth: 2 });
+      const line = new THREE.LineSegments(geo, mat);
+      scene.add(line);
+      edgeGroupMeshes.push(line);
     }
   }
 }
@@ -930,13 +973,45 @@ function focusOnAnnotation(idx) {
   scheduleStateUpdate();
 }
 
+function focusOnEdgeGroup(idx) {
+  const line = edgeGroupMeshes[idx];
+  if (!line) return;
+  line.geometry.computeBoundingBox();
+  const box = line.geometry.boundingBox;
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const radius = size.length() / 2;
+
+  const offset = camera.position.clone().sub(controls.target).normalize();
+  controls.target.copy(center);
+  camera.position.copy(center).addScaledVector(offset, Math.max(radius * 3, 500));
+  controls.update();
+  scheduleStateUpdate();
+}
+
+function removeEdgeGroup(idx) {
+  if (!currentAnnotations || !currentAnnotations.edge_groups) return;
+  currentAnnotations.edge_groups.splice(idx, 1);
+  if (edgeGroupMeshes[idx]) {
+    scene.remove(edgeGroupMeshes[idx]);
+    edgeGroupMeshes[idx].geometry.dispose();
+    edgeGroupMeshes[idx].material.dispose();
+    edgeGroupMeshes.splice(idx, 1);
+  }
+  updateHighlightsPanel();
+  syncAnnotationsToServer();
+}
+
 function updateHighlightsPanel() {
   const list = document.getElementById('hlList');
   list.innerHTML = '';
   const clearRow = document.getElementById('hlClearAllRow');
   const hasHighlights = currentAnnotations && currentAnnotations.highlights && currentAnnotations.highlights.length > 0;
   const hasMarkers = currentAnnotations && currentAnnotations.markers && currentAnnotations.markers.length > 0;
-  if (!hasHighlights && !hasMarkers) {
+  const hasEdgeGroups = currentAnnotations && currentAnnotations.edge_groups && currentAnnotations.edge_groups.length > 0;
+  if (!hasHighlights && !hasMarkers && !hasEdgeGroups) {
     clearRow.style.display = 'none';
     return;
   }
@@ -1030,6 +1105,74 @@ function updateHighlightsPanel() {
       list.appendChild(div);
     });
   }
+  if (hasEdgeGroups) {
+    currentAnnotations.edge_groups.forEach((group, idx) => {
+      const segs = group.segments || [];
+      if (segs.length === 0) return;
+      const color = group.color || [1, 1, 1];
+      const label = group.label || `Edges ${idx}`;
+      const div = document.createElement('div');
+      div.className = 'hl-item';
+
+      const picker = document.createElement('input');
+      picker.type = 'color';
+      picker.className = 'hl-color-input';
+      picker.value = rgbToHex(color);
+      picker.title = 'Click to change color';
+      picker.addEventListener('input', () => {
+        const nc = hexToRgb01(picker.value);
+        group.color = nc;
+        if (edgeGroupMeshes[idx]) {
+          edgeGroupMeshes[idx].material.color.setRGB(nc[0], nc[1], nc[2]);
+          edgeGroupMeshes[idx].material.needsUpdate = true;
+        }
+      });
+      picker.addEventListener('change', () => syncAnnotationsToServer());
+
+      const left = document.createElement('span');
+      left.style.cssText = 'display:flex;align-items:center;';
+      left.appendChild(picker);
+
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = label;
+      nameSpan.title = 'Click to rename, double-click to center';
+      nameSpan.style.cssText = 'cursor:pointer;border-bottom:1px dashed #555;';
+      nameSpan.addEventListener('click', () => {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = group.label || '';
+        input.style.cssText = 'font-size:11px;width:100px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:1px 3px;';
+        const commit = () => {
+          const newName = input.value.trim();
+          if (newName) group.label = newName;
+          syncAnnotationsToServer();
+          updateHighlightsPanel();
+        };
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
+        nameSpan.replaceWith(input);
+        input.focus();
+        input.select();
+      });
+      nameSpan.addEventListener('dblclick', () => focusOnEdgeGroup(idx));
+      left.appendChild(nameSpan);
+
+      const focusBtn = document.createElement('button');
+      focusBtn.textContent = '⌖';
+      focusBtn.title = 'Center camera on this edge group';
+      focusBtn.style.cssText = 'font-size:12px;cursor:pointer;margin-left:4px;';
+      focusBtn.addEventListener('click', () => focusOnEdgeGroup(idx));
+      left.appendChild(focusBtn);
+
+      div.appendChild(left);
+
+      const btn = document.createElement('button');
+      btn.textContent = 'x';
+      btn.addEventListener('click', () => removeEdgeGroup(idx));
+      div.appendChild(btn);
+      list.appendChild(div);
+    });
+  }
 }
 
 function removeMarker(idx) {
@@ -1073,7 +1216,9 @@ function clearAllAnnotations() {
   annotationMeshes = [];
   for (const m of markerMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
   markerMeshes = [];
-  currentAnnotations = { highlights: [], markers: [] };
+  for (const m of edgeGroupMeshes) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+  edgeGroupMeshes = [];
+  currentAnnotations = { highlights: [], markers: [], edge_groups: [] };
   updateHighlightsPanel();
   fetch('/update_annotations', {
     method: 'POST',
