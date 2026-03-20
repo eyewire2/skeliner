@@ -1603,22 +1603,20 @@ def find_soma(
 def find_disconnected(
     mesh: trimesh.Trimesh,
     *,
-    min_faces: int = 100,
     verbose: bool = False,
     _precomputed_soma: Soma | None = None,
 ) -> list[list[int]]:
     """Detect disconnected mesh components from segmentation errors.
 
-    Returns substantial disconnected components — broken neurite segments
-    that are separate from the main mesh.  Tiny fragments, soma-region
-    debris, and organelle-like blobs are excluded.
+    Returns disconnected components — broken neurite segments that are
+    separate from the main mesh.  Soma-region components and components
+    enclosed by the main mesh (residual organelles) are excluded.
+    Should be run after remove_organelles.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Input mesh.
-    min_faces : int, default 100
-        Minimum face count for a component to qualify.
     verbose : bool, default False
         Print summary.
     _precomputed_soma : Soma or None
@@ -1640,11 +1638,14 @@ def find_disconnected(
         else find_soma(mesh, verbose=verbose)
     )
 
-    # KD-tree of main-component vertices for proximity checks
-    main_verts = np.unique(mesh.faces[np.where(labels == main)[0]])
-    main_tree = KDTree(mesh.vertices[main_verts])
+    # Build KD-tree of main-component face centroids + normals
+    # for inside/outside classification
+    main_face_idx = np.where(labels == main)[0]
+    main_centroids = mesh.triangles_center[main_face_idx]
+    main_normals = mesh.face_normals[main_face_idx]
+    main_tree = KDTree(main_centroids)
 
-    # Collect non-main components that meet the size threshold
+    # Collect non-main components
     comp_faces: dict[int, list[int]] = {}
     for fi in range(n_faces):
         cid = int(labels[fi])
@@ -1654,9 +1655,11 @@ def find_disconnected(
 
     components = []
     n_soma_excluded = 0
-    n_organelle_excluded = 0
+    n_enclosed_excluded = 0
     for cid, fis in comp_faces.items():
-        if len(fis) < min_faces:
+        # Need at least 7 faces: 3 for each tip + 1 body face to
+        # bridge back to two other parts
+        if len(fis) < 7:
             continue
         verts = np.unique(mesh.faces[fis])
         coords = mesh.vertices[verts]
@@ -1668,17 +1671,25 @@ def find_disconnected(
                 n_soma_excluded += 1
                 continue
 
-        # Exclude organelle-like components: blob-shaped (PCA < 5) AND
-        # touching or very close to the main mesh (likely enclosed).
-        if len(verts) >= 4:
-            centered = coords - centroid
-            evals = np.linalg.eigh(np.cov(centered.T))[0]
-            pca_ratio = evals.max() / (np.sort(evals)[-2] + 1e-10)
-            if pca_ratio < 5.0:
-                dists_to_main, _ = main_tree.query(coords)
-                if dists_to_main.min() < 1000:
-                    n_organelle_excluded += 1
-                    continue
+        # Exclude components enclosed by the main mesh.
+        # For each component vertex, find the nearest main mesh face and
+        # check which side of that face the vertex is on: if the vector
+        # from the main face centroid to the vertex is opposite the main
+        # face normal, the vertex is on the interior side.
+        _, nn_idx = main_tree.query(coords)
+        vecs = coords - main_centroids[nn_idx]
+        dots = np.einsum("ij,ij->i", vecs, main_normals[nn_idx])
+        # Component is enclosed if the majority of vertices are on the
+        # inward side (dot < 0)
+        if (dots < 0).sum() > len(dots) / 2:
+            n_enclosed_excluded += 1
+            if verbose:
+                print(
+                    f"[skeliner.pre]   Excluded enclosed component "
+                    f"({len(fis):,} faces, "
+                    f"{(dots < 0).sum()}/{len(dots)} verts inside)"
+                )
+            continue
 
         components.append((cid, fis))
 
@@ -1690,12 +1701,12 @@ def find_disconnected(
         excluded = []
         if n_soma_excluded:
             excluded.append(f"{n_soma_excluded} in soma")
-        if n_organelle_excluded:
-            excluded.append(f"{n_organelle_excluded} organelle-like")
+        if n_enclosed_excluded:
+            excluded.append(f"{n_enclosed_excluded} enclosed")
         exc_msg = f", {', '.join(excluded)} excluded" if excluded else ""
         print(
             f"[skeliner.pre] Disconnected: {len(components)} components, "
-            f"{total:,} faces (min_faces={min_faces}{exc_msg})"
+            f"{total:,} faces{exc_msg}"
         )
 
     return [fis for _, fis in components]
@@ -1740,7 +1751,6 @@ def find_gaps(
     # Get disconnected components (reuse filtering logic)
     disc = find_disconnected(
         mesh,
-        min_faces=min_faces,
         verbose=verbose,
         _precomputed_soma=_precomputed_soma,
     )
