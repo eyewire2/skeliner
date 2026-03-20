@@ -903,9 +903,28 @@ def _zipper_stitch(
     loop_a: list[int],
     loop_b: list[int],
     vert_to_faces: list[list[int]],
+    new_verts: list[np.ndarray] | None = None,
 ) -> list[list[int]]:
-    """Zipper-stitch two oriented boundary loops, returning new triangles."""
+    """Zipper-stitch two boundary loops, returning new triangles.
+
+    When the gap between loops is much larger than the mesh's median
+    edge length, intermediate vertex rings are interpolated so that
+    the resulting faces match the typical mesh resolution.
+
+    Parameters
+    ----------
+    new_verts : list or None
+        Mutable list to which any newly created vertex coordinates are
+        appended.  Vertex indices in the returned triangles reference
+        ``mesh.vertices`` for existing verts and
+        ``len(mesh.vertices) + i`` for ``new_verts[i]``.
+    """
     from scipy.spatial import cKDTree
+
+    if new_verts is None:
+        new_verts_local: list[np.ndarray] = []
+    else:
+        new_verts_local = new_verts
 
     pts_a = mesh.vertices[loop_a]
     pts_b = mesh.vertices[loop_b]
@@ -941,35 +960,119 @@ def _zipper_stitch(
     la = la[start_a:] + la[:start_a]
     lb = lb[start_b:] + lb[:start_b]
 
-    # Zipper walk
-    na, nb = len(la), len(lb)
-    triangles: list[list[int]] = []
-    ia, ib, steps_a, steps_b = 0, 0, 0, 0
+    # ── Determine if intermediate rings are needed ────────────────
+    gap_dist = float(np.linalg.norm(ca - cb))
+    median_edge = float(np.median(mesh.edges_unique_length))
+    n_rings = max(0, int(round(gap_dist / median_edge)) - 1)
 
-    while steps_a < na or steps_b < nb:
-        ia_next = (ia + 1) % na
-        ib_next = (ib + 1) % nb
-        can_a, can_b = steps_a < na, steps_b < nb
+    if n_rings > 0:
+        # Build matched correspondences: resample both loops to the
+        # same vertex count, then interpolate intermediate rings.
+        n_pts = max(len(la), len(lb))
+        pts_la = mesh.vertices[la]
+        pts_lb = mesh.vertices[lb]
 
-        if can_a and can_b:
-            da = float(
-                np.linalg.norm(mesh.vertices[la[ia_next]] - mesh.vertices[lb[ib]])
-            )
-            db = float(
-                np.linalg.norm(mesh.vertices[la[ia]] - mesh.vertices[lb[ib_next]])
-            )
-            advance_a = da <= db
-        else:
-            advance_a = can_a
+        # Resample each loop to n_pts evenly spaced points
+        def _resample(pts, n):
+            """Resample closed loop to *n* evenly spaced points."""
+            closed = np.vstack([pts, pts[:1]])
+            seg_lens = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+            cum = np.concatenate([[0], np.cumsum(seg_lens)])
+            total = cum[-1]
+            targets = np.linspace(0, total, n, endpoint=False)
+            resampled = np.empty((n, 3))
+            for i, t in enumerate(targets):
+                idx = np.searchsorted(cum, t, side="right") - 1
+                idx = min(idx, len(pts) - 1)
+                frac = (t - cum[idx]) / max(seg_lens[idx], 1e-10)
+                nxt = (idx + 1) % len(pts)
+                resampled[i] = pts[idx] * (1 - frac) + pts[nxt] * frac
+            return resampled
 
-        if advance_a:
-            triangles.append([la[ia], la[ia_next], lb[ib]])
-            ia = ia_next
-            steps_a += 1
-        else:
-            triangles.append([la[ia], lb[ib_next], lb[ib]])
-            ib = ib_next
-            steps_b += 1
+        ring_a = _resample(pts_la, n_pts)
+        ring_b = _resample(pts_lb, n_pts)
+
+        # Create intermediate rings as new vertices
+        n_existing = len(mesh.vertices)
+        rings: list[list[int]] = []  # each ring is a list of vert indices
+        rings.append(la)  # ring 0 = loop_a (existing verts)
+        for r in range(1, n_rings + 1):
+            t = r / (n_rings + 1)
+            ring_pts = ring_a * (1 - t) + ring_b * t
+            ring_ids = []
+            for pt in ring_pts:
+                ring_ids.append(n_existing + len(new_verts_local))
+                new_verts_local.append(pt)
+            rings.append(ring_ids)
+        rings.append(lb)  # last ring = loop_b (existing verts)
+
+        # Stitch consecutive rings
+        triangles: list[list[int]] = []
+
+        def _vpos(vid):
+            if vid < n_existing:
+                return mesh.vertices[vid]
+            return new_verts_local[vid - n_existing]
+
+        for ri in range(len(rings) - 1):
+            ra_ids = rings[ri]
+            rb_ids = rings[ri + 1]
+            na_r, nb_r = len(ra_ids), len(rb_ids)
+            ia, ib, sa, sb = 0, 0, 0, 0
+            while sa < na_r or sb < nb_r:
+                ia_n = (ia + 1) % na_r
+                ib_n = (ib + 1) % nb_r
+                can_a, can_b = sa < na_r, sb < nb_r
+                if can_a and can_b:
+                    da = float(np.linalg.norm(
+                        _vpos(ra_ids[ia_n]) - _vpos(rb_ids[ib])))
+                    db = float(np.linalg.norm(
+                        _vpos(ra_ids[ia]) - _vpos(rb_ids[ib_n])))
+                    adv_a = da <= db
+                else:
+                    adv_a = can_a
+                if adv_a:
+                    triangles.append([ra_ids[ia], ra_ids[ia_n], rb_ids[ib]])
+                    ia = ia_n
+                    sa += 1
+                else:
+                    triangles.append([ra_ids[ia], rb_ids[ib_n], rb_ids[ib]])
+                    ib = ib_n
+                    sb += 1
+    else:
+        # Direct zipper (gap is small enough)
+        na, nb = len(la), len(lb)
+        triangles: list[list[int]] = []
+        ia, ib, steps_a, steps_b = 0, 0, 0, 0
+
+        while steps_a < na or steps_b < nb:
+            ia_next = (ia + 1) % na
+            ib_next = (ib + 1) % nb
+            can_a, can_b = steps_a < na, steps_b < nb
+
+            if can_a and can_b:
+                da = float(
+                    np.linalg.norm(
+                        mesh.vertices[la[ia_next]] - mesh.vertices[lb[ib]]
+                    )
+                )
+                db = float(
+                    np.linalg.norm(
+                        mesh.vertices[la[ia]] - mesh.vertices[lb[ib_next]]
+                    )
+                )
+                advance_a = da <= db
+            else:
+                advance_a = can_a
+
+            if advance_a:
+                triangles.append([la[ia], la[ia_next], lb[ib]])
+                ia = ia_next
+                steps_a += 1
+            else:
+                triangles.append([la[ia], lb[ib_next], lb[ib]])
+                ib = ib_next
+                steps_b += 1
 
     # Orient consistently with surrounding mesh
     ref_fis: list[int] = []
@@ -977,10 +1080,16 @@ def _zipper_stitch(
         ref_fis.extend(vert_to_faces[vi][:5])
     if ref_fis:
         ref_n = mesh.face_normals[ref_fis].mean(axis=0)
+
+        def _vpos(vid):
+            if vid < len(mesh.vertices):
+                return mesh.vertices[vid]
+            return new_verts_local[vid - len(mesh.vertices)]
+
         tri_normals = [
             np.cross(
-                mesh.vertices[t[1]] - mesh.vertices[t[0]],
-                mesh.vertices[t[2]] - mesh.vertices[t[0]],
+                _vpos(t[1]) - _vpos(t[0]),
+                _vpos(t[2]) - _vpos(t[0]),
             )
             for t in triangles
         ]
@@ -1006,8 +1115,9 @@ def _stitch_and_rebuild(
                 vert_to_faces[int(v)].append(fi)
 
     all_stitch: list[list[int]] = []
+    new_verts: list[np.ndarray] = []
     for loop_a, loop_b in loop_pairs:
-        tris = _zipper_stitch(mesh, loop_a, loop_b, vert_to_faces)
+        tris = _zipper_stitch(mesh, loop_a, loop_b, vert_to_faces, new_verts)
         all_stitch.extend(tris)
         if verbose:
             print(
@@ -1020,6 +1130,12 @@ def _stitch_and_rebuild(
         keep[fi] = False
     kept_faces = mesh.faces[keep]
 
+    # Combine existing + new vertices
+    if new_verts:
+        all_vertices = np.vstack([mesh.vertices, np.array(new_verts)])
+    else:
+        all_vertices = mesh.vertices.copy()
+
     if all_stitch:
         stitch_faces = np.array(all_stitch, dtype=np.int64)
         all_faces = np.vstack([kept_faces, stitch_faces])
@@ -1027,7 +1143,7 @@ def _stitch_and_rebuild(
         all_faces = kept_faces
 
     result = trimesh.Trimesh(
-        vertices=mesh.vertices.copy(),
+        vertices=all_vertices,
         faces=all_faces,
         process=False,
     )
@@ -1589,7 +1705,7 @@ def find_gaps(
     mesh: trimesh.Trimesh,
     *,
     min_faces: int = 100,
-    tip_radius_factor: float = 2.0,
+    tip_rings: int = 3,
     verbose: bool = False,
     _precomputed_soma: Soma | None = None,
 ) -> list[tuple[list[int], list[int], float]]:
@@ -1604,9 +1720,9 @@ def find_gaps(
         Input mesh.
     min_faces : int, default 100
         Minimum face count for a disconnected component to qualify.
-    tip_radius_factor : float, default 2.0
-        Tip faces are collected within ``tip_radius_factor × gap_distance``
-        of the closest point on each side.
+    tip_rings : int, default 3
+        Number of face-graph BFS rings from the closest face to
+        collect as tip faces on each side of a gap.
     verbose : bool, default False
         Print summary.
     _precomputed_soma : Soma or None
@@ -1663,10 +1779,45 @@ def find_gaps(
     disc_cids = [int(labels[fis[0]]) for fis in disc]
     all_cids = [main] + disc_cids
 
-    def _tip_faces(comp_fi, tip_pt, radius):
+    # Build face adjacency for BFS-based tip selection
+    from collections import deque as _deque
+
+    edge_to_faces_gap: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi, face in enumerate(mesh.faces):
+        for i in range(3):
+            e = (
+                min(int(face[i]), int(face[(i + 1) % 3])),
+                max(int(face[i]), int(face[(i + 1) % 3])),
+            )
+            edge_to_faces_gap[e].append(fi)
+
+    face_adj: dict[int, list[int]] = defaultdict(list)
+    for e, fis_e in edge_to_faces_gap.items():
+        for i in range(len(fis_e)):
+            for j in range(i + 1, len(fis_e)):
+                face_adj[fis_e[i]].append(fis_e[j])
+                face_adj[fis_e[j]].append(fis_e[i])
+
+    def _tip_faces_bfs(comp_fi, tip_vert_idx, n_rings=tip_rings):
+        """BFS on face graph from the face nearest to tip vertex."""
+        comp_set = set(comp_fi.tolist())
+        vcoord = mesh.vertices[tip_vert_idx]
         centroids = mesh.vertices[mesh.faces[comp_fi]].mean(axis=1)
-        mask = np.linalg.norm(centroids - tip_pt, axis=1) < radius
-        return comp_fi[mask].tolist()
+        seed_local = int(np.argmin(np.linalg.norm(centroids - vcoord, axis=1)))
+        seed = int(comp_fi[seed_local])
+        visited: set[int] = {seed}
+        frontier: set[int] = {seed}
+        for _ in range(n_rings):
+            next_frontier: set[int] = set()
+            for fi in frontier:
+                for nf in face_adj[fi]:
+                    if nf not in visited and nf in comp_set:
+                        visited.add(nf)
+                        next_frontier.add(nf)
+            if not next_frontier:
+                break
+            frontier = next_frontier
+        return sorted(visited)
 
     def _add_gap(cid_a, cid_b, idx_a, idx_b, dist):
         pair_key = (min(cid_a, cid_b), max(cid_a, cid_b))
@@ -1675,11 +1826,10 @@ def find_gaps(
         seen_pairs.add(pair_key)
         if dist < 1.0:  # vertex-connected = fusion, not gap
             return
-        pt_a = comp_data[cid_a]["coords"][idx_a]
-        pt_b = comp_data[cid_b]["coords"][idx_b]
-        tip_r = min(max(dist * tip_radius_factor, 500.0), 750.0)
-        fa = _tip_faces(comp_data[cid_a]["fi"], pt_a, tip_r)
-        fb = _tip_faces(comp_data[cid_b]["fi"], pt_b, tip_r)
+        va = int(comp_data[cid_a]["verts"][idx_a])
+        vb = int(comp_data[cid_b]["verts"][idx_b])
+        fa = _tip_faces_bfs(comp_data[cid_a]["fi"], va)
+        fb = _tip_faces_bfs(comp_data[cid_b]["fi"], vb)
         if fa and fb:
             gaps.append((fa, fb, dist))
 
