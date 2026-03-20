@@ -535,6 +535,33 @@ let meshCentroid = [0, 0, 0];
                 controls = new OrbitControls(camera, renderer.domElement);
                 controls.enableDamping = true;
                 controls.dampingFactor = 0.1;
+                controls.enableRotate = false;
+
+                // Custom quaternion-based rotation (no polar clamping)
+                let _rotDragging = false, _rotPrevX = 0, _rotPrevY = 0;
+                renderer.domElement.addEventListener("pointerdown", (e) => {
+                    if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return;
+                    _rotDragging = true;
+                    _rotPrevX = e.clientX;
+                    _rotPrevY = e.clientY;
+                });
+                window.addEventListener("pointermove", (e) => {
+                    if (!_rotDragging || !controls.enabled) return;
+                    const dx = e.clientX - _rotPrevX;
+                    const dy = e.clientY - _rotPrevY;
+                    _rotPrevX = e.clientX;
+                    _rotPrevY = e.clientY;
+                    const speed = 0.005;
+                    const offset = camera.position.clone().sub(controls.target);
+                    const qx = new THREE.Quaternion().setFromAxisAngle(camera.up, -dx * speed);
+                    const right = new THREE.Vector3().crossVectors(camera.up, offset).normalize();
+                    const qy = new THREE.Quaternion().setFromAxisAngle(right, -dy * speed);
+                    offset.applyQuaternion(qx).applyQuaternion(qy);
+                    camera.up.applyQuaternion(qx).applyQuaternion(qy);
+                    camera.position.copy(controls.target).add(offset);
+                    camera.lookAt(controls.target);
+                });
+                window.addEventListener("pointerup", () => { _rotDragging = false; });
                 controls.addEventListener("change", scheduleStateUpdate);
 
                 scene.add(new THREE.AmbientLight(0xffffff, 0.4));
