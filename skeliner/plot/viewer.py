@@ -37,10 +37,13 @@ def _ensure_state_dir():
 
 # ── Mesh helpers ──────────────────────────────────────────────────────
 
-def _mesh_to_buffers(mesh: trimesh.Trimesh) -> dict[str, Any]:
+def _mesh_to_buffers(
+    mesh: trimesh.Trimesh, *, centroid: np.ndarray | None = None
+) -> dict[str, Any]:
     verts = np.asarray(mesh.vertices, dtype=np.float32)
     faces = np.asarray(mesh.faces, dtype=np.int32)
-    centroid = verts.mean(axis=0)
+    if centroid is None:
+        centroid = verts.mean(axis=0)
     verts_centered = verts - centroid
     return {
         "vertices": verts_centered.ravel().tolist(),
@@ -927,9 +930,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh_state["organelle_mask"] = None  # invalidate caches
         mesh_state["fusion_clusters"] = None
         mesh_state["hole_loops"] = None
-        buffers = _mesh_to_buffers(new_mesh)
+        # Keep the original centroid so the camera doesn't shift
+        original_centroid = mesh_state["centroid"]
+        buffers = _mesh_to_buffers(new_mesh, centroid=original_centroid)
         mesh_state["buffers"] = buffers
-        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
 
         # Clear annotations (they reference old face indices)
         annotations_path.write_text("{}", encoding="utf-8")

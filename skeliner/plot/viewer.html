@@ -1128,7 +1128,9 @@ let meshCentroid = [0, 0, 0];
                 camera.far = sphere.radius * 10;
                 camera.updateProjectionMatrix();
                 camera.position.set(sphere.center.x, sphere.center.y, sphere.center.z + sphere.radius * 2);
+                camera.up.set(0, 1, 0);
                 controls.target.copy(sphere.center);
+                camera.lookAt(controls.target);
                 controls.update();
             }
 
@@ -2792,10 +2794,74 @@ let meshCentroid = [0, 0, 0];
                 camera.updateProjectionMatrix();
                 renderer.setSize(window.innerWidth, window.innerHeight);
             }
+            // ── Orientation gizmo ────────────────────────────────────────────
+            const gizmoSize = 120;
+            const gizmoScene = new THREE.Scene();
+            const gizmoCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+            gizmoCamera.position.set(0, 0, 3.5);
+            gizmoCamera.lookAt(0, 0, 0);
+
+            const gizmoRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            gizmoRenderer.setSize(gizmoSize, gizmoSize);
+            gizmoRenderer.setPixelRatio(window.devicePixelRatio);
+            gizmoRenderer.domElement.style.position = "absolute";
+            gizmoRenderer.domElement.style.left = "0px";
+            gizmoRenderer.domElement.style.bottom = "100%";
+            gizmoRenderer.domElement.style.pointerEvents = "none";
+            document.getElementById("detect-panel").appendChild(gizmoRenderer.domElement);
+
+            function makeAxis(dir, color, label) {
+                const group = new THREE.Group();
+                // Shaft
+                const mat = new THREE.MeshBasicMaterial({ color });
+                const geo = new THREE.CylinderGeometry(0.03, 0.03, 1, 8);
+                geo.translate(0, 0.5, 0);
+                geo.rotateX(Math.PI / 2);
+                const shaft = new THREE.Mesh(geo, mat);
+                shaft.lookAt(dir);
+                group.add(shaft);
+                // Tip
+                const tipGeo = new THREE.ConeGeometry(0.08, 0.2, 8);
+                tipGeo.translate(0, 0.1, 0);
+                tipGeo.rotateX(Math.PI / 2);
+                const tip = new THREE.Mesh(tipGeo, mat);
+                tip.position.copy(dir);
+                tip.lookAt(dir.clone().multiplyScalar(2));
+                group.add(tip);
+                // Label
+                const canvas = document.createElement("canvas");
+                canvas.width = 64; canvas.height = 64;
+                const ctx = canvas.getContext("2d");
+                ctx.font = "bold 48px sans-serif";
+                ctx.fillStyle = "#" + new THREE.Color(color).getHexString();
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(label, 32, 32);
+                const tex = new THREE.CanvasTexture(canvas);
+                const spriteMat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
+                const sprite = new THREE.Sprite(spriteMat);
+                sprite.position.copy(dir.clone().multiplyScalar(1.3));
+                sprite.scale.set(0.4, 0.4, 1);
+                group.add(sprite);
+                return group;
+            }
+
+            // X = red (horizontal), Z = green (vertical), Y = blue (perpendicular to XZ)
+            gizmoScene.add(makeAxis(new THREE.Vector3(1, 0, 0), 0xff4444, "X"));
+            gizmoScene.add(makeAxis(new THREE.Vector3(0, 0, 1), 0x44ff44, "Z"));
+            gizmoScene.add(makeAxis(new THREE.Vector3(0, 1, 0), 0x4488ff, "Y"));
+
             function animate() {
                 requestAnimationFrame(animate);
                 controls.update();
                 renderer.render(scene, camera);
+
+                // Sync gizmo rotation with main camera
+                const q = camera.quaternion.clone();
+                gizmoCamera.position.set(0, 0, 3.5).applyQuaternion(q);
+                gizmoCamera.up.copy(camera.up);
+                gizmoCamera.lookAt(0, 0, 0);
+                gizmoRenderer.render(gizmoScene, gizmoCamera);
             }
 
             init();
