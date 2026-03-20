@@ -695,6 +695,43 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "nGaps": len(gaps),
         })
 
+    async def do_remove_gaps(request):
+        """Bridge all detected gaps."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import remove_gaps
+
+        mesh = mesh_state["mesh"]
+        _undo_stack.append(mesh)
+        if len(_undo_stack) > _UNDO_LIMIT:
+            _undo_stack.pop(0)
+
+        soma = mesh_state.get("soma")
+        cached_gaps = mesh_state.get("gap_clusters")
+
+        new_mesh = await _run_with_log(
+            remove_gaps, mesh, verbose=True,
+            _precomputed_soma=soma,
+            _precomputed_gaps=cached_gaps,
+        )
+
+        mesh_state["mesh"] = new_mesh
+        mesh_state["gap_clusters"] = None
+        buffers = _mesh_to_buffers(new_mesh)
+        mesh_state["buffers"] = buffers
+        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+
+        await broadcast({"type": "mesh", **buffers})
+
+        return JSONResponse({
+            "ok": True,
+            "nVertices": len(new_mesh.vertices),
+            "nFaces": len(new_mesh.faces),
+        })
+
     async def check_fusion(request):
         """Analyze highlighted faces for fusion signals."""
         if mesh_state["mesh"] is None:
@@ -1600,6 +1637,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/detect_fragments", detect_fragments, methods=["POST"]),
             Route("/detect_soma", detect_soma, methods=["POST"]),
             Route("/detect_gaps", detect_gaps, methods=["POST"]),
+            Route("/remove_gaps", do_remove_gaps, methods=["POST"]),
             Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
