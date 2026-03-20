@@ -660,6 +660,7 @@ def _fill_dome(
 def fill_holes(
     mesh: trimesh.Trimesh,
     *,
+    holes: list[list[int]] | None = None,
     method: str = "advancing_front",
     max_perimeter_mult: float | None = None,
     dome_factor: float = 0.5,
@@ -671,6 +672,9 @@ def fill_holes(
     ----------
     mesh : trimesh.Trimesh
         Input mesh (typically after ``remove_organelles``).
+    holes : list[list[int]] or None
+        Pre-computed boundary loops from :func:`find_holes`.  If
+        provided, detection is skipped and these loops are used directly.
     method : str, default "advancing_front"
         Filling method:
         - ``"advancing_front"`` — fast, closes boundary edges one by one
@@ -697,7 +701,15 @@ def fill_holes(
     trimesh.Trimesh
         Mesh with holes filled.
     """
-    loops = find_holes(mesh, verbose=verbose)
+    if holes is not None:
+        loops = holes
+        if verbose:
+            print(
+                f"[skeliner.pre] Using provided holes "
+                f"({len(loops)} loops)"
+            )
+    else:
+        loops = find_holes(mesh, verbose=verbose)
     if not loops:
         return mesh
 
@@ -2432,6 +2444,7 @@ def _split_fan_vertices(
 def remove_fusions(
     mesh: trimesh.Trimesh,
     *,
+    fusion_clusters: list[list[int]] | None = None,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     verbose: bool = False,
@@ -2450,6 +2463,9 @@ def remove_fusions(
     ----------
     mesh : trimesh.Trimesh
         Input neuron mesh (ideally after organelle removal).
+    fusion_clusters : list[list[int]] or None
+        Pre-computed clusters from :func:`find_fusions`.  If provided,
+        detection is skipped and these clusters are used directly.
     radius : float or None
         Radius for outward_dot computation. Auto-computed if None.
     radius_multiplier : float
@@ -2462,12 +2478,21 @@ def remove_fusions(
         Mesh with fusions removed and shared vertices split.
     """
     # Step 1: remove non-manifold fusion faces
-    clusters = find_fusions(
-        mesh,
-        radius=radius,
-        radius_multiplier=radius_multiplier,
-        verbose=verbose,
-    )
+    if fusion_clusters is not None:
+        clusters = fusion_clusters
+        if verbose:
+            n = sum(len(c) for c in clusters)
+            print(
+                f"[skeliner.pre] Using provided fusion clusters "
+                f"({len(clusters)} regions, {n} faces)"
+            )
+    else:
+        clusters = find_fusions(
+            mesh,
+            radius=radius,
+            radius_multiplier=radius_multiplier,
+            verbose=verbose,
+        )
 
     all_fusion: set[int] = set()
     for c in clusters:

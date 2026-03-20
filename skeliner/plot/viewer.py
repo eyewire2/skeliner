@@ -182,6 +182,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "path": None,           # source file path
         "centroid": np.zeros(3, dtype=np.float32),
         "organelle_mask": None, # cached from detect_organelles
+        "fusion_clusters": None, # cached from detect_fusions
+        "hole_loops": None, # cached from detect_holes
     }
     # Multiple skeletons, keyed by filename
     skeleton_states: dict[str, dict[str, Any]] = {}
@@ -681,6 +683,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         clusters = await _run_with_log(find_fusions, mesh, verbose=True)
+        mesh_state["fusion_clusters"] = clusters
 
         ann = {}
         if annotations_path.exists():
@@ -760,7 +763,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 _undo_stack.pop(0)
 
         mesh_state["mesh"] = new_mesh
-        mesh_state["organelle_mask"] = None  # invalidate cache
+        mesh_state["organelle_mask"] = None  # invalidate caches
+        mesh_state["fusion_clusters"] = None
+        mesh_state["hole_loops"] = None
         buffers = _mesh_to_buffers(new_mesh)
         mesh_state["buffers"] = buffers
         mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
@@ -844,7 +849,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-        new_mesh = await _run_with_log(_remove_fusions, mesh, verbose=True)
+        cached = mesh_state.get("fusion_clusters")
+        new_mesh = await _run_with_log(
+            _remove_fusions, mesh,
+            fusion_clusters=cached,
+            verbose=True,
+        )
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)
@@ -891,8 +901,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
+        cached_holes = mesh_state.get("hole_loops")
         new_mesh = await _run_with_log(
-            fill_holes, mesh, method=method, dome_factor=dome_factor, verbose=True,
+            fill_holes, mesh,
+            holes=cached_holes,
+            method=method, dome_factor=dome_factor, verbose=True,
         )
         n_after = len(new_mesh.faces)
 
@@ -1060,6 +1073,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         def _run():
             loops = find_holes(mesh, verbose=True)
+            mesh_state["hole_loops"] = loops
             verts = np.asarray(mesh.vertices, dtype=np.float32)
             colors = [
                 [0.2, 0.6, 1.0], [0.1, 0.9, 0.4], [0.9, 0.2, 0.8],
