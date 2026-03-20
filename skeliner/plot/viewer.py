@@ -875,6 +875,38 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "facesAfter": n_after,
         })
 
+    async def do_merge_selected(request):
+        """Merge two components by stitching boundary loops of selected faces."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        body = await request.json()
+        face_indices = body.get("faces", [])
+        if not face_indices:
+            return JSONResponse(
+                {"ok": False, "error": "No faces selected"}, status_code=400
+            )
+
+        from skeliner.pre import merge_selected_faces
+
+        mesh = mesh_state["mesh"]
+        n_before = len(mesh.faces)
+        new_mesh = await _run_with_log(
+            merge_selected_faces, mesh, face_indices, verbose=True
+        )
+        n_after = len(new_mesh.faces)
+
+        await _apply_new_mesh(new_mesh)
+        return JSONResponse({
+            "ok": True,
+            "facesBefore": n_before,
+            "facesAfter": n_after,
+            "facesRemoved": len(face_indices),
+            "facesStitched": n_after - n_before + len(face_indices),
+        })
+
     async def undo_mesh(request):
         """Revert to the previous mesh state."""
         if not _undo_stack:
@@ -1387,6 +1419,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
             Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
+            Route("/merge_selected", do_merge_selected, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),

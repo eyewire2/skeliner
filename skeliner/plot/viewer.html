@@ -452,6 +452,9 @@
                 <button id="hlCheckFusion" style="font-size: 11px; cursor: pointer; margin-left: 4px">
                     Check Fusion
                 </button>
+                <button id="hlMerge" style="font-size: 11px; cursor: pointer; margin-left: 4px">
+                    Merge
+                </button>
             </div>
             <div id="fusionResult" style="margin-top: 4px; font-size: 11px; color: #adf; display: none"></div>
             <div id="hlList" style="margin-top: 4px; max-height: 200px; overflow-y: auto"></div>
@@ -567,6 +570,7 @@ let meshCentroid = [0, 0, 0];
                     if (e.key === "Enter") saveHighlightAsAnnotation();
                 });
                 document.getElementById("hlCheckFusion").addEventListener("click", checkFusion);
+                document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
 
                 renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
                 renderer.domElement.addEventListener("pointerdown", onRecenter);
@@ -1472,6 +1476,34 @@ let meshCentroid = [0, 0, 0];
                     btn.textContent = "Error";
                 } finally {
                     btn.disabled = false;
+                }
+            }
+
+            async function runMergeSelected() {
+                if (manualHighlightFaces.size === 0) return;
+                const btn = document.getElementById("hlMerge");
+                btn.textContent = "Merging...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/merge_selected", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
+                    });
+                    const data = await resp.json();
+                    if (data.ok) {
+                        btn.textContent = `Merged (${data.facesStitched}f)`;
+                        manualHighlightFaces.clear();
+                        rebuildManualHighlight();
+                        syncManualHighlight();
+                    } else {
+                        btn.textContent = data.error || "Error";
+                    }
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                    setTimeout(() => { btn.textContent = "Merge"; }, 3000);
                 }
             }
 

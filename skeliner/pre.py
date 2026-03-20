@@ -828,6 +828,288 @@ def fill_holes(
     return result
 
 
+# ── Merge selected faces ────────────────────────────────────────────
+
+
+def merge_selected_faces(
+    mesh: trimesh.Trimesh,
+    face_indices: list[int],
+    *,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove selected faces and stitch the resulting boundary loops.
+
+    Workflow: lasso-select faces at the tips of two disconnected
+    components, then merge.  The selected faces are removed, the
+    border edges (between selected and remaining faces) are traced
+    into loops, the two closest loops are paired, and a zipper
+    stitch connects them with new triangles.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    face_indices : list[int]
+        Indices of faces to remove (the "bridge" region).
+    verbose : bool
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with selected faces replaced by a stitched strip.
+    """
+    from collections import deque
+
+    sel = set(face_indices)
+    if not sel:
+        return mesh
+
+    # ── 1. Edge-to-face map ──────────────────────────────────────────
+    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi, face in enumerate(mesh.faces):
+        for i in range(3):
+            e = (
+                min(int(face[i]), int(face[(i + 1) % 3])),
+                max(int(face[i]), int(face[(i + 1) % 3])),
+            )
+            edge_to_faces[e].append(fi)
+
+    # ── 2. Border edges: one side selected, other side not ───────────
+    border_edges: list[tuple[int, int]] = []
+    for e, fis in edge_to_faces.items():
+        has_sel = any(fi in sel for fi in fis)
+        has_kept = any(fi not in sel for fi in fis)
+        if has_sel and has_kept:
+            border_edges.append(e)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Merge: removing {len(sel)} faces, "
+            f"{len(border_edges)} border edges"
+        )
+
+    if len(border_edges) < 3:
+        if verbose:
+            print("[skeliner.pre] Not enough border edges to stitch")
+        # Just remove faces
+        keep = np.ones(len(mesh.faces), dtype=bool)
+        for fi in sel:
+            keep[fi] = False
+        result = trimesh.Trimesh(
+            vertices=mesh.vertices, faces=mesh.faces[keep], process=False,
+        )
+        result.remove_unreferenced_vertices()
+        return result
+
+    # ── 3. Trace border edges into closed loops ──────────────────────
+    adj: dict[int, set[int]] = defaultdict(set)
+    for v1, v2 in border_edges:
+        adj[v1].add(v2)
+        adj[v2].add(v1)
+
+    visited: set[int] = set()
+    loops: list[list[int]] = []
+    for start in sorted(adj):
+        if start in visited:
+            continue
+        loop = [start]
+        visited.add(start)
+        current = start
+        prev = -1
+        while True:
+            nbs = [n for n in adj[current] if n != prev]
+            if not nbs:
+                break
+            closed = False
+            for n in nbs:
+                if n == start and len(loop) > 2:
+                    loops.append(loop)
+                    closed = True
+                    break
+            if closed:
+                break
+            nxt = next((n for n in nbs if n not in visited), None)
+            if nxt is None:
+                break
+            visited.add(nxt)
+            loop.append(nxt)
+            prev = current
+            current = nxt
+
+    if verbose:
+        for i, lp in enumerate(loops):
+            pts = mesh.vertices[lp]
+            perimeter = float(
+                np.linalg.norm(
+                    np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1
+                ).sum()
+            )
+            print(f"[skeliner.pre]   Loop {i}: {len(lp)} verts, perimeter={perimeter:.1f}")
+
+    if len(loops) < 2:
+        if verbose:
+            print("[skeliner.pre] Fewer than 2 loops — cannot stitch")
+        keep = np.ones(len(mesh.faces), dtype=bool)
+        for fi in sel:
+            keep[fi] = False
+        result = trimesh.Trimesh(
+            vertices=mesh.vertices, faces=mesh.faces[keep], process=False,
+        )
+        result.remove_unreferenced_vertices()
+        return result
+
+    # ── 4. Pair loops by closest centroid ────────────────────────────
+    centroids = [mesh.vertices[lp].mean(axis=0) for lp in loops]
+    pairs: list[tuple[int, int]] = []
+    available = list(range(len(loops)))
+    while len(available) >= 2:
+        best_d = float("inf")
+        best_i, best_j = 0, 1
+        for ii in range(len(available)):
+            for jj in range(ii + 1, len(available)):
+                d = float(np.linalg.norm(
+                    centroids[available[ii]] - centroids[available[jj]]
+                ))
+                if d < best_d:
+                    best_d = d
+                    best_i, best_j = ii, jj
+        pairs.append((available[best_i], available[best_j]))
+        available.pop(best_j)
+        available.pop(best_i)
+
+    if verbose:
+        print(f"[skeliner.pre] Stitching {len(pairs)} loop pair(s) ...")
+
+    # ── 5. Vert-to-face for orientation (non-selected faces only) ────
+    vert_to_faces: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
+    for fi, face in enumerate(mesh.faces):
+        if fi not in sel:
+            for v in face:
+                vert_to_faces[int(v)].append(fi)
+
+    # ── 6. Zipper-stitch each pair ──────────────────────────────────
+    all_stitch: list[list[int]] = []
+
+    for li_a, li_b in pairs:
+        loop_a = list(loops[li_a])
+        loop_b = list(loops[li_b])
+        pts_a = mesh.vertices[loop_a]
+        pts_b = mesh.vertices[loop_b]
+
+        # 6a. Closest vertex pair as starting alignment
+        from scipy.spatial import cKDTree
+
+        tree_b = cKDTree(pts_b)
+        dists, idxs = tree_b.query(pts_a)
+        start_a = int(np.argmin(dists))
+        start_b = int(idxs[start_a])
+
+        # 6b. Orient loops to run in opposite directions
+        axis = centroids[li_b] - centroids[li_a]
+        axis_len = np.linalg.norm(axis)
+        if axis_len > 1e-10:
+            axis = axis / axis_len
+        else:
+            axis = np.array([0.0, 0.0, 1.0])
+
+        def _winding(pts_loop: np.ndarray, ax: np.ndarray) -> float:
+            c = pts_loop.mean(axis=0)
+            total = 0.0
+            for k in range(len(pts_loop)):
+                e1 = pts_loop[k] - c
+                e2 = pts_loop[(k + 1) % len(pts_loop)] - c
+                total += float(np.dot(np.cross(e1, e2), ax))
+            return total
+
+        wa = _winding(pts_a, axis)
+        wb = _winding(pts_b, axis)
+        if wa * wb > 0:
+            loop_b = loop_b[::-1]
+            start_b = len(loop_b) - 1 - start_b
+
+        # 6c. Rotate so starting indices are at position 0
+        loop_a = loop_a[start_a:] + loop_a[:start_a]
+        loop_b = loop_b[start_b:] + loop_b[:start_b]
+
+        # 6d. Zipper walk
+        na, nb = len(loop_a), len(loop_b)
+        triangles: list[list[int]] = []
+        ia, ib = 0, 0
+        steps_a, steps_b = 0, 0
+
+        while steps_a < na or steps_b < nb:
+            ia_next = (ia + 1) % na
+            ib_next = (ib + 1) % nb
+            can_a = steps_a < na
+            can_b = steps_b < nb
+
+            if can_a and can_b:
+                diag_a = float(np.linalg.norm(
+                    mesh.vertices[loop_a[ia_next]] - mesh.vertices[loop_b[ib]]
+                ))
+                diag_b = float(np.linalg.norm(
+                    mesh.vertices[loop_a[ia]] - mesh.vertices[loop_b[ib_next]]
+                ))
+                advance_a = diag_a <= diag_b
+            elif can_a:
+                advance_a = True
+            else:
+                advance_a = False
+
+            if advance_a:
+                triangles.append([loop_a[ia], loop_a[ia_next], loop_b[ib]])
+                ia = ia_next
+                steps_a += 1
+            else:
+                triangles.append([loop_a[ia], loop_b[ib_next], loop_b[ib]])
+                ib = ib_next
+                steps_b += 1
+
+        # 6e. Orient triangles consistently with the surrounding mesh
+        ref_fis: list[int] = []
+        for vi in loop_a[:5]:
+            ref_fis.extend(vert_to_faces[vi][:5])
+        if ref_fis:
+            ref_n = mesh.face_normals[ref_fis].mean(axis=0)
+            tri_normals = []
+            for t in triangles:
+                v0 = mesh.vertices[t[0]]
+                v1 = mesh.vertices[t[1]]
+                v2 = mesh.vertices[t[2]]
+                tri_normals.append(np.cross(v1 - v0, v2 - v0))
+            mean_n = np.mean(tri_normals, axis=0)
+            if np.dot(mean_n, ref_n) < 0:
+                triangles = [[t[0], t[2], t[1]] for t in triangles]
+
+        all_stitch.extend(triangles)
+
+        if verbose:
+            print(
+                f"[skeliner.pre]   Pair ({len(loop_a)}v + {len(loop_b)}v): "
+                f"{len(triangles)} stitch faces"
+            )
+
+    # ── 7. Assemble final mesh ──────────────────────────────────────
+    keep = np.ones(len(mesh.faces), dtype=bool)
+    for fi in sel:
+        keep[fi] = False
+    kept_faces = mesh.faces[keep]
+    stitch_faces = np.array(all_stitch, dtype=np.int64)
+    all_faces = np.vstack([kept_faces, stitch_faces])
+    result = trimesh.Trimesh(
+        vertices=mesh.vertices.copy(), faces=all_faces, process=False,
+    )
+    result.remove_unreferenced_vertices()
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Merge result: {len(result.faces):,} faces "
+            f"({len(sel)} removed, {len(all_stitch)} stitched)"
+        )
+
+    return result
+
+
 def remove_islands(
     mesh: trimesh.Trimesh,
     *,
