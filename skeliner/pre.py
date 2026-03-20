@@ -1657,50 +1657,68 @@ def find_gaps(
     disc_cids = [int(labels[fis[0]]) for fis in disc]
     all_cids = [main] + disc_cids
 
-    for cid in disc_cids:
-        d = comp_data[cid]
-        best_dist = float("inf")
-        best_other = None
-        best_idx_self = None
-        best_idx_other = None
+    def _tip_faces(comp_fi, tip_pt, radius):
+        centroids = mesh.vertices[mesh.faces[comp_fi]].mean(axis=1)
+        mask = np.linalg.norm(centroids - tip_pt, axis=1) < radius
+        return comp_fi[mask].tolist()
 
-        for oid in all_cids:
-            if oid == cid:
-                continue
-            od = comp_data[oid]
-            dists, idxs = od["tree"].query(d["coords"])
-            min_i = int(np.argmin(dists))
-            if dists[min_i] < best_dist:
-                best_dist = float(dists[min_i])
-                best_other = oid
-                best_idx_self = min_i
-                best_idx_other = int(idxs[min_i])
-
-        if best_other is None:
-            continue
-
-        pair_key = (min(cid, best_other), max(cid, best_other))
+    def _add_gap(cid_a, cid_b, idx_a, idx_b, dist):
+        pair_key = (min(cid_a, cid_b), max(cid_a, cid_b))
         if pair_key in seen_pairs:
-            continue
+            return
         seen_pairs.add(pair_key)
+        if dist < 1.0:  # vertex-connected = fusion, not gap
+            return
+        pt_a = comp_data[cid_a]["coords"][idx_a]
+        pt_b = comp_data[cid_b]["coords"][idx_b]
+        tip_r = max(dist * tip_radius_factor, 500.0)
+        fa = _tip_faces(comp_data[cid_a]["fi"], pt_a, tip_r)
+        fb = _tip_faces(comp_data[cid_b]["fi"], pt_b, tip_r)
+        if fa and fb:
+            gaps.append((fa, fb, dist))
 
-        # Tip points
-        pt_self = d["coords"][best_idx_self]
-        pt_other = comp_data[best_other]["coords"][best_idx_other]
+    # Precompute pairwise distances between all components (main + disc).
+    # Then build an MST rooted at main so every disc component has a
+    # bridge path back to main — no missing chain links, no duplicates.
+    all_cids = [main] + disc_cids
+    # edge_info keyed by sorted pair
+    edge_info: dict[tuple[int, int], tuple[float, int, int, int, int]] = {}
 
-        # Collect tip faces within radius of the closest point
-        tip_r = max(best_dist * tip_radius_factor, 500.0)
+    for i, cid_a in enumerate(all_cids):
+        for cid_b in all_cids[i + 1 :]:
+            da = comp_data[cid_a]
+            db = comp_data[cid_b]
+            dists, idxs = db["tree"].query(da["coords"])
+            min_i = int(np.argmin(dists))
+            key = (min(cid_a, cid_b), max(cid_a, cid_b))
+            edge_info[key] = (
+                float(dists[min_i]),
+                cid_a, min_i,       # idx into cid_a's coords
+                cid_b, int(idxs[min_i]),  # idx into cid_b's coords
+            )
 
-        def _tip_faces(comp_fi, tip_pt, radius):
-            centroids = mesh.vertices[mesh.faces[comp_fi]].mean(axis=1)
-            mask = np.linalg.norm(centroids - tip_pt, axis=1) < radius
-            return comp_fi[mask].tolist()
+    # Prim's MST from main
+    connected: set[int] = {main}
+    remaining: set[int] = set(disc_cids)
 
-        faces_a = _tip_faces(d["fi"], pt_self, tip_r)
-        faces_b = _tip_faces(comp_data[best_other]["fi"], pt_other, tip_r)
+    while remaining:
+        best_edge = None
+        best_cost = float("inf")
+        for cid_r in remaining:
+            for cid_c in connected:
+                key = (min(cid_r, cid_c), max(cid_r, cid_c))
+                cost = edge_info[key][0]
+                if cost < best_cost:
+                    best_cost = cost
+                    best_edge = (cid_r, cid_c, key)
+        if best_edge is None:
+            break
+        cid_r, cid_c, key = best_edge
+        connected.add(cid_r)
+        remaining.discard(cid_r)
 
-        if faces_a and faces_b:
-            gaps.append((faces_a, faces_b, best_dist))
+        dist, ca, idx_a, cb, idx_b = edge_info[key]
+        _add_gap(ca, cb, idx_a, idx_b, dist)
 
     # Sort by gap distance
     gaps.sort(key=lambda x: x[2])
