@@ -287,6 +287,7 @@
                     <span style="color: #888">Remove:</span>
                     <button id="removeOrganellesBtn" style="margin-left: 4px">Organelles</button>
                     <button id="removeFusionsBtn" style="margin-left: 4px">Fusions</button>
+                    <button id="removeFragmentsBtn" style="margin-left: 4px">Fragments</button>
                     <button id="fillHolesBtn" style="margin-left: 4px">Holes</button>
                     <span style="color: #888; margin-left: 12px">Path:</span>
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
@@ -570,6 +571,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
                 document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
+                document.getElementById("removeFragmentsBtn").addEventListener("click", runRemoveFragments);
                 document.getElementById("fillHolesBtn").addEventListener("click", runFillHoles);
                 document.getElementById("saveBtn").addEventListener("click", openSaveDialog);
                 document.getElementById("saveDialogClose").addEventListener("click", closeSaveDialog);
@@ -1390,6 +1392,21 @@ let meshCentroid = [0, 0, 0];
                 btn.disabled = true;
                 try {
                     const resp = await fetch("/remove_fusions", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runRemoveFragments() {
+                const btn = document.getElementById("removeFragmentsBtn");
+                btn.textContent = "Removing...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/remove_fragments", { method: "POST" });
                     const data = await resp.json();
                     btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : "Error";
                 } catch (e) {

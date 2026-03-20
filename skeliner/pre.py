@@ -11,10 +11,12 @@ __all__ = [
     "ensure_watertight",
     "fill_holes",
     "find_holes",
-    "remove_fusions",
-    "remove_organelles",
+    "remove_fins",
     "remove_fragments",
+    "remove_fusions",
+    "remove_islands",
     "remove_nucleus",
+    "remove_organelles",
 ]
 
 
@@ -674,18 +676,18 @@ def fill_holes(
     return result
 
 
-def remove_fragments(
+def remove_islands(
     mesh: trimesh.Trimesh,
     *,
     min_faces: int = 3,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
-    """Remove tiny face clusters connected to the mesh by at most a vertex.
+    """Remove small edge-disconnected components (islands).
 
-    A "fragment" is a small edge-connected component — faces that share
-    no edge with the main surface, only a vertex at most.  Proper
-    disconnected components (e.g. neurite pieces with many faces) are
-    kept.
+    An island is a cluster of faces that shares no edge with the main
+    surface — it may touch via a vertex, but has no edge connectivity.
+    This performs a single pass: all islands present at call time are
+    removed.
 
     Parameters
     ----------
@@ -699,7 +701,7 @@ def remove_fragments(
     Returns
     -------
     trimesh.Trimesh
-        Mesh with tiny fragments removed.
+        Mesh with islands removed.
     """
     labels, main = _face_edge_components(mesh)
 
@@ -711,7 +713,7 @@ def remove_fragments(
 
     if not small_comps:
         if verbose:
-            print("[skeliner.pre] No fragments to remove")
+            print("[skeliner.pre] No islands to remove")
         return mesh
 
     keep_mask = np.array(
@@ -724,23 +726,23 @@ def remove_fragments(
 
     if verbose:
         print(
-            f"[skeliner.pre] Removed {len(small_comps)} fragments "
+            f"[skeliner.pre] Removed {len(small_comps)} islands "
             f"({n_removed} faces, "
             f"{len(mesh.vertices) - len(clean.vertices)} verts)"
         )
     return clean
 
 
-def _remove_fins(
+def remove_fins(
     mesh: trimesh.Trimesh,
     *,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
-    """Remove "fin" faces — faces with 2+ boundary edges.
+    """Remove fin faces — faces with 2+ boundary edges.
 
-    These are peninsula faces hanging off the surface by a single edge.
-    They cause non-manifold edges when holes are filled.  Iterates
-    until no more fins remain (removing a fin can expose new fins).
+    A fin is a face hanging off the surface by a single edge (2 of its
+    3 edges are boundary edges).  This iterates until no more fins
+    remain, since removing a fin can expose new fins.
     """
     result = mesh
     total_removed = 0
@@ -783,14 +785,52 @@ def _remove_fins(
     return result
 
 
+def remove_fragments(
+    mesh: trimesh.Trimesh,
+    *,
+    min_faces: int = 3,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove all fragments (islands and fins) by alternating until convergence.
+
+    Islands are small edge-disconnected components; fins are faces
+    hanging by a single edge.  Removing one type can create the other,
+    so this alternates ``remove_islands`` and ``remove_fins`` until the
+    face count stabilises.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    min_faces : int, default 3
+        Passed to :func:`remove_islands`.
+    verbose : bool, default False
+        Print progress.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with all fragments removed.
+    """
+    result = mesh
+    for _ in range(100):
+        prev = len(result.faces)
+        result = remove_islands(result, min_faces=min_faces, verbose=verbose)
+        result = remove_fins(result, verbose=verbose)
+        if len(result.faces) == prev:
+            break
+    return result
+
+
 def ensure_watertight(
     mesh: trimesh.Trimesh,
     *,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
-    """Remove fragments and fins, fill holes, and verify watertightness.
+    """Remove fragments, fill holes, and verify watertightness.
 
-    Chains ``remove_fragments`` → fin removal → ``fill_holes``.
+    Chains ``remove_fragments`` → ``fill_holes``, iterating until
+    stable.
 
     Parameters
     ----------
@@ -805,14 +845,12 @@ def ensure_watertight(
         Watertight mesh (or best-effort if non-manifold edges remain).
     """
     result = remove_fragments(mesh, verbose=verbose)
-    result = _remove_fins(result, verbose=verbose)
-    result = remove_fragments(result, verbose=verbose)
 
-    # Fill holes iteratively — filling can create new small holes
+    # Fill holes iteratively — filling can create new fragments
     for iteration in range(10):
         prev_faces = len(result.faces)
         result = fill_holes(result, verbose=verbose)
-        result = _remove_fins(result, verbose=verbose)
+        result = remove_fragments(result, verbose=verbose)
         if len(result.faces) == prev_faces:
             break
         if verbose:

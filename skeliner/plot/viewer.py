@@ -796,6 +796,32 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "facesRemoved": n_before - n_after,
         })
 
+    async def do_remove_fragments(request):
+        """Remove fragments (islands and fins) from the mesh."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        from skeliner.pre import remove_fragments as _remove_fragments
+
+        mesh = mesh_state["mesh"]
+        n_before = len(mesh.faces)
+
+        loop = asyncio.get_event_loop()
+        new_mesh = await loop.run_in_executor(
+            None, lambda: _remove_fragments(mesh, verbose=True)
+        )
+        n_after = len(new_mesh.faces)
+
+        await _apply_new_mesh(new_mesh)
+        print(f"Remove fragments: {n_before:,} → {n_after:,} faces ({n_before - n_after:,} removed)")
+        return JSONResponse({
+            "ok": True,
+            "facesBefore": n_before,
+            "facesAfter": n_after,
+            "facesRemoved": n_before - n_after,
+        })
+
     async def do_fill_holes(request):
         """Fill holes in the mesh."""
         if mesh_state["mesh"] is None:
@@ -1286,6 +1312,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/detect_holes", detect_holes, methods=["POST"]),
             Route("/remove_organelles", do_remove_organelles, methods=["POST"]),
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
+            Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
