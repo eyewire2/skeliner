@@ -1515,6 +1515,10 @@ def find_gaps(
     # Locate soma so we can exclude components inside it
     soma = _precomputed_soma if _precomputed_soma is not None else find_soma(mesh, verbose=verbose)
 
+    # KD-tree of main-component vertices for proximity checks
+    main_verts = np.unique(mesh.faces[np.where(labels == main)[0]])
+    main_tree = KDTree(mesh.vertices[main_verts])
+
     # Collect non-main components that meet the size threshold
     comp_faces: dict[int, list[int]] = {}
     for fi in range(n_faces):
@@ -1539,15 +1543,18 @@ def find_gaps(
                 n_soma_excluded += 1
                 continue
 
-        # Exclude blob-shaped components (organelles, not broken neurites).
-        # Gaps are elongated tubes (PCA ratio > 5); organelles are round.
+        # Exclude organelle-like components: blob-shaped (PCA < 5) AND
+        # touching or very close to the main mesh (likely enclosed).
+        # Real gap fragments are isolated in space (far from main).
         if len(verts) >= 4:
             centered = coords - centroid
             evals = np.linalg.eigh(np.cov(centered.T))[0]
             pca_ratio = evals.max() / (np.sort(evals)[-2] + 1e-10)
             if pca_ratio < 5.0:
-                n_organelle_excluded += 1
-                continue
+                dists_to_main, _ = main_tree.query(coords)
+                if dists_to_main.min() < 1000:
+                    n_organelle_excluded += 1
+                    continue
 
         gaps.append(fis)
 
