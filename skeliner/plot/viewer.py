@@ -586,7 +586,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 ann["highlights"] = []
             ann["highlights"].append({
                 "faces": faces,
-                "color": [0.6, 0.6, 0.6],
+                "color": [0.2, 0.8, 0.8],
                 "label": f"fragments ({len(faces):,})",
             })
             annotations_path.write_text(json.dumps(ann), encoding="utf-8")
