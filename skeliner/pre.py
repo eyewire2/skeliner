@@ -1671,7 +1671,7 @@ def find_gaps(
             return
         pt_a = comp_data[cid_a]["coords"][idx_a]
         pt_b = comp_data[cid_b]["coords"][idx_b]
-        tip_r = max(dist * tip_radius_factor, 500.0)
+        tip_r = min(max(dist * tip_radius_factor, 500.0), 750.0)
         fa = _tip_faces(comp_data[cid_a]["fi"], pt_a, tip_r)
         fb = _tip_faces(comp_data[cid_b]["fi"], pt_b, tip_r)
         if fa and fb:
