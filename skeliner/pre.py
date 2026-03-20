@@ -1291,7 +1291,7 @@ def find_soma(
     mesh: trimesh.Trimesh,
     *,
     max_fragment_faces: int = 50,
-    density_cutoff: float = 0.30,
+    density_cutoff: float = 0.50,
     verbose: bool = False,
 ) -> Soma | None:
     """Estimate soma from the spatial clustering of leftover small fragments.
@@ -1410,30 +1410,57 @@ def find_soma(
             cutoff = lv
             break
 
-    # ── 5. Collect soma vertices ────────────────────────────────────
-    soma_set: set[int] = set()
+    # ── 5. Fit ellipsoid from BFS ring vertices ────────────────────
+    bfs_set: set[int] = set()
     for lv in range(cutoff + 1):
-        soma_set.update(ring_verts[lv])
+        bfs_set.update(ring_verts[lv])
+    bfs_verts_arr = np.fromiter(bfs_set, dtype=np.intp)
 
-    # Smooth the boundary: add vertices whose majority of neighbors are
-    # already in the soma (eliminates ragged single-face gaps at the edge).
-    for _pass in range(3):
-        additions: list[int] = []
-        for v in list(soma_set):
-            for nv in adj[v]:
-                if nv in soma_set:
+    soma = Soma.fit(mesh.vertices[bfs_verts_arr])
+
+    # ── 6. Assign verts: main-component vertices inside the ellipsoid
+    all_main_verts = np.unique(mesh.faces[main_fi])
+    inside = soma.contains(mesh.vertices[all_main_verts])
+    soma_set: set[int] = set(all_main_verts[inside].tolist())
+
+    # ── 7. Absorb pockets that are trapped between the ellipsoid
+    #       boundary and the actual soma surface.  After removing soma
+    #       verts, each remaining connected component is either a
+    #       neurite branch (extends far from soma) or a pocket (stays
+    #       close).  Only pockets are absorbed.
+    all_main_set = set(all_main_verts.tolist())
+    for _iteration in range(10):
+        outside = all_main_set - soma_set
+        visited: set[int] = set()
+        absorbed = 0
+        for start in outside:
+            if start in visited:
+                continue
+            comp: list[int] = []
+            queue = deque([start])
+            while queue:
+                v = queue.popleft()
+                if v in visited:
                     continue
-                n_soma = sum(1 for nn in adj[nv] if nn in soma_set)
-                if n_soma > len(adj[nv]) // 2:
-                    additions.append(nv)
-        if not additions:
+                visited.add(v)
+                comp.append(v)
+                for nv in adj[v]:
+                    if nv in outside and nv not in visited:
+                        queue.append(nv)
+            # Check if this component extends into the neurites:
+            # compute max body-coord distance from ellipsoid centre.
+            # If all verts are within the ellipsoid boundary (body
+            # dist < pocket_frac), it is a pocket → absorb.
+            coords = mesh.vertices[comp]
+            body = soma._body_coords(coords)
+            max_body_dist = float(np.sqrt((body**2).sum(axis=1)).max())
+            if max_body_dist < 1.5:
+                soma_set.update(comp)
+                absorbed += len(comp)
+        if absorbed == 0:
             break
-        soma_set.update(additions)
 
-    soma_verts = np.fromiter(sorted(soma_set), dtype=np.intp)
-
-    # ── 6. Fit ellipsoid ─────────────────────────────────────────────
-    soma = Soma.fit(mesh.vertices[soma_verts], verts=soma_verts)
+    soma.verts = np.fromiter(sorted(soma_set), dtype=np.intp)
 
     if verbose:
         print(
@@ -1442,7 +1469,7 @@ def find_soma(
             f"{soma.center[2]:.0f}], "
             f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
             f"{soma.axes[2]:.0f}], "
-            f"{len(soma_verts):,} surface verts "
+            f"{len(soma.verts):,} surface verts "
             f"({len(core)}/{len(centroids)} indicator fragments, "
             f"cutoff ring {cutoff})"
         )
