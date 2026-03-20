@@ -929,6 +929,7 @@ let meshCentroid = [0, 0, 0];
                 meshGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
                 meshGeometry.computeVertexNormals();
 
+                const _opVal = parseInt(document.getElementById('opacitySlider').value) / 100;
                 meshObj = new THREE.Mesh(
                     meshGeometry,
                     new THREE.MeshPhongMaterial({
@@ -936,9 +937,9 @@ let meshCentroid = [0, 0, 0];
                         side: THREE.DoubleSide,
                         clippingPlanes: [clipPlane],
                         shininess: 30,
-                        transparent: true,
-                        opacity: 0.5,
-                        depthWrite: false,
+                        transparent: _opVal < 1.0,
+                        opacity: _opVal,
+                        depthWrite: _opVal >= 1.0,
                     }),
                 );
                 scene.add(meshObj);
@@ -2169,6 +2170,15 @@ let meshCentroid = [0, 0, 0];
             // ── Annotations ──────────────────────────────────────────────────────
             let currentAnnotations = null; // cached for panel rebuild
 
+            function _saveAnnVisibility() {
+                if (!currentAnnotations || !currentAnnotations.highlights) return;
+                const hidden = [];
+                currentAnnotations.highlights.forEach((g, i) => {
+                    if (annotationMeshes[i] && !annotationMeshes[i].visible) hidden.push(g.label || "");
+                });
+                localStorage.setItem('skeliner_annHidden', JSON.stringify(hidden));
+            }
+
             function applyAnnotations(annotations) {
                 for (const m of annotationMeshes) {
                     scene.remove(m);
@@ -2206,12 +2216,13 @@ let meshCentroid = [0, 0, 0];
                         const geo = new THREE.BufferGeometry();
                         geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
                         geo.computeVertexNormals();
+                        const _annOp = parseInt(document.getElementById('annOpacitySlider').value) / 100;
                         const mat = new THREE.MeshPhongMaterial({
                             color: new THREE.Color(color[0], color[1], color[2]),
                             side: THREE.DoubleSide,
                             clippingPlanes: [clipPlane],
                             transparent: true,
-                            opacity: 0.9,
+                            opacity: _annOp,
                             polygonOffset: true,
                             polygonOffsetFactor: -1,
                         });
@@ -2219,6 +2230,15 @@ let meshCentroid = [0, 0, 0];
                         scene.add(hlm);
                         annotationMeshes.push(hlm);
                     }
+                    // Restore cached hide/show state
+                    try {
+                        const hidden = JSON.parse(localStorage.getItem('skeliner_annHidden')) || [];
+                        annotations.highlights.forEach((g, i) => {
+                            if (hidden.includes(g.label || "") && annotationMeshes[i]) {
+                                annotationMeshes[i].visible = false;
+                            }
+                        });
+                    } catch (e) {}
                 }
                 // Markers (spheres at arbitrary positions)
                 if (annotations.markers) {
@@ -2481,6 +2501,7 @@ let meshCentroid = [0, 0, 0];
                             if (!annotationMeshes[idx]) return;
                             annotationMeshes[idx].visible = !annotationMeshes[idx].visible;
                             toggleBtn.textContent = annotationMeshes[idx].visible ? "hide" : "show";
+                            _saveAnnVisibility();
                         });
                         div.appendChild(toggleBtn);
 
