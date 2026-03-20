@@ -1873,9 +1873,10 @@ def find_pocket_organelles(
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
-    grow_threshold: float = 0.3,
+    grow_threshold: float = 0.1,
     bridge_threshold: float = 0.3,
-    max_hole_size: int = 50,
+    max_hole_size: int = 500,
+    hole_enclosure_ratio: float = 0.5,
     min_pocket_size: int = 5,
     min_fold_ratio: float = 2.0,
     min_cluster_size: int = 5,
@@ -1888,11 +1889,11 @@ def find_pocket_organelles(
 
     1. Call :func:`find_rims` to get rim edges for each pocket.
     2. Seed from the **negative-dot faces** of each rim's pocket cluster.
-    3. Flood-fill from seeds, stopping at rim edges (sign boundary) and
-       faces with ``outward_dot > grow_threshold``.
-    4. Bridging passes: iteratively re-seed negative-dot faces adjacent to
-       the filled region, crossing faces up to ``bridge_threshold``.
-    5. Hole filling: small non-pocket clusters fully enclosed by pocket
+    3. Flood-fill from seeds, stopping at rim edges and faces with
+       ``outward_dot > grow_threshold``.
+    4. Bridging: flood-fill from pocket boundary using the relaxed
+       ``bridge_threshold`` to cross narrow positive-dot barriers.
+    5. Hole filling: small non-pocket clusters mostly enclosed by pocket
        faces are filled in.
 
     Only regions behind a rim get detected — curved surfaces without a
@@ -1909,11 +1910,14 @@ def find_pocket_organelles(
     grow_threshold : float
         Flood-fill will not enter faces with ``outward_dot > grow_threshold``.
     bridge_threshold : float
-        Relaxed threshold used in bridging passes to cross narrow
-        positive-dot barriers within a pocket.
+        Relaxed threshold used in a second flood-fill from the pocket
+        boundary to cross narrow positive-dot barriers within a pocket.
     max_hole_size : int
-        Non-pocket clusters with at most this many faces that are fully
-        enclosed by pocket faces are filled in.
+        Non-pocket clusters with at most this many faces that are
+        mostly enclosed by pocket faces are filled in.
+    hole_enclosure_ratio : float
+        Minimum fraction of a hole cluster's boundary neighbors that
+        must be pocket faces for the hole to be filled.
     min_pocket_size : int
         Minimum negative-face cluster size to produce a rim / be detected.
     min_cluster_size : int
@@ -2012,55 +2016,32 @@ def find_pocket_organelles(
 
     initial_count = int(pocket.sum())
 
-    # Phase 1 — Bridging passes: re-seed negative-dot faces reachable
-    # through narrow positive-dot barriers (outward_dot <= bridge_threshold).
-    # Repeat until no new faces are added.
-    for _bridge_iter in range(50):
-        new_seeds: set[int] = set()
-        for fi in np.where(pocket)[0]:
-            for nfi in adj.get(int(fi), set()):
-                if pocket[nfi] or nfi in rim_faces or not main_face_mask[nfi]:
-                    continue
-                # nfi is a non-pocket neighbor — check if it can bridge
-                if outward_dots[nfi] > bridge_threshold:
-                    continue
-                # Accept this face directly if it's negative-dot
-                if outward_dots[nfi] <= grow_threshold:
-                    new_seeds.add(nfi)
-                    continue
-                # It's a barrier face (grow_threshold < dot <= bridge_threshold).
-                # Accept it only if it leads to a negative-dot face on the
-                # other side — otherwise we'd just grow outward.
-                for nnfi in adj.get(nfi, set()):
-                    if (
-                        not pocket[nnfi]
-                        and nnfi not in rim_faces
-                        and main_face_mask[nnfi]
-                        and outward_dots[nnfi] <= grow_threshold
-                    ):
-                        new_seeds.add(nfi)
-                        break
-        if not new_seeds:
-            break
-        # Flood-fill from new seeds with original grow_threshold
-        bridge_queue = deque(new_seeds)
-        while bridge_queue:
-            fi = bridge_queue.popleft()
-            if pocket[fi]:
-                continue
-            if fi in rim_faces or not main_face_mask[fi]:
-                continue
-            if outward_dots[fi] > bridge_threshold:
-                continue
-            pocket[fi] = True
-            for nfi in adj.get(fi, set()):
-                if not pocket[nfi]:
-                    bridge_queue.append(nfi)
+    # Phase 1 — Bridging: flood-fill from pocket boundary using the
+    # relaxed bridge_threshold to cross positive-dot barriers.
+    bridge_queue = deque()
+    for fi in np.where(pocket)[0]:
+        for nfi in adj.get(int(fi), set()):
+            if not pocket[nfi]:
+                bridge_queue.append(nfi)
+
+    while bridge_queue:
+        fi = bridge_queue.popleft()
+        if pocket[fi]:
+            continue
+        if fi in rim_faces or not main_face_mask[fi]:
+            continue
+        if outward_dots[fi] > bridge_threshold:
+            continue
+        pocket[fi] = True
+        for nfi in adj.get(fi, set()):
+            if not pocket[nfi]:
+                bridge_queue.append(nfi)
 
     bridge_count = int(pocket.sum()) - initial_count
 
-    # Phase 2 — Hole filling: small non-pocket clusters fully enclosed
-    # by pocket faces are filled in.
+    # Phase 2 — Hole filling: small non-pocket clusters mostly enclosed
+    # by pocket faces are filled in.  Sub-folds inside pockets can have
+    # positive outward_dot, so we use enclosure ratio only.
     non_pocket_main = main_face_mask & ~pocket
     non_pocket_idx = set(np.where(non_pocket_main)[0].tolist())
     np_visited: set[int] = set()
@@ -2069,9 +2050,10 @@ def find_pocket_organelles(
     for fi in non_pocket_idx:
         if fi in np_visited:
             continue
-        # BFS to find connected component of non-pocket faces
         cluster: list[int] = []
-        enclosed = True
+        n_pocket_boundary = 0
+        n_total_boundary = 0
+        too_large = False
         bfs_queue = deque([fi])
         while bfs_queue:
             curr = bfs_queue.popleft()
@@ -2080,8 +2062,7 @@ def find_pocket_organelles(
             np_visited.add(curr)
             cluster.append(curr)
             if len(cluster) > max_hole_size:
-                enclosed = False
-                # drain the queue to mark everything visited
+                too_large = True
                 while bfs_queue:
                     c2 = bfs_queue.popleft()
                     if c2 not in np_visited:
@@ -2094,10 +2075,14 @@ def find_pocket_organelles(
             for nfi in adj.get(curr, set()):
                 if nfi in non_pocket_idx and nfi not in np_visited:
                     bfs_queue.append(nfi)
-                elif not pocket[nfi] and nfi not in non_pocket_idx:
-                    # neighbor is outside main component — not enclosed
-                    enclosed = False
-        if enclosed and 0 < len(cluster) <= max_hole_size:
+                elif nfi not in non_pocket_idx:
+                    n_total_boundary += 1
+                    if pocket[nfi]:
+                        n_pocket_boundary += 1
+        if too_large or len(cluster) == 0:
+            continue
+        enclosure = n_pocket_boundary / n_total_boundary if n_total_boundary else 0
+        if enclosure >= hole_enclosure_ratio:
             for c in cluster:
                 pocket[c] = True
             hole_count += len(cluster)
