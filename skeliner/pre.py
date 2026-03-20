@@ -612,14 +612,10 @@ def _fill_dome(
     ring_indices: list[list[int]] = []
 
     for r in range(1, n_rings + 1):
-        t = r / (n_rings + 1)          # 0 → boundary, 1 → center
-        frac = 1.0 - t                 # radial fraction
+        t = r / (n_rings + 1)  # 0 → boundary, 1 → center
+        frac = 1.0 - t  # radial fraction
         h = dome_height * (1.0 - frac * frac)  # parabolic profile
-        ring_pts = (
-            centroid
-            + (boundary_pts - centroid) * frac
-            + avg_normal * h
-        )
+        ring_pts = centroid + (boundary_pts - centroid) * frac + avg_normal * h
         base = vert_offset + len(new_verts_list)
         ring_indices.append(list(range(base, base + n)))
         for pt in ring_pts:
@@ -775,8 +771,12 @@ def fill_holes(
 
         for loop in valid_loops:
             nv, nf = _fill_dome(
-                loop, mesh.vertices, mesh.face_normals, vert_to_faces,
-                dome_factor=dome_factor, vert_offset=offset,
+                loop,
+                mesh.vertices,
+                mesh.face_normals,
+                vert_to_faces,
+                dome_factor=dome_factor,
+                vert_offset=offset,
             )
             if len(nv) > 0:
                 new_verts.append(nv)
@@ -817,7 +817,9 @@ def fill_holes(
             process=False,
         )
     else:
-        raise ValueError(f"Unknown method: {method!r}. Use 'advancing_front', 'dome', or 'rbf'.")
+        raise ValueError(
+            f"Unknown method: {method!r}. Use 'advancing_front', 'dome', or 'rbf'."
+        )
 
     if verbose:
         print(
@@ -896,7 +898,9 @@ def merge_selected_faces(
         for fi in sel:
             keep[fi] = False
         result = trimesh.Trimesh(
-            vertices=mesh.vertices, faces=mesh.faces[keep], process=False,
+            vertices=mesh.vertices,
+            faces=mesh.faces[keep],
+            process=False,
         )
         result.remove_unreferenced_vertices()
         return result
@@ -940,11 +944,11 @@ def merge_selected_faces(
         for i, lp in enumerate(loops):
             pts = mesh.vertices[lp]
             perimeter = float(
-                np.linalg.norm(
-                    np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1
-                ).sum()
+                np.linalg.norm(np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1).sum()
             )
-            print(f"[skeliner.pre]   Loop {i}: {len(lp)} verts, perimeter={perimeter:.1f}")
+            print(
+                f"[skeliner.pre]   Loop {i}: {len(lp)} verts, perimeter={perimeter:.1f}"
+            )
 
     if len(loops) < 2:
         if verbose:
@@ -953,7 +957,9 @@ def merge_selected_faces(
         for fi in sel:
             keep[fi] = False
         result = trimesh.Trimesh(
-            vertices=mesh.vertices, faces=mesh.faces[keep], process=False,
+            vertices=mesh.vertices,
+            faces=mesh.faces[keep],
+            process=False,
         )
         result.remove_unreferenced_vertices()
         return result
@@ -967,9 +973,9 @@ def merge_selected_faces(
         best_i, best_j = 0, 1
         for ii in range(len(available)):
             for jj in range(ii + 1, len(available)):
-                d = float(np.linalg.norm(
-                    centroids[available[ii]] - centroids[available[jj]]
-                ))
+                d = float(
+                    np.linalg.norm(centroids[available[ii]] - centroids[available[jj]])
+                )
                 if d < best_d:
                     best_d = d
                     best_i, best_j = ii, jj
@@ -1044,12 +1050,16 @@ def merge_selected_faces(
             can_b = steps_b < nb
 
             if can_a and can_b:
-                diag_a = float(np.linalg.norm(
-                    mesh.vertices[loop_a[ia_next]] - mesh.vertices[loop_b[ib]]
-                ))
-                diag_b = float(np.linalg.norm(
-                    mesh.vertices[loop_a[ia]] - mesh.vertices[loop_b[ib_next]]
-                ))
+                diag_a = float(
+                    np.linalg.norm(
+                        mesh.vertices[loop_a[ia_next]] - mesh.vertices[loop_b[ib]]
+                    )
+                )
+                diag_b = float(
+                    np.linalg.norm(
+                        mesh.vertices[loop_a[ia]] - mesh.vertices[loop_b[ib_next]]
+                    )
+                )
                 advance_a = diag_a <= diag_b
             elif can_a:
                 advance_a = True
@@ -1097,7 +1107,9 @@ def merge_selected_faces(
     stitch_faces = np.array(all_stitch, dtype=np.int64)
     all_faces = np.vstack([kept_faces, stitch_faces])
     result = trimesh.Trimesh(
-        vertices=mesh.vertices.copy(), faces=all_faces, process=False,
+        vertices=mesh.vertices.copy(),
+        faces=all_faces,
+        process=False,
     )
     result.remove_unreferenced_vertices()
 
@@ -1528,9 +1540,7 @@ def _rim_enclosed_area(
         pts_2d = np.column_stack([centered @ u_ax, centered @ v_ax])
         x, y = pts_2d[:, 0], pts_2d[:, 1]
         area = 0.5 * abs(
-            np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
-            + x[-1] * y[0]
-            - x[0] * y[-1]
+            np.sum(x[:-1] * y[1:] - x[1:] * y[:-1]) + x[-1] * y[0] - x[0] * y[-1]
         )
         total_area += area
 
@@ -2073,7 +2083,8 @@ def find_fusions(
         print("[skeliner.pre] Computing outward dots ...")
     outward_dots = _outward_dot(
         mesh,
-        radius if radius is not None
+        radius
+        if radius is not None
         else radius_multiplier * float(np.median(mesh.edges_unique_length)),
     )
 
@@ -2087,12 +2098,8 @@ def find_fusions(
                     nm_neg_faces.add(fi)
 
     # Signal 2: exact duplicate faces with >3 neighbors
-    face_tuples = [
-        tuple(sorted(int(v) for v in f)) for f in mesh.faces
-    ]
-    dupe_set = {
-        ft for ft, c in Counter(face_tuples).items() if c > 1
-    }
+    face_tuples = [tuple(sorted(int(v) for v in f)) for f in mesh.faces]
+    dupe_set = {ft for ft, c in Counter(face_tuples).items() if c > 1}
     dupe_faces: set[int] = set()
     for fi, ft in enumerate(face_tuples):
         if ft in dupe_set and fi not in zero_faces:
@@ -2487,6 +2494,7 @@ def remove_fusions(
 def remove_organelles(
     mesh: trimesh.Trimesh,
     *,
+    organelle_mask: np.ndarray | None = None,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     min_cluster_size: int = 5,
@@ -2506,6 +2514,10 @@ def remove_organelles(
     ----------
     mesh : trimesh.Trimesh
         Input neuron mesh.
+    organelle_mask : np.ndarray or None
+        Pre-computed boolean mask from :func:`find_organelles` (or
+        ``find_pocket_organelles | find_isolated_organelles``).  If
+        provided, detection is skipped and this mask is used directly.
     radius : float or None, default None
         Radius (in mesh units, typically nm) for the local center-of-mass
         neighbourhood.  If None, automatically set to
@@ -2523,15 +2535,35 @@ def remove_organelles(
     -------
     trimesh.Trimesh
         Cleaned mesh with internal fragments removed.
+
+    Examples
+    --------
+    # Detect once
+    pocket, isolated = find_organelles(mesh, verbose=True)
+
+    # Reuse for removal — no recomputation
+    clean = remove_organelles(mesh, organelle_mask=pocket | isolated)
+
+    # Or the old way still works (auto-detects if no mask given):
+
+    clean = remove_organelles(mesh)  # detects internally
     """
-    pocket, isolated = find_organelles(
-        mesh,
-        radius=radius,
-        radius_multiplier=radius_multiplier,
-        min_cluster_size=min_cluster_size,
-        verbose=verbose,
-    )
-    organelle = pocket | isolated
+    if organelle_mask is not None and len(organelle_mask) == len(mesh.faces):
+        organelle = np.asarray(organelle_mask, dtype=bool)
+        if verbose:
+            print(
+                f"[skeliner.pre] Using provided organelle mask "
+                f"({int(organelle.sum()):,} faces)"
+            )
+    else:
+        pocket, isolated = find_organelles(
+            mesh,
+            radius=radius,
+            radius_multiplier=radius_multiplier,
+            min_cluster_size=min_cluster_size,
+            verbose=verbose,
+        )
+        organelle = pocket | isolated
 
     if not organelle.any():
         if verbose:

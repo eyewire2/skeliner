@@ -181,6 +181,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "buffers": None,        # JSON-serialisable mesh data
         "path": None,           # source file path
         "centroid": np.zeros(3, dtype=np.float32),
+        "organelle_mask": None, # cached from detect_organelles
     }
     # Multiple skeletons, keyed by filename
     skeleton_states: dict[str, dict[str, Any]] = {}
@@ -500,9 +501,17 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         det_type = request.query_params.get("type", "all")
 
         highlights = []
+        # Start from cached mask if available, else empty
+        cached = mesh_state.get("organelle_mask")
+        if cached is not None and len(cached) == len(mesh.faces):
+            combined = cached.copy()
+        else:
+            combined = np.zeros(len(mesh.faces), dtype=bool)
+
         if det_type in ("pocket", "surface"):
             from skeliner.pre import find_pocket_organelles
             mask = await _run_with_log(find_pocket_organelles, mesh, verbose=True)
+            combined |= mask
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
                 highlights.append({
@@ -513,6 +522,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         elif det_type == "isolated":
             from skeliner.pre import find_isolated_organelles
             mask = await _run_with_log(find_isolated_organelles, mesh, verbose=True)
+            combined |= mask
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
                 highlights.append({
@@ -523,6 +533,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         else:
             from skeliner.pre import find_organelles
             surface, isolated = await _run_with_log(find_organelles, mesh, verbose=True)
+            combined = surface | isolated
             sf = [int(fi) for fi in np.where(surface)[0]]
             iso = [int(fi) for fi in np.where(isolated)[0]]
             if sf:
@@ -537,6 +548,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "color": [0.8, 0.4, 0.1],
                     "label": f"organelle:isolated ({len(iso):,})",
                 })
+
+        mesh_state["organelle_mask"] = combined
 
         ann = {}
         if annotations_path.exists():
@@ -747,6 +760,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 _undo_stack.pop(0)
 
         mesh_state["mesh"] = new_mesh
+        mesh_state["organelle_mask"] = None  # invalidate cache
         buffers = _mesh_to_buffers(new_mesh)
         mesh_state["buffers"] = buffers
         mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
@@ -784,16 +798,31 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
 
     async def do_remove_organelles(request):
-        """Remove organelles from the mesh."""
+        """Remove organelles from the mesh.
+
+        Reuses the cached mask from detect_organelles if available,
+        otherwise runs full detection.
+        """
         if mesh_state["mesh"] is None:
             return JSONResponse(
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
-        from skeliner.pre import remove_organelles as _remove_organelles
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-        new_mesh = await _run_with_log(_remove_organelles, mesh, verbose=True)
+        cached = mesh_state.get("organelle_mask")
+
+        if cached is not None and len(cached) == len(mesh.faces) and cached.any():
+            # Use cached detection result
+            print(f"Using cached organelle mask ({int(cached.sum()):,} faces)")
+            keep = ~cached
+            new_mesh = mesh.submesh([np.where(keep)[0]], append=True)
+            new_mesh.remove_unreferenced_vertices()
+        else:
+            # No cache — run full detection + removal
+            from skeliner.pre import remove_organelles as _remove_organelles
+            new_mesh = await _run_with_log(_remove_organelles, mesh, verbose=True)
+
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)
