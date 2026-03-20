@@ -1696,9 +1696,13 @@ def find_gaps(
             db = comp_data[cid_b]
             dists, idxs = db["tree"].query(da["coords"])
             min_i = int(np.argmin(dists))
+            raw_dist = float(dists[min_i])
+            # Vertex-connected pairs are fusions (will be broken later),
+            # not real gaps — treat as infinite cost so the MST avoids them.
+            cost = float("inf") if raw_dist < 1.0 else raw_dist
             key = (min(cid_a, cid_b), max(cid_a, cid_b))
             edge_info[key] = (
-                float(dists[min_i]),
+                cost,
                 cid_a, min_i,       # idx into cid_a's coords
                 cid_b, int(idxs[min_i]),  # idx into cid_b's coords
             )
@@ -1787,12 +1791,7 @@ def remove_gaps(
             print("[skeliner.pre] No gaps to bridge")
         return mesh
 
-    # Collect all faces to remove and build edge map once
-    all_remove: set[int] = set()
-    for faces_a, faces_b, _ in gaps:
-        all_remove.update(faces_a)
-        all_remove.update(faces_b)
-
+    # Build edge map once
     edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
     for fi, face in enumerate(mesh.faces):
         for i in range(3):
@@ -1803,21 +1802,20 @@ def remove_gaps(
             edge_to_faces[e].append(fi)
 
     if verbose:
-        print(
-            f"[skeliner.pre] Bridging {len(gaps)} gaps, "
-            f"removing {len(all_remove)} tip faces"
-        )
+        print(f"[skeliner.pre] Bridging {len(gaps)} gaps")
 
-    # For each gap, trace its border loops and pair them
+    # For each gap, trace its border loops. Only collect faces to
+    # remove for gaps that successfully produce a loop pair.
+    faces_to_remove: set[int] = set()
     loop_pairs: list[tuple[list[int], list[int]]] = []
     for gap_i, (faces_a, faces_b, dist) in enumerate(gaps):
         gap_sel = set(faces_a) | set(faces_b)
-        loops = _trace_border_loops(mesh, gap_sel | (all_remove - gap_sel), edge_to_faces)
+        loops = _trace_border_loops(mesh, gap_sel, edge_to_faces)
 
         if len(loops) < 2:
             if verbose:
                 print(
-                    f"[skeliner.pre]   Gap {gap_i}: "
+                    f"[skeliner.pre]   Gap {gap_i} (dist={dist:.0f}): "
                     f"only {len(loops)} loop(s), skipping"
                 )
             continue
@@ -1833,9 +1831,20 @@ def remove_gaps(
                     best_d = d
                     best_pair = (ii, jj)
 
-        loop_pairs.append((loops[best_pair[0]], loops[best_pair[1]]))
+        la, lb = loops[best_pair[0]], loops[best_pair[1]]
+        loop_pairs.append((la, lb))
+        faces_to_remove |= gap_sel
 
-    return _stitch_and_rebuild(mesh, all_remove, loop_pairs, verbose=verbose)
+        if verbose:
+            print(
+                f"[skeliner.pre]   Gap {gap_i} (dist={dist:.0f}): "
+                f"{len(la)}v + {len(lb)}v"
+            )
+
+    if verbose:
+        print(f"[skeliner.pre] Removing {len(faces_to_remove)} tip faces")
+
+    return _stitch_and_rebuild(mesh, faces_to_remove, loop_pairs, verbose=verbose)
 
 
 def remove_islands(
