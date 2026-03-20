@@ -289,7 +289,15 @@
                     <button id="removeOrganellesBtn" style="margin-left: 4px">Organelles</button>
                     <button id="removeFusionsBtn" style="margin-left: 4px">Fusions</button>
                     <button id="removeFragmentsBtn" style="margin-left: 4px">Fragments</button>
-                    <button id="fillHolesBtn" style="margin-left: 4px">Holes</button>
+                    <span style="position:relative;display:inline-block;margin-left:4px">
+                        <button id="fillHolesBtn">Holes</button>
+                        <div id="holesPopup" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:4px;background:rgba(0,0,0,0.85);border:1px solid #555;border-radius:4px;padding:6px 8px;white-space:nowrap;z-index:300">
+                            <div style="color:#888;font-size:10px;margin-bottom:4px">Fill method:</div>
+                            <button class="holes-method-btn" data-method="advancing_front" style="display:block;width:100%;text-align:left;margin-bottom:2px">Advancing Front</button>
+                            <button class="holes-method-btn" data-method="dome" style="display:block;width:100%;text-align:left;margin-bottom:2px">Dome (convex)</button>
+                            <button class="holes-method-btn" data-method="rbf" style="display:block;width:100%;text-align:left">RBF</button>
+                        </div>
+                    </span>
                     <span style="color: #888; margin-left: 12px">Path:</span>
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
@@ -573,7 +581,18 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
                 document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
                 document.getElementById("removeFragmentsBtn").addEventListener("click", runRemoveFragments);
-                document.getElementById("fillHolesBtn").addEventListener("click", runFillHoles);
+                document.getElementById("fillHolesBtn").addEventListener("click", () => {
+                    const popup = document.getElementById("holesPopup");
+                    popup.style.display = popup.style.display === "none" ? "" : "none";
+                });
+                document.querySelectorAll(".holes-method-btn").forEach(btn => {
+                    btn.addEventListener("click", () => runFillHoles(btn.dataset.method));
+                });
+                document.addEventListener("click", (e) => {
+                    if (!e.target.closest("#fillHolesBtn") && !e.target.closest("#holesPopup")) {
+                        document.getElementById("holesPopup").style.display = "none";
+                    }
+                });
                 document.getElementById("saveBtn").addEventListener("click", openSaveDialog);
                 document.getElementById("saveDialogClose").addEventListener("click", closeSaveDialog);
                 document.getElementById("save-dialog-backdrop").addEventListener("click", closeSaveDialog);
@@ -883,7 +902,7 @@ let meshCentroid = [0, 0, 0];
                 wireframeObj.visible = document.getElementById("wireToggle").checked;
                 scene.add(wireframeObj);
 
-                fitCamera();
+                if (!data.keepCamera) fitCamera();
             }
 
             // ── Build skeleton ───────────────────────────────────────────────────
@@ -1417,12 +1436,13 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
-            async function runFillHoles() {
+            async function runFillHoles(fillMethod) {
                 const btn = document.getElementById("fillHolesBtn");
+                document.getElementById("holesPopup").style.display = "none";
                 btn.textContent = "Filling...";
                 btn.disabled = true;
                 try {
-                    const resp = await fetch("/fill_holes", { method: "POST" });
+                    const resp = await fetch(`/fill_holes?method=${fillMethod}`, { method: "POST" });
                     const data = await resp.json();
                     btn.textContent = data.ok ? `Filled (${data.facesAfter.toLocaleString()}f)` : "Error";
                 } catch (e) {

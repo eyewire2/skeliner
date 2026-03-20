@@ -745,6 +745,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         # Clear annotations (they reference old face indices)
         annotations_path.write_text("{}", encoding="utf-8")
 
+        buffers["keepCamera"] = True
         await broadcast({"type": "mesh_loaded", "payload": buffers})
 
         # Re-send skeletons (centroid may have changed)
@@ -847,9 +848,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             )
         from skeliner.pre import fill_holes
 
+        method = request.query_params.get("method", "advancing_front")
+        dome_factor = float(request.query_params.get("dome_factor", "0.5"))
+
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-        new_mesh = await _run_with_log(fill_holes, mesh, verbose=True)
+        new_mesh = await _run_with_log(
+            fill_holes, mesh, method=method, dome_factor=dome_factor, verbose=True,
+        )
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)

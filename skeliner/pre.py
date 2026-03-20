@@ -543,11 +543,130 @@ def _fill_advancing_front(
     return np.array(new_faces, dtype=np.int64)
 
 
+def _fill_dome(
+    loop: list[int],
+    vertices: np.ndarray,
+    face_normals: np.ndarray,
+    vert_to_faces: list[list[int]] | None = None,
+    dome_factor: float = 0.5,
+    vert_offset: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fill a boundary loop with a convex dome cap.
+
+    Creates a center vertex pushed outward along the average boundary
+    normal, with concentric rings for larger holes.
+
+    Returns ``(new_vertices (K, 3), new_faces (M, 3))``.  Face indices
+    use original mesh indices for boundary vertices and
+    ``vert_offset + i`` for newly created vertices.
+    """
+    n = len(loop)
+    if n < 3:
+        return np.empty((0, 3)), np.empty((0, 3), dtype=np.int64)
+
+    boundary_pts = vertices[loop]
+    centroid = boundary_pts.mean(axis=0)
+
+    # ── Outward normal from adjacent faces ────────────────────────────
+    avg_normal = None
+    if vert_to_faces is not None:
+        adj_normals = []
+        for vi in loop:
+            for fi in vert_to_faces[vi]:
+                adj_normals.append(face_normals[fi])
+        if adj_normals:
+            avg_normal = np.mean(adj_normals, axis=0)
+            norm = np.linalg.norm(avg_normal)
+            if norm > 1e-10:
+                avg_normal = avg_normal / norm
+            else:
+                avg_normal = None
+
+    if avg_normal is None:
+        centered = boundary_pts - centroid
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        avg_normal = Vt[2]
+        if vert_to_faces is not None and vert_to_faces[loop[0]]:
+            ref = face_normals[vert_to_faces[loop[0]][0]]
+            if np.dot(avg_normal, ref) < 0:
+                avg_normal = -avg_normal
+
+    # ── Small holes: flat fill (no dome needed) ───────────────────────
+    if n == 3:
+        tri = np.array([[loop[0], loop[1], loop[2]]], dtype=np.int64)
+        v0, v1, v2 = vertices[loop[0]], vertices[loop[1]], vertices[loop[2]]
+        tri_n = np.cross(v1 - v0, v2 - v0)
+        if np.dot(tri_n, avg_normal) < 0:
+            tri = tri[:, ::-1]
+        return np.empty((0, 3)), tri
+
+    # ── Dome geometry ─────────────────────────────────────────────────
+    radii = np.linalg.norm(boundary_pts - centroid, axis=1)
+    avg_radius = float(radii.mean())
+    dome_height = avg_radius * dome_factor
+
+    # Intermediate rings for larger holes (better triangle quality)
+    n_rings = max(0, (n - 4) // 15)
+
+    new_verts_list: list[np.ndarray] = []
+    ring_indices: list[list[int]] = []
+
+    for r in range(1, n_rings + 1):
+        t = r / (n_rings + 1)          # 0 → boundary, 1 → center
+        frac = 1.0 - t                 # radial fraction
+        h = dome_height * (1.0 - frac * frac)  # parabolic profile
+        ring_pts = (
+            centroid
+            + (boundary_pts - centroid) * frac
+            + avg_normal * h
+        )
+        base = vert_offset + len(new_verts_list)
+        ring_indices.append(list(range(base, base + n)))
+        for pt in ring_pts:
+            new_verts_list.append(pt)
+
+    # Center vertex
+    center = centroid + avg_normal * dome_height
+    center_idx = vert_offset + len(new_verts_list)
+    new_verts_list.append(center)
+
+    # ── Triangulation ─────────────────────────────────────────────────
+    faces: list[list[int]] = []
+    prev = loop  # original vertex indices
+
+    # Boundary → rings (quad strips → 2 triangles each)
+    for ring in ring_indices:
+        for i in range(n):
+            j = (i + 1) % n
+            faces.append([prev[i], prev[j], ring[j]])
+            faces.append([prev[i], ring[j], ring[i]])
+        prev = ring
+
+    # Last ring (or boundary) → center fan
+    for i in range(n):
+        j = (i + 1) % n
+        faces.append([prev[i], prev[j], center_idx])
+
+    new_verts = np.array(new_verts_list)
+
+    # ── Consistent orientation ────────────────────────────────────────
+    def _pt(idx: int) -> np.ndarray:
+        return vertices[idx] if idx < vert_offset else new_verts[idx - vert_offset]
+
+    f0 = faces[0]
+    tri_n = np.cross(_pt(f0[1]) - _pt(f0[0]), _pt(f0[2]) - _pt(f0[0]))
+    if np.dot(tri_n, avg_normal) < 0:
+        faces = [[f[1], f[0], f[2]] for f in faces]
+
+    return new_verts, np.array(faces, dtype=np.int64)
+
+
 def fill_holes(
     mesh: trimesh.Trimesh,
     *,
     method: str = "advancing_front",
     max_perimeter_mult: float | None = None,
+    dome_factor: float = 0.5,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Fill holes in the mesh.
@@ -561,13 +680,19 @@ def fill_holes(
         - ``"advancing_front"`` — fast, closes boundary edges one by one
           by picking the sharpest angle. No new vertices. Works for all
           hole sizes.
+        - ``"dome"`` — fills with a convex dome cap pushed outward along
+          the boundary normal. Creates new vertices (center + optional
+          concentric rings). Fast, O(n). Best for neurite tip holes.
         - ``"rbf"`` — projects to 2D, ear-clips, refines, lifts with RBF.
           Better surface quality for small planar holes but slow and fails
           for large curved holes.
     max_perimeter_mult : float or None
         Skip holes whose perimeter exceeds this multiple of the median
         edge length.  ``None`` = no limit (fill all holes).
-        Default ``None`` for advancing_front, ``50.0`` for rbf.
+        Default ``None`` for advancing_front/dome, ``50.0`` for rbf.
+    dome_factor : float, default 0.5
+        Height of dome as fraction of hole radius (only for ``"dome"``).
+        0 = flat, 0.5 = gentle dome, 1.0 = hemisphere.
     verbose : bool, default False
         Print progress.
 
@@ -643,29 +768,56 @@ def fill_holes(
         all_faces = np.vstack([mesh.faces] + new_faces)
         result = trimesh.Trimesh(vertices=mesh.vertices, faces=all_faces, process=False)
 
-    elif method == "rbf":
-        vtree = KDTree(mesh.vertices)
+    elif method == "dome":
         new_verts: list[np.ndarray] = []
         new_face_list: list[np.ndarray] = []
+        offset = len(mesh.vertices)
+
+        for loop in valid_loops:
+            nv, nf = _fill_dome(
+                loop, mesh.vertices, mesh.face_normals, vert_to_faces,
+                dome_factor=dome_factor, vert_offset=offset,
+            )
+            if len(nv) > 0:
+                new_verts.append(nv)
+            if len(nf) > 0:
+                new_face_list.append(nf)
+            offset += len(nv)
+
+        if not new_face_list:
+            return mesh
+
+        v_parts = [mesh.vertices] + new_verts
+        f_parts = [mesh.faces] + new_face_list
+        result = trimesh.Trimesh(
+            vertices=np.vstack(v_parts),
+            faces=np.vstack(f_parts),
+            process=False,
+        )
+
+    elif method == "rbf":
+        vtree = KDTree(mesh.vertices)
+        new_verts_rbf: list[np.ndarray] = []
+        new_face_rbf: list[np.ndarray] = []
         offset = len(mesh.vertices)
 
         for loop in valid_loops:
             nv, nf = _fill_single_hole(
                 mesh, loop, target_edge, offset, vtree, vert_to_faces
             )
-            new_verts.append(nv)
-            new_face_list.append(nf)
+            new_verts_rbf.append(nv)
+            new_face_rbf.append(nf)
             offset += len(nv)
 
-        v_parts = [mesh.vertices] + [v for v in new_verts if len(v) > 0]
-        f_parts = [mesh.faces] + [f for f in new_face_list if len(f) > 0]
+        v_parts = [mesh.vertices] + [v for v in new_verts_rbf if len(v) > 0]
+        f_parts = [mesh.faces] + [f for f in new_face_rbf if len(f) > 0]
         result = trimesh.Trimesh(
             vertices=np.vstack(v_parts),
             faces=np.vstack(f_parts),
             process=False,
         )
     else:
-        raise ValueError(f"Unknown method: {method!r}. Use 'advancing_front' or 'rbf'.")
+        raise ValueError(f"Unknown method: {method!r}. Use 'advancing_front', 'dome', or 'rbf'.")
 
     if verbose:
         print(
