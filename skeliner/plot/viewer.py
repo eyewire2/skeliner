@@ -598,6 +598,41 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         return JSONResponse({"ok": True, "nFaces": len(faces)})
 
+    async def detect_disconnected(request):
+        """Run disconnected-component detection and write results to annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import find_disconnected
+
+        mesh = mesh_state["mesh"]
+        components = await _run_with_log(find_disconnected, mesh, verbose=True)
+
+        if not components:
+            return JSONResponse({"ok": False, "nComponents": 0})
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+
+        colors = [
+            [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
+            [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
+        ]
+        for i, faces in enumerate(components):
+            ann["highlights"].append({
+                "faces": faces,
+                "color": colors[i % len(colors)],
+                "label": f"disconnected {i} ({len(faces):,}f)",
+            })
+
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        return JSONResponse({"ok": True, "nComponents": len(components)})
+
     async def detect_soma(request):
         """Run soma detection and write result to annotations."""
         if mesh_state["mesh"] is None:
@@ -1632,6 +1667,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove_organelles", do_remove_organelles, methods=["POST"]),
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
             Route("/detect_fragments", detect_fragments, methods=["POST"]),
+            Route("/detect_disconnected", detect_disconnected, methods=["POST"]),
             Route("/detect_soma", detect_soma, methods=["POST"]),
             Route("/detect_gaps", detect_gaps, methods=["POST"]),
             Route("/remove_gaps", do_remove_gaps, methods=["POST"]),

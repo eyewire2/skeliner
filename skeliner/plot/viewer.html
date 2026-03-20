@@ -280,6 +280,7 @@
                 <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
                 <button id="detectRimsBtn" style="margin-left: 4px">Rims</button>
                 <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
+                <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
                 <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
                 <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
@@ -629,6 +630,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
                 document.getElementById("detectFragmentsBtn").addEventListener("click", runDetectFragments);
                 document.getElementById("detectSomaBtn").addEventListener("click", runDetectSoma);
+                document.getElementById("detectDisconnectedBtn").addEventListener("click", runDetectDisconnected);
                 document.getElementById("detectGapsBtn").addEventListener("click", runDetectGaps);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
                 document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
@@ -1499,6 +1501,21 @@ let meshCentroid = [0, 0, 0];
                     const resp = await fetch("/detect_soma", { method: "POST" });
                     const data = await resp.json();
                     btn.textContent = data.ok ? `Soma: ${data.nVerts.toLocaleString()}v` : "No soma";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runDetectDisconnected() {
+                const btn = document.getElementById("detectDisconnectedBtn");
+                btn.textContent = "Detecting...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/detect_disconnected", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Disconn: ${data.nComponents}` : "None";
                 } catch (e) {
                     btn.textContent = "Error";
                 } finally {
