@@ -272,6 +272,7 @@
                 <button id="detectRimsBtn" style="margin-left: 4px">Rims</button>
                 <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
                 <button id="detectFragmentsBtn" style="margin-left: 4px">Fragments</button>
+                <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
                 <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
@@ -588,6 +589,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
                 document.getElementById("detectFragmentsBtn").addEventListener("click", runDetectFragments);
+                document.getElementById("detectSomaBtn").addEventListener("click", runDetectSoma);
                 document.getElementById("detectGapsBtn").addEventListener("click", runDetectGaps);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
                 document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
@@ -1448,6 +1450,21 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
+            async function runDetectSoma() {
+                const btn = document.getElementById("detectSomaBtn");
+                btn.textContent = "Detecting...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/detect_soma", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Soma: ${data.nVerts.toLocaleString()}v` : "No soma";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
             async function runDetectGaps() {
                 const btn = document.getElementById("detectGapsBtn");
                 btn.textContent = "Detecting...";
@@ -2211,6 +2228,35 @@ let meshCentroid = [0, 0, 0];
                         const line = new THREE.LineSegments(geo, mat);
                         scene.add(line);
                         edgeGroupMeshes.push(line);
+                    }
+                }
+                // Ellipsoids (wireframe)
+                if (annotations.ellipsoids) {
+                    for (const ell of annotations.ellipsoids) {
+                        const c = ell.center || [0, 0, 0];
+                        const axes = ell.axes || [1, 1, 1];
+                        const R = ell.R || [[1,0,0],[0,1,0],[0,0,1]];
+                        const color = ell.color || [1, 1, 1];
+                        const geo = new THREE.SphereGeometry(1, 32, 24);
+                        const mat = new THREE.MeshBasicMaterial({
+                            color: new THREE.Color(color[0], color[1], color[2]),
+                            wireframe: true,
+                            transparent: true,
+                            opacity: 0.4,
+                            depthTest: true,
+                        });
+                        const m = new THREE.Mesh(geo, mat);
+                        // Apply scale (axes) then rotation (R columns are principal axes)
+                        const mtx = new THREE.Matrix4();
+                        mtx.set(
+                            R[0][0]*axes[0], R[0][1]*axes[1], R[0][2]*axes[2], c[0],
+                            R[1][0]*axes[0], R[1][1]*axes[1], R[1][2]*axes[2], c[1],
+                            R[2][0]*axes[0], R[2][1]*axes[1], R[2][2]*axes[2], c[2],
+                            0, 0, 0, 1
+                        );
+                        m.applyMatrix4(mtx);
+                        scene.add(m);
+                        markerMeshes.push(m);
                     }
                 }
             }

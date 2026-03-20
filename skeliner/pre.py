@@ -7,11 +7,14 @@ import numpy as np
 import trimesh
 from scipy.spatial import KDTree
 
+from skeliner.dataclass import Soma
+
 __all__ = [
     "ensure_watertight",
     "fill_holes",
     "find_gaps",
     "find_holes",
+    "find_soma",
     "remove_fins",
     "remove_fragments",
     "remove_fusions",
@@ -1284,6 +1287,169 @@ def find_fragments(
     return fragment
 
 
+def find_soma(
+    mesh: trimesh.Trimesh,
+    *,
+    max_fragment_faces: int = 50,
+    density_cutoff: float = 0.30,
+    verbose: bool = False,
+) -> Soma | None:
+    """Estimate soma from the spatial clustering of leftover small fragments.
+
+    After organelle removal, leftover internal fragments (failed removals)
+    cluster densely inside the soma.  Their median gives a robust centre.
+    A BFS flood on the main-component surface grows outward from that
+    centre; the soma boundary is where the frontier ring density (verts
+    per unit distance from centre) drops to *density_cutoff* × peak.
+
+    The returned :class:`Soma` is fit to the identified surface vertices.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh (should already have organelles removed).
+    max_fragment_faces : int, default 50
+        Components with at most this many faces are treated as the
+        indicator fragments whose clustering reveals the soma.
+    density_cutoff : float, default 0.30
+        Fraction of peak ring-density at which the soma boundary is set.
+    verbose : bool, default False
+        Print summary.
+
+    Returns
+    -------
+    Soma or None
+        Fitted ellipsoidal soma, or *None* if too few indicators exist.
+    """
+    from collections import deque
+
+    labels, main = _face_edge_components(mesh)
+
+    # ── 1. Locate soma centre from small-fragment clustering ──────────
+    centroids = []
+    for cid in np.unique(labels):
+        cid = int(cid)
+        if cid == main:
+            continue
+        fi = np.where(labels == cid)[0]
+        if len(fi) > max_fragment_faces:
+            continue
+        verts = np.unique(mesh.faces[fi])
+        centroids.append(mesh.vertices[verts].mean(axis=0))
+
+    centroids = np.asarray(centroids)
+    if len(centroids) < 3:
+        if verbose:
+            print("[skeliner.pre] Soma: too few indicator fragments")
+        return None
+
+    center = np.median(centroids, axis=0)
+    dists = np.linalg.norm(centroids - center, axis=1)
+    core = centroids[dists < 2 * np.median(dists)]
+    if len(core) < 3:
+        core = centroids
+    center = np.median(core, axis=0)
+
+    # ── 2. Build main-component vertex adjacency ─────────────────────
+    main_fi = np.where(labels == main)[0]
+    adj: dict[int, list[int]] = defaultdict(list)
+    for fi in main_fi:
+        v = mesh.faces[fi]
+        for i in range(3):
+            a, b = int(v[i]), int(v[(i + 1) % 3])
+            adj[a].append(b)
+            adj[b].append(a)
+
+    # ── 3. BFS from nearest vertex to centre ─────────────────────────
+    main_verts = np.fromiter(adj.keys(), dtype=np.intp)
+    seed = int(
+        main_verts[
+            np.argmin(np.linalg.norm(mesh.vertices[main_verts] - center, axis=1))
+        ]
+    )
+
+    ring_level: dict[int, int] = {seed: 0}
+    queue: deque[int] = deque([seed])
+    ring_verts: dict[int, list[int]] = defaultdict(list)
+    ring_verts[0].append(seed)
+
+    while queue:
+        v = queue.popleft()
+        lv = ring_level[v]
+        if lv > 500:
+            break
+        for nv in adj[v]:
+            if nv not in ring_level:
+                ring_level[nv] = lv + 1
+                queue.append(nv)
+                ring_verts[lv + 1].append(nv)
+
+    # ── 4. Ring-density analysis to find soma boundary ───────────────
+    max_ring = max(ring_verts.keys())
+    densities = np.zeros(max_ring + 1)
+    for lv in range(max_ring + 1):
+        verts_in_ring = ring_verts[lv]
+        n = len(verts_in_ring)
+        if n == 0:
+            continue
+        mean_r = float(
+            np.linalg.norm(mesh.vertices[verts_in_ring] - center, axis=1).mean()
+        )
+        densities[lv] = n / max(mean_r, 1.0)
+
+    # Smooth and find peak
+    window = 5
+    smoothed = np.convolve(densities, np.ones(window) / window, mode="same")
+    peak_ring = int(np.argmax(smoothed))
+    peak_val = smoothed[peak_ring]
+
+    # Cutoff: first ring past the peak where density < threshold × peak
+    cutoff = peak_ring
+    for lv in range(peak_ring, len(smoothed)):
+        if smoothed[lv] < density_cutoff * peak_val:
+            cutoff = lv
+            break
+
+    # ── 5. Collect soma vertices ────────────────────────────────────
+    soma_set: set[int] = set()
+    for lv in range(cutoff + 1):
+        soma_set.update(ring_verts[lv])
+
+    # Smooth the boundary: add vertices whose majority of neighbors are
+    # already in the soma (eliminates ragged single-face gaps at the edge).
+    for _pass in range(3):
+        additions: list[int] = []
+        for v in list(soma_set):
+            for nv in adj[v]:
+                if nv in soma_set:
+                    continue
+                n_soma = sum(1 for nn in adj[nv] if nn in soma_set)
+                if n_soma > len(adj[nv]) // 2:
+                    additions.append(nv)
+        if not additions:
+            break
+        soma_set.update(additions)
+
+    soma_verts = np.fromiter(sorted(soma_set), dtype=np.intp)
+
+    # ── 6. Fit ellipsoid ─────────────────────────────────────────────
+    soma = Soma.fit(mesh.vertices[soma_verts], verts=soma_verts)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma: center=["
+            f"{soma.center[0]:.0f}, {soma.center[1]:.0f}, "
+            f"{soma.center[2]:.0f}], "
+            f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
+            f"{soma.axes[2]:.0f}], "
+            f"{len(soma_verts):,} surface verts "
+            f"({len(core)}/{len(centroids)} indicator fragments, "
+            f"cutoff ring {cutoff})"
+        )
+
+    return soma
+
+
 def find_gaps(
     mesh: trimesh.Trimesh,
     *,
@@ -1294,7 +1460,7 @@ def find_gaps(
 
     A "gap" is a substantial disconnected component — a neurite segment
     broken off from the main mesh due to segmentation / proofreading
-    errors.  Tiny fragments (fins, islands, soma debris) are excluded.
+    errors.  Tiny fragments and soma-region debris are excluded.
 
     Parameters
     ----------
@@ -1315,6 +1481,9 @@ def find_gaps(
     labels, main = _face_edge_components(mesh)
     n_faces = len(mesh.faces)
 
+    # Locate soma so we can exclude components inside it
+    soma = find_soma(mesh, verbose=verbose)
+
     # Collect non-main components that meet the size threshold
     comp_faces: dict[int, list[int]] = {}
     for fi in range(n_faces):
@@ -1324,9 +1493,17 @@ def find_gaps(
         comp_faces.setdefault(cid, []).append(fi)
 
     gaps = []
+    n_soma_excluded = 0
     for cid, fis in comp_faces.items():
         if len(fis) < min_faces:
             continue
+        # Exclude components whose centroid falls inside the soma ellipsoid
+        if soma is not None:
+            verts = np.unique(mesh.faces[fis])
+            centroid = mesh.vertices[verts].mean(axis=0)
+            if soma.contains(centroid.reshape(1, -1))[0]:
+                n_soma_excluded += 1
+                continue
         gaps.append(fis)
 
     # Sort largest-first
@@ -1334,9 +1511,14 @@ def find_gaps(
 
     if verbose:
         total = sum(len(g) for g in gaps)
+        soma_msg = (
+            f", {n_soma_excluded} excluded in soma"
+            if n_soma_excluded
+            else ""
+        )
         print(
             f"[skeliner.pre] Gaps: {len(gaps)} components, "
-            f"{total:,} faces (min_faces={min_faces})"
+            f"{total:,} faces (min_faces={min_faces}{soma_msg})"
         )
         for i, g in enumerate(gaps):
             verts = np.unique(mesh.faces[g])

@@ -183,6 +183,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "centroid": np.zeros(3, dtype=np.float32),
         "organelle_mask": None, # cached from detect_organelles
         "fusion_clusters": None, # cached from detect_fusions
+        "soma": None, # cached from detect_soma
         "gap_clusters": None, # cached from detect_gaps
         "hole_loops": None, # cached from detect_holes
     }
@@ -593,6 +594,60 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
         return JSONResponse({"ok": True, "nFaces": len(faces)})
+
+    async def detect_soma(request):
+        """Run soma detection and write result to annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import find_soma
+
+        mesh = mesh_state["mesh"]
+        soma = await _run_with_log(find_soma, mesh, verbose=True)
+        if soma is None:
+            return JSONResponse({"ok": False, "error": "No soma found"})
+
+        mesh_state["soma"] = soma
+
+        # Highlight soma surface vertices via their faces
+        # Include faces where at least 2 of 3 vertices are soma verts
+        soma_vset = set(int(v) for v in soma.verts)
+        soma_faces = [
+            int(fi) for fi in range(len(mesh.faces))
+            if sum(1 for v in mesh.faces[fi] if int(v) in soma_vset) >= 2
+        ]
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+        ann["highlights"].append({
+            "faces": soma_faces,
+            "color": [0.9, 0.5, 0.9],
+            "label": f"soma ({len(soma_faces):,}f, {len(soma.verts):,}v)",
+        })
+
+        # Wireframe ellipsoid (coordinates shifted by mesh centroid)
+        centroid = mesh_state["centroid"]
+        if "ellipsoids" not in ann:
+            ann["ellipsoids"] = []
+        ann["ellipsoids"].append({
+            "center": (soma.center - centroid).tolist(),
+            "axes": soma.axes.tolist(),
+            "R": soma.R.tolist(),
+            "color": [0.9, 0.5, 0.9],
+        })
+
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+
+        return JSONResponse({
+            "ok": True,
+            "nFaces": len(soma_faces),
+            "nVerts": len(soma.verts),
+        })
 
     async def detect_gaps(request):
         """Run gap detection and write results to annotations."""
@@ -1533,6 +1588,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove_organelles", do_remove_organelles, methods=["POST"]),
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
             Route("/detect_fragments", detect_fragments, methods=["POST"]),
+            Route("/detect_soma", detect_soma, methods=["POST"]),
             Route("/detect_gaps", detect_gaps, methods=["POST"]),
             Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
