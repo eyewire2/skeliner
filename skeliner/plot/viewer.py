@@ -187,6 +187,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "organelle_mask": None, # cached from detect_organelles
         "fusion_clusters": None, # cached from detect_fusions
         "soma": None, # cached from detect_soma
+        "disconnected": None, # cached from detect_disconnected
         "gap_clusters": None, # cached from detect_gaps
         "hole_loops": None, # cached from detect_holes
     }
@@ -605,10 +606,17 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import find_disconnected
+        from skeliner.pre import find_disconnected, find_soma
 
         mesh = mesh_state["mesh"]
-        components = await _run_with_log(find_disconnected, mesh, verbose=True)
+        soma = mesh_state.get("soma")
+        if soma is None:
+            soma = await _run_with_log(find_soma, mesh, verbose=True)
+            mesh_state["soma"] = soma
+        components = await _run_with_log(
+            find_disconnected, mesh, verbose=True, _precomputed_soma=soma
+        )
+        mesh_state["disconnected"] = components
 
         if not components:
             return JSONResponse({"ok": False, "nComponents": 0})
@@ -704,8 +712,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             soma = await _run_with_log(find_soma, mesh, verbose=True)
             mesh_state["soma"] = soma
 
+        cached_disc = mesh_state.get("disconnected")
         gaps = await _run_with_log(
-            find_gaps, mesh, verbose=True, _precomputed_soma=soma
+            find_gaps, mesh, verbose=True,
+            _precomputed_soma=soma,
+            _precomputed_disconnected=cached_disc,
         )
         mesh_state["gap_clusters"] = gaps
 
@@ -964,6 +975,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh_state["mesh"] = new_mesh
         mesh_state["organelle_mask"] = None  # invalidate caches
         mesh_state["fusion_clusters"] = None
+        mesh_state["disconnected"] = None
         mesh_state["hole_loops"] = None
         # Keep the original centroid so the camera doesn't shift
         original_centroid = mesh_state["centroid"]

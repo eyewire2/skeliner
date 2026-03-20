@@ -1715,10 +1715,10 @@ def find_disconnected(
 def find_gaps(
     mesh: trimesh.Trimesh,
     *,
-    min_faces: int = 100,
     tip_rings: int = 3,
     verbose: bool = False,
     _precomputed_soma: Soma | None = None,
+    _precomputed_disconnected: list[list[int]] | None = None,
 ) -> list[tuple[list[int], list[int], float]]:
     """Detect gaps between disconnected components and the main mesh.
 
@@ -1729,8 +1729,6 @@ def find_gaps(
     ----------
     mesh : trimesh.Trimesh
         Input mesh.
-    min_faces : int, default 100
-        Minimum face count for a disconnected component to qualify.
     tip_rings : int, default 3
         Number of face-graph BFS rings from the closest face to
         collect as tip faces on each side of a gap.
@@ -1738,6 +1736,8 @@ def find_gaps(
         Print summary.
     _precomputed_soma : Soma or None
         Pre-computed soma from :func:`find_soma`.
+    _precomputed_disconnected : list[list[int]] or None
+        Pre-computed disconnected components from :func:`find_disconnected`.
 
     Returns
     -------
@@ -1749,11 +1749,14 @@ def find_gaps(
     labels, main = _face_edge_components(mesh)
 
     # Get disconnected components (reuse filtering logic)
-    disc = find_disconnected(
-        mesh,
-        verbose=verbose,
-        _precomputed_soma=_precomputed_soma,
-    )
+    if _precomputed_disconnected is not None:
+        disc = _precomputed_disconnected
+    else:
+        disc = find_disconnected(
+            mesh,
+            verbose=verbose,
+            _precomputed_soma=_precomputed_soma,
+        )
 
     if not disc:
         return []
