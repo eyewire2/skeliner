@@ -302,7 +302,10 @@
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
                 </span>
-                <button id="saveBtn">Save</button>
+                <span>
+                    <button id="undoBtn" style="margin-right: 4px">Undo</button>
+                    <button id="saveBtn">Save</button>
+                </span>
             </div>
         </div>
 
@@ -593,6 +596,7 @@ let meshCentroid = [0, 0, 0];
                         document.getElementById("holesPopup").style.display = "none";
                     }
                 });
+                document.getElementById("undoBtn").addEventListener("click", runUndo);
                 document.getElementById("saveBtn").addEventListener("click", openSaveDialog);
                 document.getElementById("saveDialogClose").addEventListener("click", closeSaveDialog);
                 document.getElementById("save-dialog-backdrop").addEventListener("click", closeSaveDialog);
@@ -1445,6 +1449,25 @@ let meshCentroid = [0, 0, 0];
                     const resp = await fetch(`/fill_holes?method=${fillMethod}`, { method: "POST" });
                     const data = await resp.json();
                     btn.textContent = data.ok ? `Filled (${data.facesAfter.toLocaleString()}f)` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runUndo() {
+                const btn = document.getElementById("undoBtn");
+                btn.textContent = "Undoing...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/undo", { method: "POST" });
+                    const data = await resp.json();
+                    if (data.ok) {
+                        btn.textContent = data.undoRemaining > 0 ? `Undo (${data.undoRemaining})` : "Undo";
+                    } else {
+                        btn.textContent = "Nothing to undo";
+                    }
                 } catch (e) {
                     btn.textContent = "Error";
                 } finally {

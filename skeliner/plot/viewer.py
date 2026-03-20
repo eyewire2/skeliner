@@ -229,6 +229,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     state_path.write_text(json.dumps(initial, indent=2), encoding="utf-8")
 
     connected_clients: list[WebSocket] = []
+    _undo_stack: list[trimesh.Trimesh] = []
+    _UNDO_LIMIT = 10
 
     # ── Broadcast helper ──────────────────────────────────────────────
     async def broadcast(msg: dict):
@@ -737,6 +739,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
     async def _apply_new_mesh(new_mesh):
         """Replace the current mesh with a modified one and broadcast."""
+        # Save current mesh for undo
+        old = mesh_state["mesh"]
+        if old is not None:
+            _undo_stack.append(old)
+            if len(_undo_stack) > _UNDO_LIMIT:
+                _undo_stack.pop(0)
+
         mesh_state["mesh"] = new_mesh
         buffers = _mesh_to_buffers(new_mesh)
         mesh_state["buffers"] = buffers
@@ -864,6 +873,53 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "ok": True,
             "facesBefore": n_before,
             "facesAfter": n_after,
+        })
+
+    async def undo_mesh(request):
+        """Revert to the previous mesh state."""
+        if not _undo_stack:
+            return JSONResponse(
+                {"ok": False, "error": "Nothing to undo"}, status_code=400
+            )
+        prev_mesh = _undo_stack.pop()
+        # Apply without pushing to undo stack
+        mesh_state["mesh"] = prev_mesh
+        buffers = _mesh_to_buffers(prev_mesh)
+        mesh_state["buffers"] = buffers
+        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+        annotations_path.write_text("{}", encoding="utf-8")
+        buffers["keepCamera"] = True
+        await broadcast({"type": "mesh_loaded", "payload": buffers})
+
+        for sname, sstate in skeleton_states.items():
+            if sstate.get("l2_graph"):
+                sstate["buffers"] = _l2_graph_to_buffers(
+                    Path(sstate["path"]), mesh_state["centroid"]
+                )
+            else:
+                sstate["buffers"] = _skeleton_to_buffers(
+                    sstate["skeleton"], mesh_state["centroid"]
+                )
+            sstate["buffers"]["color"] = sstate["color"]
+            await broadcast({"type": "skeleton_loaded", "payload": {
+                "name": sname, **sstate["buffers"]
+            }})
+
+        current = {}
+        if state_path.exists():
+            current = json.loads(state_path.read_text(encoding="utf-8"))
+        current["mesh"] = {
+            "path": mesh_state["path"],
+            "nVertices": len(prev_mesh.vertices),
+            "nFaces": len(prev_mesh.faces),
+        }
+        state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+
+        print(f"Undo: restored mesh with {len(prev_mesh.faces):,} faces ({len(_undo_stack)} steps remaining)")
+        return JSONResponse({
+            "ok": True,
+            "nFaces": len(prev_mesh.faces),
+            "undoRemaining": len(_undo_stack),
         })
 
     async def export_mesh(request):
@@ -1331,6 +1387,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
             Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
+            Route("/undo", undo_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
