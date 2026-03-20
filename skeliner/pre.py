@@ -704,10 +704,7 @@ def fill_holes(
     if holes is not None:
         loops = holes
         if verbose:
-            print(
-                f"[skeliner.pre] Using provided holes "
-                f"({len(loops)} loops)"
-            )
+            print(f"[skeliner.pre] Using provided holes ({len(loops)} loops)")
     else:
         loops = find_holes(mesh, verbose=verbose)
     if not loops:
@@ -1134,6 +1131,158 @@ def merge_selected_faces(
     return result
 
 
+def _find_island_faces(
+    faces: np.ndarray,
+    active: np.ndarray,
+    min_faces: int = 3,
+) -> np.ndarray:
+    """Return mask of island faces among *active* faces.
+
+    Islands are edge-connected components with fewer than *min_faces*.
+    """
+    active_idx = np.where(active)[0]
+    af = faces[active_idx]
+    n_active = len(af)
+    if n_active == 0:
+        return np.zeros(len(faces), dtype=bool)
+
+    # Build edge-to-face adjacency for active faces only
+    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for li, face in enumerate(af):
+        for i in range(3):
+            a, b = int(face[i]), int(face[(i + 1) % 3])
+            edge_to_faces[(min(a, b), max(a, b))].append(li)
+
+    # BFS connected components (local indices)
+    labels = np.full(n_active, -1, dtype=np.intp)
+    comp_id = 0
+    best_id, best_size = 0, 0
+    for seed in range(n_active):
+        if labels[seed] >= 0:
+            continue
+        queue = [seed]
+        labels[seed] = comp_id
+        size = 0
+        while queue:
+            li = queue.pop()
+            size += 1
+            face = af[li]
+            for i in range(3):
+                a, b = int(face[i]), int(face[(i + 1) % 3])
+                for nb in edge_to_faces[(min(a, b), max(a, b))]:
+                    if labels[nb] < 0:
+                        labels[nb] = comp_id
+                        queue.append(nb)
+        if size > best_size:
+            best_id, best_size = comp_id, size
+        comp_id += 1
+
+    comp_ids, counts = np.unique(labels, return_counts=True)
+    small = set(
+        int(c) for c, n in zip(comp_ids, counts) if n < min_faces and c != best_id
+    )
+    if not small:
+        return np.zeros(len(faces), dtype=bool)
+
+    island_local = np.array([int(labels[li]) in small for li in range(n_active)])
+    mask = np.zeros(len(faces), dtype=bool)
+    mask[active_idx[island_local]] = True
+    return mask
+
+
+def _find_fin_faces(
+    faces: np.ndarray,
+    active: np.ndarray,
+) -> np.ndarray:
+    """Return mask of fin faces among *active* faces (iterates until stable)."""
+    work = active.copy()
+    max_v = int(faces.max()) + 1
+    total_mask = np.zeros(len(faces), dtype=bool)
+
+    for _ in range(100):
+        active_idx = np.where(work)[0]
+        af = faces[active_idx]
+        n_active = len(af)
+        if n_active == 0:
+            break
+
+        v0, v1, v2 = af[:, 0], af[:, 1], af[:, 2]
+        e_a = np.stack([np.minimum(v0, v1), np.maximum(v0, v1)], axis=1)
+        e_b = np.stack([np.minimum(v1, v2), np.maximum(v1, v2)], axis=1)
+        e_c = np.stack([np.minimum(v2, v0), np.maximum(v2, v0)], axis=1)
+        all_edges = np.concatenate([e_a, e_b, e_c], axis=0)
+
+        edge_keys = all_edges[:, 0].astype(np.int64) * max_v + all_edges[:, 1]
+        _, inverse, counts = np.unique(
+            edge_keys, return_inverse=True, return_counts=True
+        )
+        edge_counts = counts[inverse]
+
+        is_boundary = edge_counts.reshape(3, n_active) == 1
+        fin_local = is_boundary.sum(axis=0) >= 2
+        n_fins = int(fin_local.sum())
+        if n_fins == 0:
+            break
+
+        fin_global_idx = active_idx[fin_local]
+        total_mask[fin_global_idx] = True
+        work[fin_global_idx] = False
+
+    return total_mask
+
+
+def find_fragments(
+    mesh: trimesh.Trimesh,
+    *,
+    min_faces: int = 3,
+    verbose: bool = False,
+) -> np.ndarray:
+    """Detect all fragment faces (islands and fins) without modifying the mesh.
+
+    Alternates island and fin detection on a boolean mask until stable,
+    exactly mirroring the logic of :func:`remove_fragments`.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    min_faces : int, default 3
+        Edge-connected components with fewer faces than this are islands.
+    verbose : bool, default False
+        Print summary.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask ``(nFaces,)`` — fragment faces (islands + fins).
+    """
+    faces = mesh.faces
+    active = np.ones(len(faces), dtype=bool)
+    fragment = np.zeros(len(faces), dtype=bool)
+
+    for _ in range(100):
+        prev = int(active.sum())
+        islands = _find_island_faces(faces, active, min_faces)
+        active &= ~islands
+        fragment |= islands
+
+        fins = _find_fin_faces(faces, active)
+        active &= ~fins
+        fragment |= fins
+
+        if int(active.sum()) == prev:
+            break
+
+    if verbose:
+        n_frag = int(fragment.sum())
+        print(
+            f"[skeliner.pre] Fragments: {n_frag:,} faces "
+            f"({int(islands.sum()):,} islands, {int(fins.sum()):,} fins "
+            f"in last pass)"
+        )
+    return fragment
+
+
 def remove_islands(
     mesh: trimesh.Trimesh,
     *,
@@ -1161,32 +1310,22 @@ def remove_islands(
     trimesh.Trimesh
         Mesh with islands removed.
     """
-    labels, main = _face_edge_components(mesh)
+    active = np.ones(len(mesh.faces), dtype=bool)
+    islands = _find_island_faces(mesh.faces, active, min_faces)
+    n_removed = int(islands.sum())
 
-    # Count faces per component
-    comp_ids, counts = np.unique(labels, return_counts=True)
-    small_comps = set(
-        int(c) for c, n in zip(comp_ids, counts) if n < min_faces and c != main
-    )
-
-    if not small_comps:
+    if n_removed == 0:
         if verbose:
             print("[skeliner.pre] No islands to remove")
         return mesh
 
-    keep_mask = np.array(
-        [int(labels[fi]) not in small_comps for fi in range(len(mesh.faces))]
-    )
-    n_removed = int((~keep_mask).sum())
-
-    clean = mesh.submesh([np.where(keep_mask)[0]], append=True)
+    clean = mesh.submesh([np.where(~islands)[0]], append=True)
     clean.remove_unreferenced_vertices()
 
     if verbose:
         print(
-            f"[skeliner.pre] Removed {len(small_comps)} islands "
-            f"({n_removed} faces, "
-            f"{len(mesh.vertices) - len(clean.vertices)} verts)"
+            f"[skeliner.pre] Removed islands: {n_removed} faces, "
+            f"{len(mesh.vertices) - len(clean.vertices)} verts"
         )
     return clean
 
@@ -1202,43 +1341,20 @@ def remove_fins(
     3 edges are boundary edges).  This iterates until no more fins
     remain, since removing a fin can expose new fins.
     """
-    result = mesh
-    total_removed = 0
+    active = np.ones(len(mesh.faces), dtype=bool)
+    fins = _find_fin_faces(mesh.faces, active)
+    n_removed = int(fins.sum())
 
-    for _ in range(100):
-        edge_count: dict[tuple[int, int], int] = defaultdict(int)
-        for face in result.faces:
-            for i in range(3):
-                e = (
-                    min(int(face[i]), int(face[(i + 1) % 3])),
-                    max(int(face[i]), int(face[(i + 1) % 3])),
-                )
-                edge_count[e] += 1
+    if n_removed == 0:
+        if verbose:
+            print("[skeliner.pre] No fins to remove")
+        return mesh
 
-        fin_mask = np.zeros(len(result.faces), dtype=bool)
-        for fi, face in enumerate(result.faces):
-            n_bnd = 0
-            for i in range(3):
-                e = (
-                    min(int(face[i]), int(face[(i + 1) % 3])),
-                    max(int(face[i]), int(face[(i + 1) % 3])),
-                )
-                if edge_count[e] == 1:
-                    n_bnd += 1
-            if n_bnd >= 2:
-                fin_mask[fi] = True
+    result = mesh.submesh([np.where(~fins)[0]], append=True)
+    result.remove_unreferenced_vertices()
 
-        n_fins = int(fin_mask.sum())
-        if n_fins == 0:
-            break
-
-        total_removed += n_fins
-        keep = ~fin_mask
-        result = result.submesh([np.where(keep)[0]], append=True)
-        result.remove_unreferenced_vertices()
-
-    if verbose and total_removed > 0:
-        print(f"[skeliner.pre] Removed {total_removed} fin faces")
+    if verbose:
+        print(f"[skeliner.pre] Removed {n_removed} fin faces")
 
     return result
 
@@ -1248,20 +1364,21 @@ def remove_fragments(
     *,
     min_faces: int = 3,
     verbose: bool = False,
+    _precomputed: np.ndarray | None = None,
 ) -> trimesh.Trimesh:
     """Remove all fragments (islands and fins) by alternating until convergence.
 
     Islands are small edge-disconnected components; fins are faces
     hanging by a single edge.  Removing one type can create the other,
-    so this alternates ``remove_islands`` and ``remove_fins`` until the
-    face count stabilises.
+    so this alternates island and fin detection on a mask until stable,
+    then rebuilds the mesh once.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Input mesh.
     min_faces : int, default 3
-        Passed to :func:`remove_islands`.
+        Passed to island detection.
     verbose : bool, default False
         Print progress.
 
@@ -1270,13 +1387,17 @@ def remove_fragments(
     trimesh.Trimesh
         Mesh with all fragments removed.
     """
-    result = mesh
-    for _ in range(100):
-        prev = len(result.faces)
-        result = remove_islands(result, min_faces=min_faces, verbose=verbose)
-        result = remove_fins(result, verbose=verbose)
-        if len(result.faces) == prev:
-            break
+    if _precomputed is not None:
+        fragment = _precomputed
+    else:
+        fragment = find_fragments(mesh, min_faces=min_faces, verbose=verbose)
+
+    n_removed = int(fragment.sum())
+    if n_removed == 0:
+        return mesh
+
+    result = mesh.submesh([np.where(~fragment)[0]], append=True)
+    result.remove_unreferenced_vertices()
     return result
 
 
@@ -1752,7 +1873,7 @@ def find_pocket_organelles(
     *,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
-    grow_threshold: float = 0.1,
+    grow_threshold: float = 0.3,
     bridge_threshold: float = 0.3,
     max_hole_size: int = 50,
     min_pocket_size: int = 5,

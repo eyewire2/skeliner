@@ -564,6 +564,35 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         n_faces = sum(len(h["faces"]) for h in highlights)
         return JSONResponse({"ok": True, "nFaces": n_faces})
 
+    async def detect_fragments(request):
+        """Run fragment detection and write results to annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import find_fragments
+
+        mesh = mesh_state["mesh"]
+        mask = await _run_with_log(find_fragments, mesh, verbose=True)
+        mesh_state["fragment_mask"] = mask
+
+        faces = [int(fi) for fi in np.where(mask)[0]]
+        if faces:
+            ann = {}
+            if annotations_path.exists():
+                ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+            if "highlights" not in ann:
+                ann["highlights"] = []
+            ann["highlights"].append({
+                "faces": faces,
+                "color": [0.6, 0.6, 0.6],
+                "label": f"fragments ({len(faces):,})",
+            })
+            annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+
+        return JSONResponse({"ok": True, "nFaces": len(faces)})
+
     async def check_fusion(request):
         """Analyze highlighted faces for fusion signals."""
         if mesh_state["mesh"] is None:
@@ -876,7 +905,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-        new_mesh = await _run_with_log(_remove_fragments, mesh, verbose=True)
+        cached = mesh_state.get("fragment_mask")
+
+        if cached is not None and len(cached) == len(mesh.faces) and cached.any():
+            print(f"Using cached fragment mask ({int(cached.sum()):,} faces)")
+            new_mesh = _remove_fragments(mesh, _precomputed=cached)
+        else:
+            new_mesh = await _run_with_log(_remove_fragments, mesh, verbose=True)
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)
@@ -1460,6 +1495,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/detect_holes", detect_holes, methods=["POST"]),
             Route("/remove_organelles", do_remove_organelles, methods=["POST"]),
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
+            Route("/detect_fragments", detect_fragments, methods=["POST"]),
             Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
