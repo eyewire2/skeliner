@@ -681,11 +681,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
             [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
         ]
-        for i, cluster in enumerate(gaps):
+        for i, (faces_a, faces_b, dist) in enumerate(gaps):
+            color = colors[i % len(colors)]
             ann["highlights"].append({
-                "faces": cluster,
-                "color": colors[i % len(colors)],
-                "label": f"gap {i} ({len(cluster):,}f)",
+                "faces": faces_a + faces_b,
+                "color": color,
+                "label": f"gap {i} ({len(faces_a)}f ↔ {len(faces_b)}f, {dist:.0f}nm)",
             })
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")

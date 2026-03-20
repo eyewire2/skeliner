@@ -12,6 +12,7 @@ from skeliner.dataclass import Soma
 __all__ = [
     "ensure_watertight",
     "fill_holes",
+    "find_disconnected",
     "find_gaps",
     "find_holes",
     "find_soma",
@@ -1477,43 +1478,45 @@ def find_soma(
     return soma
 
 
-def find_gaps(
+def find_disconnected(
     mesh: trimesh.Trimesh,
     *,
     min_faces: int = 100,
     verbose: bool = False,
     _precomputed_soma: Soma | None = None,
 ) -> list[list[int]]:
-    """Detect disconnected mesh components that represent segmentation gaps.
+    """Detect disconnected mesh components from segmentation errors.
 
-    A "gap" is a substantial disconnected component — a neurite segment
-    broken off from the main mesh due to segmentation / proofreading
-    errors.  Tiny fragments and soma-region debris are excluded.
+    Returns substantial disconnected components — broken neurite segments
+    that are separate from the main mesh.  Tiny fragments, soma-region
+    debris, and organelle-like blobs are excluded.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Input mesh.
     min_faces : int, default 100
-        Minimum face count for a component to be considered a gap.
-        Smaller components are treated as fragments, not gaps.
+        Minimum face count for a component to qualify.
     verbose : bool, default False
         Print summary.
     _precomputed_soma : Soma or None
-        Pre-computed soma from :func:`find_soma`.  When *None* (default),
-        ``find_soma`` is called internally.
+        Pre-computed soma from :func:`find_soma`.
 
     Returns
     -------
     list[list[int]]
-        Each element is a list of face indices for one gap component,
-        sorted largest-first.
+        Each element is a list of face indices for one disconnected
+        component, sorted largest-first.
     """
     labels, main = _face_edge_components(mesh)
     n_faces = len(mesh.faces)
 
     # Locate soma so we can exclude components inside it
-    soma = _precomputed_soma if _precomputed_soma is not None else find_soma(mesh, verbose=verbose)
+    soma = (
+        _precomputed_soma
+        if _precomputed_soma is not None
+        else find_soma(mesh, verbose=verbose)
+    )
 
     # KD-tree of main-component vertices for proximity checks
     main_verts = np.unique(mesh.faces[np.where(labels == main)[0]])
@@ -1527,7 +1530,7 @@ def find_gaps(
             continue
         comp_faces.setdefault(cid, []).append(fi)
 
-    gaps = []
+    components = []
     n_soma_excluded = 0
     n_organelle_excluded = 0
     for cid, fis in comp_faces.items():
@@ -1545,7 +1548,6 @@ def find_gaps(
 
         # Exclude organelle-like components: blob-shaped (PCA < 5) AND
         # touching or very close to the main mesh (likely enclosed).
-        # Real gap fragments are isolated in space (far from main).
         if len(verts) >= 4:
             centered = coords - centroid
             evals = np.linalg.eigh(np.cov(centered.T))[0]
@@ -1556,32 +1558,160 @@ def find_gaps(
                     n_organelle_excluded += 1
                     continue
 
-        gaps.append(fis)
+        components.append((cid, fis))
 
     # Sort largest-first
-    gaps.sort(key=len, reverse=True)
+    components.sort(key=lambda x: -len(x[1]))
 
     if verbose:
-        total = sum(len(g) for g in gaps)
+        total = sum(len(fis) for _, fis in components)
         excluded = []
         if n_soma_excluded:
             excluded.append(f"{n_soma_excluded} in soma")
         if n_organelle_excluded:
             excluded.append(f"{n_organelle_excluded} organelle-like")
-        soma_msg = f", {', '.join(excluded)} excluded" if excluded else ""
+        exc_msg = f", {', '.join(excluded)} excluded" if excluded else ""
         print(
-            f"[skeliner.pre] Gaps: {len(gaps)} components, "
-            f"{total:,} faces (min_faces={min_faces}{soma_msg})"
+            f"[skeliner.pre] Disconnected: {len(components)} components, "
+            f"{total:,} faces (min_faces={min_faces}{exc_msg})"
         )
-        for i, g in enumerate(gaps):
-            verts = np.unique(mesh.faces[g])
-            coords = mesh.vertices[verts]
-            centroid = coords.mean(axis=0)
-            extent = coords.max(axis=0) - coords.min(axis=0)
+
+    return [fis for _, fis in components]
+
+
+def find_gaps(
+    mesh: trimesh.Trimesh,
+    *,
+    min_faces: int = 100,
+    tip_radius_factor: float = 2.0,
+    verbose: bool = False,
+    _precomputed_soma: Soma | None = None,
+) -> list[tuple[list[int], list[int], float]]:
+    """Detect gaps between disconnected components and the main mesh.
+
+    Each gap is a pair of face groups — the tip faces on each side of
+    the break — ready for bridging.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    min_faces : int, default 100
+        Minimum face count for a disconnected component to qualify.
+    tip_radius_factor : float, default 2.0
+        Tip faces are collected within ``tip_radius_factor × gap_distance``
+        of the closest point on each side.
+    verbose : bool, default False
+        Print summary.
+    _precomputed_soma : Soma or None
+        Pre-computed soma from :func:`find_soma`.
+
+    Returns
+    -------
+    list[tuple[list[int], list[int], float]]
+        Each element is ``(faces_a, faces_b, gap_distance)`` where
+        *faces_a* and *faces_b* are face-index lists on each side of
+        the gap, sorted by gap distance (smallest first).
+    """
+    labels, main = _face_edge_components(mesh)
+
+    # Get disconnected components (reuse filtering logic)
+    disc = find_disconnected(
+        mesh,
+        min_faces=min_faces,
+        verbose=verbose,
+        _precomputed_soma=_precomputed_soma,
+    )
+
+    if not disc:
+        return []
+
+    # Build KD-trees: main component + each disconnected component
+    comp_data: dict[int, dict] = {}
+
+    # Main component
+    main_fi = np.where(labels == main)[0]
+    main_verts = np.unique(mesh.faces[main_fi])
+    comp_data[main] = {
+        "fi": main_fi,
+        "verts": main_verts,
+        "coords": mesh.vertices[main_verts],
+        "tree": KDTree(mesh.vertices[main_verts]),
+    }
+
+    # Disconnected components — identify by their label
+    for fis in disc:
+        cid = int(labels[fis[0]])
+        verts = np.unique(mesh.faces[fis])
+        comp_data[cid] = {
+            "fi": np.asarray(fis),
+            "verts": verts,
+            "coords": mesh.vertices[verts],
+            "tree": KDTree(mesh.vertices[verts]),
+        }
+
+    # For each disconnected component, find its nearest neighbour.
+    # Deduplicate: if A→B and B→A both exist, keep only one.
+    gaps = []
+    seen_pairs: set[tuple[int, int]] = set()
+    disc_cids = [int(labels[fis[0]]) for fis in disc]
+    all_cids = [main] + disc_cids
+
+    for cid in disc_cids:
+        d = comp_data[cid]
+        best_dist = float("inf")
+        best_other = None
+        best_idx_self = None
+        best_idx_other = None
+
+        for oid in all_cids:
+            if oid == cid:
+                continue
+            od = comp_data[oid]
+            dists, idxs = od["tree"].query(d["coords"])
+            min_i = int(np.argmin(dists))
+            if dists[min_i] < best_dist:
+                best_dist = float(dists[min_i])
+                best_other = oid
+                best_idx_self = min_i
+                best_idx_other = int(idxs[min_i])
+
+        if best_other is None:
+            continue
+
+        pair_key = (min(cid, best_other), max(cid, best_other))
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+
+        # Tip points
+        pt_self = d["coords"][best_idx_self]
+        pt_other = comp_data[best_other]["coords"][best_idx_other]
+
+        # Collect tip faces within radius of the closest point
+        tip_r = max(best_dist * tip_radius_factor, 500.0)
+
+        def _tip_faces(comp_fi, tip_pt, radius):
+            centroids = mesh.vertices[mesh.faces[comp_fi]].mean(axis=1)
+            mask = np.linalg.norm(centroids - tip_pt, axis=1) < radius
+            return comp_fi[mask].tolist()
+
+        faces_a = _tip_faces(d["fi"], pt_self, tip_r)
+        faces_b = _tip_faces(comp_data[best_other]["fi"], pt_other, tip_r)
+
+        if faces_a and faces_b:
+            gaps.append((faces_a, faces_b, best_dist))
+
+    # Sort by gap distance
+    gaps.sort(key=lambda x: x[2])
+
+    if verbose:
+        for i, (fa, fb, dist) in enumerate(gaps):
+            ca = mesh.vertices[mesh.faces[fa]].mean(axis=(0, 1))
             print(
-                f"  gap {i}: {len(g):,} faces, "
-                f"centroid=[{centroid[0]:.0f}, {centroid[1]:.0f}, {centroid[2]:.0f}], "
-                f"extent=[{extent[0]:.0f}, {extent[1]:.0f}, {extent[2]:.0f}]"
+                f"  gap {i}: {len(fa)}f ↔ {len(fb)}f, "
+                f"dist={dist:.0f}, "
+                f"near [{ca[0]:.0f}, {ca[1]:.0f}, {ca[2]:.0f}]"
             )
 
     return gaps
