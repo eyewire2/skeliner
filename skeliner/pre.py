@@ -10,6 +10,7 @@ from scipy.spatial import KDTree
 __all__ = [
     "ensure_watertight",
     "fill_holes",
+    "find_gaps",
     "find_holes",
     "remove_fins",
     "remove_fragments",
@@ -1281,6 +1282,74 @@ def find_fragments(
             f"in last pass)"
         )
     return fragment
+
+
+def find_gaps(
+    mesh: trimesh.Trimesh,
+    *,
+    min_faces: int = 100,
+    verbose: bool = False,
+) -> list[list[int]]:
+    """Detect disconnected mesh components that represent segmentation gaps.
+
+    A "gap" is a substantial disconnected component — a neurite segment
+    broken off from the main mesh due to segmentation / proofreading
+    errors.  Tiny fragments (fins, islands, soma debris) are excluded.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    min_faces : int, default 100
+        Minimum face count for a component to be considered a gap.
+        Smaller components are treated as fragments, not gaps.
+    verbose : bool, default False
+        Print summary.
+
+    Returns
+    -------
+    list[list[int]]
+        Each element is a list of face indices for one gap component,
+        sorted largest-first.
+    """
+    labels, main = _face_edge_components(mesh)
+    n_faces = len(mesh.faces)
+
+    # Collect non-main components that meet the size threshold
+    comp_faces: dict[int, list[int]] = {}
+    for fi in range(n_faces):
+        cid = int(labels[fi])
+        if cid == main:
+            continue
+        comp_faces.setdefault(cid, []).append(fi)
+
+    gaps = []
+    for cid, fis in comp_faces.items():
+        if len(fis) < min_faces:
+            continue
+        gaps.append(fis)
+
+    # Sort largest-first
+    gaps.sort(key=len, reverse=True)
+
+    if verbose:
+        total = sum(len(g) for g in gaps)
+        print(
+            f"[skeliner.pre] Gaps: {len(gaps)} components, "
+            f"{total:,} faces (min_faces={min_faces})"
+        )
+        for i, g in enumerate(gaps):
+            verts = np.unique(mesh.faces[g])
+            coords = mesh.vertices[verts]
+            centroid = coords.mean(axis=0)
+            extent = coords.max(axis=0) - coords.min(axis=0)
+            print(
+                f"  gap {i}: {len(g):,} faces, "
+                f"centroid=[{centroid[0]:.0f}, {centroid[1]:.0f}, {centroid[2]:.0f}], "
+                f"extent=[{extent[0]:.0f}, {extent[1]:.0f}, {extent[2]:.0f}]"
+            )
+
+    return gaps
 
 
 def remove_islands(

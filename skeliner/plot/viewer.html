@@ -272,6 +272,7 @@
                 <button id="detectRimsBtn" style="margin-left: 4px">Rims</button>
                 <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
                 <button id="detectFragmentsBtn" style="margin-left: 4px">Fragments</button>
+                <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
                 <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
                 <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
@@ -587,6 +588,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
                 document.getElementById("detectFragmentsBtn").addEventListener("click", runDetectFragments);
+                document.getElementById("detectGapsBtn").addEventListener("click", runDetectGaps);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
                 document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
                 document.getElementById("removeFragmentsBtn").addEventListener("click", runRemoveFragments);
@@ -1439,6 +1441,21 @@ let meshCentroid = [0, 0, 0];
                     const resp = await fetch("/detect_fragments", { method: "POST" });
                     const data = await resp.json();
                     btn.textContent = data.ok ? `Fragments: ${data.nFaces.toLocaleString()}f` : "Error";
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function runDetectGaps() {
+                const btn = document.getElementById("detectGapsBtn");
+                btn.textContent = "Detecting...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/detect_gaps", { method: "POST" });
+                    const data = await resp.json();
+                    btn.textContent = data.ok ? `Gaps: ${data.nGaps}` : "Error";
                 } catch (e) {
                     btn.textContent = "Error";
                 } finally {

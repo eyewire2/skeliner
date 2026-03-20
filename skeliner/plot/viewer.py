@@ -183,6 +183,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "centroid": np.zeros(3, dtype=np.float32),
         "organelle_mask": None, # cached from detect_organelles
         "fusion_clusters": None, # cached from detect_fusions
+        "gap_clusters": None, # cached from detect_gaps
         "hole_loops": None, # cached from detect_holes
     }
     # Multiple skeletons, keyed by filename
@@ -592,6 +593,42 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
         return JSONResponse({"ok": True, "nFaces": len(faces)})
+
+    async def detect_gaps(request):
+        """Run gap detection and write results to annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import find_gaps
+
+        mesh = mesh_state["mesh"]
+        gaps = await _run_with_log(find_gaps, mesh, verbose=True)
+        mesh_state["gap_clusters"] = gaps
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+
+        colors = [
+            [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
+            [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
+        ]
+        for i, cluster in enumerate(gaps):
+            ann["highlights"].append({
+                "faces": cluster,
+                "color": colors[i % len(colors)],
+                "label": f"gap {i} ({len(cluster):,}f)",
+            })
+
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        return JSONResponse({
+            "ok": True,
+            "nGaps": len(gaps),
+        })
 
     async def check_fusion(request):
         """Analyze highlighted faces for fusion signals."""
@@ -1496,6 +1533,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove_organelles", do_remove_organelles, methods=["POST"]),
             Route("/remove_fusions", do_remove_fusions, methods=["POST"]),
             Route("/detect_fragments", detect_fragments, methods=["POST"]),
+            Route("/detect_gaps", detect_gaps, methods=["POST"]),
             Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
