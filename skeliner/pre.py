@@ -2861,30 +2861,30 @@ def find_isolated_organelles(
     n_internal_frag_faces = 0
     n_kept_frags = 0
 
+    # Build KD-tree of main-component face centroids + normals for
+    # inside/outside classification
+    main_face_idx = np.where(face_comp == main_ci)[0]
+    main_centroids = mesh.triangles_center[main_face_idx]
+    main_normals = mesh.face_normals[main_face_idx]
+    main_tree = KDTree(main_centroids)
+
     for ci in range(n_comps):
         if ci == main_ci:
             continue
         comp_face_idx = np.where(face_comp == ci)[0]
         if len(comp_face_idx) == 0:
             continue
-        mean_dot = outward_dots[comp_face_idx].mean()
 
-        # Clearly inward-pointing → organelle
-        is_internal = mean_dot < 0
-
-        # Ambiguous normals on blob-shaped components: small fragments
-        # with mixed face winding can have mean_dot near zero even when
-        # enclosed.  Use PCA aspect ratio to identify blobs (< 3) and
-        # apply a relaxed threshold.
-        if not is_internal and mean_dot < 0.5:
-            comp_verts = np.unique(mesh.faces[comp_face_idx])
-            if len(comp_verts) >= 4:
-                coords = mesh.vertices[comp_verts]
-                centered = coords - coords.mean(axis=0)
-                evals = np.linalg.eigh(np.cov(centered.T))[0]
-                pca_ratio = evals.max() / (np.sort(evals)[-2] + 1e-10)
-                if pca_ratio < 3.0:
-                    is_internal = True
+        # Check if this component is enclosed by the main mesh:
+        # for each vertex, the vector from the nearest main face to
+        # the vertex dotted with the main face normal tells us which
+        # side it's on.  Majority on the inward side → enclosed.
+        comp_verts = np.unique(mesh.faces[comp_face_idx])
+        coords = mesh.vertices[comp_verts]
+        _, nn_idx = main_tree.query(coords)
+        vecs = coords - main_centroids[nn_idx]
+        dots = np.einsum("ij,ij->i", vecs, main_normals[nn_idx])
+        is_internal = (dots < 0).sum() > len(dots) / 2
 
         if is_internal:
             isolated[comp_face_idx] = True
