@@ -1482,6 +1482,7 @@ def find_gaps(
     *,
     min_faces: int = 100,
     verbose: bool = False,
+    _precomputed_soma: Soma | None = None,
 ) -> list[list[int]]:
     """Detect disconnected mesh components that represent segmentation gaps.
 
@@ -1498,6 +1499,9 @@ def find_gaps(
         Smaller components are treated as fragments, not gaps.
     verbose : bool, default False
         Print summary.
+    _precomputed_soma : Soma or None
+        Pre-computed soma from :func:`find_soma`.  When *None* (default),
+        ``find_soma`` is called internally.
 
     Returns
     -------
@@ -1509,7 +1513,7 @@ def find_gaps(
     n_faces = len(mesh.faces)
 
     # Locate soma so we can exclude components inside it
-    soma = find_soma(mesh, verbose=verbose)
+    soma = _precomputed_soma if _precomputed_soma is not None else find_soma(mesh, verbose=verbose)
 
     # Collect non-main components that meet the size threshold
     comp_faces: dict[int, list[int]] = {}
@@ -1521,16 +1525,30 @@ def find_gaps(
 
     gaps = []
     n_soma_excluded = 0
+    n_organelle_excluded = 0
     for cid, fis in comp_faces.items():
         if len(fis) < min_faces:
             continue
+        verts = np.unique(mesh.faces[fis])
+        coords = mesh.vertices[verts]
+        centroid = coords.mean(axis=0)
+
         # Exclude components whose centroid falls inside the soma ellipsoid
         if soma is not None:
-            verts = np.unique(mesh.faces[fis])
-            centroid = mesh.vertices[verts].mean(axis=0)
             if soma.contains(centroid.reshape(1, -1))[0]:
                 n_soma_excluded += 1
                 continue
+
+        # Exclude blob-shaped components (organelles, not broken neurites).
+        # Gaps are elongated tubes (PCA ratio > 5); organelles are round.
+        if len(verts) >= 4:
+            centered = coords - centroid
+            evals = np.linalg.eigh(np.cov(centered.T))[0]
+            pca_ratio = evals.max() / (np.sort(evals)[-2] + 1e-10)
+            if pca_ratio < 5.0:
+                n_organelle_excluded += 1
+                continue
+
         gaps.append(fis)
 
     # Sort largest-first
@@ -1538,11 +1556,12 @@ def find_gaps(
 
     if verbose:
         total = sum(len(g) for g in gaps)
-        soma_msg = (
-            f", {n_soma_excluded} excluded in soma"
-            if n_soma_excluded
-            else ""
-        )
+        excluded = []
+        if n_soma_excluded:
+            excluded.append(f"{n_soma_excluded} in soma")
+        if n_organelle_excluded:
+            excluded.append(f"{n_organelle_excluded} organelle-like")
+        soma_msg = f", {', '.join(excluded)} excluded" if excluded else ""
         print(
             f"[skeliner.pre] Gaps: {len(gaps)} components, "
             f"{total:,} faces (min_faces={min_faces}{soma_msg})"
@@ -2418,7 +2437,26 @@ def find_isolated_organelles(
         comp_face_idx = np.where(face_comp == ci)[0]
         if len(comp_face_idx) == 0:
             continue
-        if outward_dots[comp_face_idx].mean() < 0:
+        mean_dot = outward_dots[comp_face_idx].mean()
+
+        # Clearly inward-pointing → organelle
+        is_internal = mean_dot < 0
+
+        # Ambiguous normals on blob-shaped components: small fragments
+        # with mixed face winding can have mean_dot near zero even when
+        # enclosed.  Use PCA aspect ratio to identify blobs (< 3) and
+        # apply a relaxed threshold.
+        if not is_internal and mean_dot < 0.5:
+            comp_verts = np.unique(mesh.faces[comp_face_idx])
+            if len(comp_verts) >= 4:
+                coords = mesh.vertices[comp_verts]
+                centered = coords - coords.mean(axis=0)
+                evals = np.linalg.eigh(np.cov(centered.T))[0]
+                pca_ratio = evals.max() / (np.sort(evals)[-2] + 1e-10)
+                if pca_ratio < 3.0:
+                    is_internal = True
+
+        if is_internal:
             isolated[comp_face_idx] = True
             n_internal_frags += 1
             n_internal_frag_faces += len(comp_face_idx)

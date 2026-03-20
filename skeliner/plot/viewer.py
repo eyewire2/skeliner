@@ -656,10 +656,19 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import find_gaps
+        from skeliner.pre import find_gaps, find_soma
 
         mesh = mesh_state["mesh"]
-        gaps = await _run_with_log(find_gaps, mesh, verbose=True)
+
+        # Use cached soma or compute it
+        soma = mesh_state.get("soma")
+        if soma is None:
+            soma = await _run_with_log(find_soma, mesh, verbose=True)
+            mesh_state["soma"] = soma
+
+        gaps = await _run_with_log(
+            find_gaps, mesh, verbose=True, _precomputed_soma=soma
+        )
         mesh_state["gap_clusters"] = gaps
 
         ann = {}
