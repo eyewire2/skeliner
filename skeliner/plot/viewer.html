@@ -265,15 +265,21 @@
         <div id="detect-panel">
             <div style="white-space: nowrap">
                 <span style="color: #888">Detect:</span>
-                <button id="detectBtn" style="margin-left: 4px">All Organelles</button>
-                <button id="detectSurfaceBtn" style="margin-left: 4px">Pocket Org.</button>
-                <button id="detectIsolatedBtn" style="margin-left: 4px">Isolated Org.</button>
+                <span style="position:relative;display:inline-block;margin-left:4px">
+                    <button id="detectOrganellesBtn">Organelles</button>
+                    <div id="organellesPopup" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:4px;background:rgba(0,0,0,0.85);border:1px solid #555;border-radius:4px;padding:6px 8px;white-space:nowrap;z-index:300">
+                        <div style="color:#888;font-size:10px;margin-bottom:4px">Detect type:</div>
+                        <button class="org-type-btn" data-type="all" style="display:block;width:100%;text-align:left;margin-bottom:2px">All</button>
+                        <button class="org-type-btn" data-type="pocket" style="display:block;width:100%;text-align:left;margin-bottom:2px">Pocket</button>
+                        <button class="org-type-btn" data-type="isolated" style="display:block;width:100%;text-align:left">Isolated</button>
+                    </div>
+                </span>
                 <button id="detectFusionsBtn" style="margin-left: 4px">Fusions</button>
-                <button id="detectRimsBtn" style="margin-left: 4px">Rims</button>
-                <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
                 <button id="detectFragmentsBtn" style="margin-left: 4px">Fragments</button>
-                <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
+                <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
+                <button id="detectRimsBtn" style="margin-left: 4px">Rims</button>
+                <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
                 <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
                 <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
@@ -579,13 +585,18 @@ let meshCentroid = [0, 0, 0];
                 renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
                 renderer.domElement.addEventListener("pointerdown", onRecenter);
 
-                document.getElementById("detectBtn").addEventListener("click", runDetectOrganelles);
-                document
-                    .getElementById("detectSurfaceBtn")
-                    .addEventListener("click", () => runDetectOrganellesType("pocket"));
-                document
-                    .getElementById("detectIsolatedBtn")
-                    .addEventListener("click", () => runDetectOrganellesType("isolated"));
+                document.getElementById("detectOrganellesBtn").addEventListener("click", () => {
+                    const popup = document.getElementById("organellesPopup");
+                    popup.style.display = popup.style.display === "none" ? "" : "none";
+                });
+                document.querySelectorAll(".org-type-btn").forEach((b) =>
+                    b.addEventListener("click", () => {
+                        document.getElementById("organellesPopup").style.display = "none";
+                        const type = b.dataset.type;
+                        if (type === "all") runDetectOrganelles();
+                        else runDetectOrganellesType(type);
+                    })
+                );
                 document.getElementById("detectRimsBtn").addEventListener("click", runDetectRims);
                 document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
@@ -1331,13 +1342,13 @@ let meshCentroid = [0, 0, 0];
             }
 
             async function runDetectOrganelles() {
-                const btn = document.getElementById("detectBtn");
+                const btn = document.getElementById("detectOrganellesBtn");
                 btn.textContent = "Detecting...";
                 btn.disabled = true;
                 try {
                     const resp = await fetch("/detect_organelles", { method: "POST" });
                     const data = await resp.json();
-                    btn.textContent = data.ok ? `Organelles: ${data.nFaces} (A)` : "Error";
+                    btn.textContent = data.ok ? `Org: ${data.nFaces}f (all)` : "Error";
                 } catch (e) {
                     btn.textContent = "Error";
                 } finally {
@@ -1346,15 +1357,13 @@ let meshCentroid = [0, 0, 0];
             }
 
             async function runDetectOrganellesType(type) {
-                const btnId = type === "pocket" ? "detectSurfaceBtn" : "detectIsolatedBtn";
-                const btn = document.getElementById(btnId);
-                const origText = btn.textContent;
+                const btn = document.getElementById("detectOrganellesBtn");
                 btn.textContent = "Detecting...";
                 btn.disabled = true;
                 try {
                     const resp = await fetch(`/detect_organelles?type=${type}`, { method: "POST" });
                     const data = await resp.json();
-                    btn.textContent = data.ok ? `${type}: ${data.nFaces}` : `Error`;
+                    btn.textContent = data.ok ? `Org: ${data.nFaces}f (${type})` : "Error";
                 } catch (e) {
                     btn.textContent = "Error";
                 } finally {
