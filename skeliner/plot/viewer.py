@@ -705,9 +705,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import remove_gaps
 
         mesh = mesh_state["mesh"]
-        _undo_stack.append(mesh)
-        if len(_undo_stack) > _UNDO_LIMIT:
-            _undo_stack.pop(0)
+        n_before = len(mesh.faces)
 
         soma = mesh_state.get("soma")
         cached_gaps = mesh_state.get("gap_clusters")
@@ -717,19 +715,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             _precomputed_soma=soma,
             _precomputed_gaps=cached_gaps,
         )
+        n_after = len(new_mesh.faces)
 
-        mesh_state["mesh"] = new_mesh
+        await _apply_new_mesh(new_mesh)
         mesh_state["gap_clusters"] = None
-        buffers = _mesh_to_buffers(new_mesh)
-        mesh_state["buffers"] = buffers
-        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
-
-        await broadcast({"type": "mesh", **buffers})
 
         return JSONResponse({
             "ok": True,
-            "nVertices": len(new_mesh.vertices),
-            "nFaces": len(new_mesh.faces),
+            "nFaces": n_after,
         })
 
     async def check_fusion(request):
