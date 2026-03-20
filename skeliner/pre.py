@@ -1715,7 +1715,10 @@ def find_fusions(
     min_branch_size: int = 5,
     verbose: bool = False,
 ) -> list[list[int]]:
-    """Detect fusion points where two branches share faces.
+    """Detect fusion points where two branches are wrongly connected.
+
+    A fusion is any place where two separated components are wrongly
+    connected via shared edges or shared vertices.
 
     Algorithm:
 
@@ -1728,6 +1731,9 @@ def find_fusions(
        them from the adjacency separates the branches.
     5. Report the boundary faces between the two largest components as
        the fusion zone.
+    6. Detect **vertex-only fusions**: vertices whose face fan splits
+       into multiple edge-disconnected components (pinch vertices).
+       Report the fan faces as additional fusion clusters.
 
     Parameters
     ----------
@@ -1773,7 +1779,16 @@ def find_fusions(
                     nb.add(nfi)
         return nb
 
+    nm_edges = sum(1 for faces in edge_to_face.values() if len(faces) > 2)
+    if verbose:
+        print(
+            f"[skeliner.pre] Mesh: {len(mesh.faces):,} faces, "
+            f"{len(zero_faces)} zero-area, {nm_edges} non-manifold edges"
+        )
+
     # Outward dot for inward-face filtering
+    if verbose:
+        print("[skeliner.pre] Computing outward dots ...")
     outward_dots = _outward_dot(
         mesh,
         radius if radius is not None
@@ -1811,7 +1826,77 @@ def find_fusions(
 
     seed_faces = nm_neg_faces | dupe_faces
 
-    if not seed_faces:
+    # Signal 3: fan vertices — vertices whose face fan splits into
+    # multiple edge-connected components (vertex-only fusion)
+    vert_to_face: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
+    for fi, f in enumerate(mesh.faces):
+        if fi in zero_faces:
+            continue
+        for v in f:
+            vert_to_face[int(v)].append(fi)
+
+    fan_vertex_clusters: list[list[int]] = []
+    n_verts = len(mesh.vertices)
+    if verbose:
+        print(f"[skeliner.pre] Scanning {n_verts:,} vertices for fan fusions ...")
+    for vid in range(n_verts):
+        fan = vert_to_face[vid]
+        if len(fan) < 2:
+            continue
+
+        fan_set = set(fan)
+        fan_adj: dict[int, set[int]] = defaultdict(set)
+        for fi in fan:
+            f = mesh.faces[fi]
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                for nfi in edge_to_face[e]:
+                    if nfi in fan_set and nfi != fi:
+                        fan_adj[fi].add(nfi)
+
+        # BFS from first face; if not all fan faces reached,
+        # this vertex is a pinch point between disconnected branches.
+        vis: set[int] = set()
+        q = deque([fan[0]])
+        while q:
+            curr = q.popleft()
+            if curr in vis:
+                continue
+            vis.add(curr)
+            for nfi in fan_adj.get(curr, set()):
+                if nfi not in vis:
+                    q.append(nfi)
+
+        if len(vis) < len(fan_set):
+            fan_vertex_clusters.append(sorted(fan))
+            if verbose:
+                # count components for reporting
+                _vis2: set[int] = set()
+                _comp_sizes: list[int] = []
+                for _fi in fan:
+                    if _fi in _vis2:
+                        continue
+                    _sz = 0
+                    _q = deque([_fi])
+                    while _q:
+                        _c = _q.popleft()
+                        if _c in _vis2:
+                            continue
+                        _vis2.add(_c)
+                        _sz += 1
+                        for _nfi in fan_adj.get(_c, set()):
+                            if _nfi not in _vis2:
+                                _q.append(_nfi)
+                    _comp_sizes.append(_sz)
+                _comp_sizes.sort(reverse=True)
+                print(
+                    f"[skeliner.pre]   Fan vertex {vid}: "
+                    f"{len(_comp_sizes)} components, "
+                    f"sizes {_comp_sizes}"
+                )
+
+    if not seed_faces and not fan_vertex_clusters:
         if verbose:
             print("[skeliner.pre] No fusions found")
         return []
@@ -1847,7 +1932,8 @@ def find_fusions(
         print(
             f"[skeliner.pre] Fusion seeds: {len(seed_clusters)} clusters, "
             f"{len(seed_faces)} faces "
-            f"(nm_neg={len(nm_neg_faces)}, dupes={len(dupe_faces)})"
+            f"(nm_neg={len(nm_neg_faces)}, dupes={len(dupe_faces)}, "
+            f"fan_verts={len(fan_vertex_clusters)})"
         )
 
     # ── Grow region & split per cluster ──────────────────────────────
@@ -1886,9 +1972,16 @@ def find_fusions(
         return comps
 
     result_clusters: list[list[int]] = []
+    n_seed_clusters = len(seed_clusters)
 
-    for seed_cluster in seed_clusters:
+    for ci, seed_cluster in enumerate(seed_clusters):
         region = set(seed_cluster)
+
+        if verbose:
+            print(
+                f"[skeliner.pre] Growing seed cluster "
+                f"{ci + 1}/{n_seed_clusters} ({len(seed_cluster)}f) ..."
+            )
 
         # Grow outward until manifold-split gives 2 big components
         found = False
@@ -1903,6 +1996,14 @@ def find_fusions(
 
             comps = _manifold_components(region)
             big = [c for c in comps if len(c) >= min_branch_size]
+
+            if verbose:
+                print(
+                    f"[skeliner.pre]   ring {ring}: "
+                    f"{len(region)}f, {len(comps)} comps "
+                    f"({len(big)} >= {min_branch_size}f)"
+                )
+
             if len(big) >= 2:
                 # Boundary faces between the two largest components
                 branch0 = big[0]
@@ -1915,14 +2016,23 @@ def find_fusions(
                             fusion_boundary.add(nfi)
                 result_clusters.append(sorted(fusion_boundary))
                 found = True
+                if verbose:
+                    print(
+                        f"[skeliner.pre]   Seed cluster ({len(seed_cluster)}f): "
+                        f"split at ring {ring}, region {len(region)}f, "
+                        f"branches {len(branch0)}+{len(branch1)}f, "
+                        f"boundary {len(fusion_boundary)}f"
+                    )
                 break
 
         if not found and verbose:
             print(
                 f"[skeliner.pre]   Seed cluster ({len(seed_cluster)}f): "
-                f"no split after {grow_rings} rings"
+                f"no split after {grow_rings} rings, "
+                f"region {len(region)}f"
             )
 
+    result_clusters.extend(fan_vertex_clusters)
     result_clusters.sort(key=len, reverse=True)
 
     if verbose:
