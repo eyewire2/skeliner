@@ -17,8 +17,10 @@ communication with external tools (e.g. Claude).
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -237,6 +239,47 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             except Exception:
                 pass
 
+    # ── Log-capturing executor helper ─────────────────────────────────
+
+    class _LogTee(io.TextIOBase):
+        """Wraps stdout: writes to original AND broadcasts lines via WS."""
+
+        def __init__(self, original, loop, broadcast_fn):
+            self._original = original
+            self._loop = loop
+            self._broadcast = broadcast_fn
+
+        def write(self, s):
+            self._original.write(s)
+            self._original.flush()
+            for line in s.splitlines():
+                text = line.strip()
+                if text:
+                    asyncio.run_coroutine_threadsafe(
+                        self._broadcast({"type": "log", "text": text}),
+                        self._loop,
+                    )
+            return len(s)
+
+        def flush(self):
+            self._original.flush()
+
+    async def _run_with_log(func, *args, **kwargs):
+        """Run *func* in executor, streaming its stdout to WS clients."""
+        loop = asyncio.get_event_loop()
+
+        def _wrapper():
+            old = sys.stdout
+            sys.stdout = _LogTee(old, loop, broadcast)
+            try:
+                return func(*args, **kwargs)
+            finally:
+                sys.stdout = old
+
+        result = await loop.run_in_executor(None, _wrapper)
+        await broadcast({"type": "log_end"})
+        return result
+
     # ── Routes ────────────────────────────────────────────────────────
 
     async def index(request):
@@ -453,14 +496,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         det_type = request.query_params.get("type", "all")
-        loop = asyncio.get_event_loop()
 
         highlights = []
         if det_type in ("pocket", "surface"):
             from skeliner.pre import find_pocket_organelles
-            mask = await loop.run_in_executor(
-                None, lambda: find_pocket_organelles(mesh)
-            )
+            mask = await _run_with_log(find_pocket_organelles, mesh, verbose=True)
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
                 highlights.append({
@@ -470,9 +510,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 })
         elif det_type == "isolated":
             from skeliner.pre import find_isolated_organelles
-            mask = await loop.run_in_executor(
-                None, lambda: find_isolated_organelles(mesh)
-            )
+            mask = await _run_with_log(find_isolated_organelles, mesh, verbose=True)
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
                 highlights.append({
@@ -482,9 +520,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 })
         else:
             from skeliner.pre import find_organelles
-            surface, isolated = await loop.run_in_executor(
-                None, lambda: find_organelles(mesh)
-            )
+            surface, isolated = await _run_with_log(find_organelles, mesh, verbose=True)
             sf = [int(fi) for fi in np.where(surface)[0]]
             iso = [int(fi) for fi in np.where(isolated)[0]]
             if sf:
@@ -616,8 +652,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 "fusion_faces": sorted(fusion),
             }
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _run)
+        result = await _run_with_log(_run)
         return JSONResponse({"ok": True, **result})
 
     async def detect_fusions(request):
@@ -630,12 +665,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import find_fusions
 
         mesh = mesh_state["mesh"]
-
-        def _run():
-            return find_fusions(mesh, verbose=True)
-
-        loop = asyncio.get_event_loop()
-        clusters = await loop.run_in_executor(None, _run)
+        clusters = await _run_with_log(find_fusions, mesh, verbose=True)
 
         ann = {}
         if annotations_path.exists():
@@ -694,8 +724,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 })
             return edge_groups, len(rims)
 
-        loop = asyncio.get_event_loop()
-        edge_groups, n_rims = await loop.run_in_executor(None, _run)
+        edge_groups, n_rims = await _run_with_log(_run)
 
         ann = {}
         if annotations_path.exists():
@@ -754,11 +783,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-
-        loop = asyncio.get_event_loop()
-        new_mesh = await loop.run_in_executor(
-            None, lambda: _remove_organelles(mesh, verbose=True)
-        )
+        new_mesh = await _run_with_log(_remove_organelles, mesh, verbose=True)
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)
@@ -780,11 +805,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-
-        loop = asyncio.get_event_loop()
-        new_mesh = await loop.run_in_executor(
-            None, lambda: _remove_fusions(mesh, verbose=True)
-        )
+        new_mesh = await _run_with_log(_remove_fusions, mesh, verbose=True)
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)
@@ -806,11 +827,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-
-        loop = asyncio.get_event_loop()
-        new_mesh = await loop.run_in_executor(
-            None, lambda: _remove_fragments(mesh, verbose=True)
-        )
+        new_mesh = await _run_with_log(_remove_fragments, mesh, verbose=True)
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)
@@ -832,11 +849,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-
-        loop = asyncio.get_event_loop()
-        new_mesh = await loop.run_in_executor(
-            None, lambda: fill_holes(mesh, verbose=True)
-        )
+        new_mesh = await _run_with_log(fill_holes, mesh, verbose=True)
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)
@@ -923,7 +936,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         centroid = mesh_state["centroid"]
 
         def _run():
-            loops = find_holes(mesh)
+            loops = find_holes(mesh, verbose=True)
             verts = np.asarray(mesh.vertices, dtype=np.float32)
             colors = [
                 [0.2, 0.6, 1.0], [0.1, 0.9, 0.4], [0.9, 0.2, 0.8],
@@ -944,8 +957,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 })
             return edge_groups, len(loops)
 
-        ev_loop = asyncio.get_event_loop()
-        edge_groups, n_holes = await ev_loop.run_in_executor(None, _run)
+        edge_groups, n_holes = await _run_with_log(_run)
 
         ann = {}
         if annotations_path.exists():
@@ -969,10 +981,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         params = body.get("params", {})
         mesh = mesh_state["mesh"]
 
-        loop = asyncio.get_event_loop()
-        skel = await loop.run_in_executor(
-            None, lambda: skeletonize(mesh, verbose=True, **params)
-        )
+        skel = await _run_with_log(skeletonize, mesh, verbose=True, **params)
         print(f"Skeletonized: {len(skel.nodes)} nodes, {len(skel.edges)} edges")
 
         # Add as a skeleton layer
@@ -1029,6 +1038,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 if face1 == face2:
                     return [face1], 0.0
 
+                print(f"[skeliner.path] Building {mode} adjacency for {n_faces:,} faces...")
                 centroids = mesh.triangles_center
 
                 if mode == "vertex":
@@ -1058,6 +1068,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     (dists, (fi, fj)), shape=(n_faces, n_faces)
                 )
 
+                print(f"[skeliner.path] Running Dijkstra face {face1} → {face2}...")
                 dist_arr, predecessors = dijkstra(
                     graph, directed=False, indices=face1,
                     return_predecessors=True,
@@ -1075,10 +1086,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     return None, 0
                 path.append(int(face1))
                 path.reverse()
+                print(f"[skeliner.path] Found path: {len(path)} faces, length={dist_arr[face2]:.1f}")
                 return path, float(dist_arr[face2])
 
-            loop = asyncio.get_event_loop()
-            path, length = await loop.run_in_executor(None, _run_mesh_path)
+            path, length = await _run_with_log(_run_mesh_path)
 
             if path is None:
                 return JSONResponse(
@@ -1114,12 +1125,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 if node1 == node2:
                     return [node1], [], 0.0
 
+                print(f"[skeliner.path] Building skeleton adjacency for {n_nodes:,} nodes...")
                 adj = [[] for _ in range(n_nodes)]
                 for ei, (a, b) in enumerate(edges):
                     d = float(np.linalg.norm(nodes[a] - nodes[b]))
                     adj[int(a)].append((int(b), d, ei))
                     adj[int(b)].append((int(a), d, ei))
 
+                print(f"[skeliner.path] Running Dijkstra node {node1} → {node2}...")
                 dist_arr = [float("inf")] * n_nodes
                 dist_arr[node1] = 0
                 prev = [(-1, -1)] * n_nodes
@@ -1161,12 +1174,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     a, b = int(edges[ei][0]), int(edges[ei][1])
                     segments.append([nodes[a].tolist(), nodes[b].tolist()])
 
+                print(f"[skeliner.path] Found path: {len(path_nodes)} nodes, length={dist_arr[node2]:.1f}")
                 return path_nodes, segments, float(dist_arr[node2])
 
-            loop = asyncio.get_event_loop()
-            path_nodes, segments, length = await loop.run_in_executor(
-                None, _run_skel_path
-            )
+            path_nodes, segments, length = await _run_with_log(_run_skel_path)
 
             if path_nodes is None:
                 return JSONResponse({"ok": False, "error": "No path found"})

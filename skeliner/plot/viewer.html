@@ -228,6 +228,7 @@
         <div id="canvas-container"></div>
         <div id="empty-hint">Drop mesh (.obj, .ply) or skeleton (.swc, .npz) here</div>
         <div id="drop-overlay">Drop file to load</div>
+        <div id="log-status" style="display:none;position:absolute;bottom:14px;left:50%;background:rgba(0,0,0,0.7);color:#aaa;padding:6px 12px;border-radius:4px;font-size:11px;font-family:monospace;z-index:200;white-space:nowrap;pointer-events:none;transition:opacity 0.3s;max-width:40%;overflow:hidden;text-overflow:ellipsis"></div>
         <div id="lasso-rect"></div>
         <div id="lockIndicator" style="display:none;position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(200,50,50,0.7);color:#fff;padding:4px 12px;border-radius:4px;font-size:12px;font-family:monospace;z-index:100;cursor:pointer;" onclick="this.style.display='none'">Camera Locked (L to unlock) x</div>
 
@@ -2467,6 +2468,25 @@ let meshCentroid = [0, 0, 0];
                 scheduleStateUpdate();
             }
 
+            // ── Ephemeral log status ─────────────────────────────────────────────
+            let _logFadeTimer = null;
+            function showLogStatus(text) {
+                const el = document.getElementById("log-status");
+                el.textContent = text;
+                el.style.opacity = "1";
+                el.style.display = "";
+                if (_logFadeTimer) { clearTimeout(_logFadeTimer); _logFadeTimer = null; }
+            }
+            function fadeLogStatus() {
+                if (_logFadeTimer) clearTimeout(_logFadeTimer);
+                _logFadeTimer = setTimeout(() => {
+                    const el = document.getElementById("log-status");
+                    el.style.opacity = "0";
+                    setTimeout(() => { el.style.display = "none"; }, 300);
+                    _logFadeTimer = null;
+                }, 3000);
+            }
+
             // ── WebSocket ────────────────────────────────────────────────────────
             function connectWebSocket() {
                 const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -2501,6 +2521,10 @@ let meshCentroid = [0, 0, 0];
                             .forEach((o) => o.remove());
                         updateLoadedPanel();
                         if (!meshObj) document.getElementById("empty-hint").style.display = "block";
+                    } else if (msg.type === "log") {
+                        showLogStatus(msg.text);
+                    } else if (msg.type === "log_end") {
+                        fadeLogStatus();
                     } else if (msg.type === "mesh_removed") {
                         if (meshObj) {
                             scene.remove(meshObj);
