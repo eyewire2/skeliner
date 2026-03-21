@@ -3095,61 +3095,68 @@ def find_isolated_organelles(
     n_internal_frag_faces = 0
     n_kept_frags = 0
 
-    # Identify structural components (large enough to contain organelles).
-    # Build KD-trees for each so we can check if small components are
-    # enclosed by ANY structural component, not just the main one.
-    comp_sizes = np.bincount(face_comp, minlength=n_comps)
-    # Otsu on log-sizes to separate structural from small
-    if n_comps > 2:
-        from skeliner.pre import _otsu_threshold
-        log_sizes = np.log1p(comp_sizes[comp_sizes > 0].astype(float))
-        log_thresh, _ = _otsu_threshold(log_sizes)
-        size_thresh = int(np.expm1(log_thresh))
-    else:
-        size_thresh = 0
-    structural_cis = [ci for ci in range(n_comps) if comp_sizes[ci] > size_thresh]
+    # Two-pass approach:
+    # Pass 1: check every non-main component against the main component.
+    #         Components classified as external are "structural" (disconnected
+    #         neurites, offset layers).
+    # Pass 2: re-check components that were external in pass 1 against ALL
+    #         structural surfaces (main + pass-1 externals).  This catches
+    #         organelles inside disconnected structural components.
+    main_face_idx = np.where(face_comp == main_ci)[0]
+    main_centroids = mesh.triangles_center[main_face_idx]
+    main_normals = mesh.face_normals[main_face_idx]
+    main_tree = KDTree(main_centroids)
 
-    # Build KD-trees for all structural components
-    struct_trees: list[tuple[int, KDTree, np.ndarray, np.ndarray]] = []
-    for sci in structural_cis:
-        sci_faces = np.where(face_comp == sci)[0]
-        centroids = mesh.triangles_center[sci_faces]
-        normals = mesh.face_normals[sci_faces]
-        struct_trees.append((sci, KDTree(centroids), centroids, normals))
+    external_cis: set[int] = set()
 
+    # Pass 1: classify against main component
     for ci in range(n_comps):
-        if comp_sizes[ci] > size_thresh:
-            continue  # structural component, skip
+        if ci == main_ci:
+            continue
         comp_face_idx = np.where(face_comp == ci)[0]
         if len(comp_face_idx) == 0:
             continue
-
-        # Check if this component is enclosed by any structural component:
-        # find the nearest structural face, dot the direction vector with
-        # that face's normal.  Majority inward = enclosed.
         comp_verts = np.unique(mesh.faces[comp_face_idx])
         coords = mesh.vertices[comp_verts]
-
-        # Find nearest structural component for each vertex
-        best_dist = np.full(len(coords), np.inf)
-        best_dot = np.zeros(len(coords))
-        for sci, tree, s_centroids, s_normals in struct_trees:
-            dists, nn_idx = tree.query(coords)
-            closer = dists < best_dist
-            if closer.any():
-                vecs = coords[closer] - s_centroids[nn_idx[closer]]
-                dots = np.einsum("ij,ij->i", vecs, s_normals[nn_idx[closer]])
-                best_dist[closer] = dists[closer]
-                best_dot[closer] = dots
-
-        is_internal = (best_dot < 0).sum() > len(best_dot) / 2
-
+        _, nn_idx = main_tree.query(coords)
+        vecs = coords - main_centroids[nn_idx]
+        dots = np.einsum("ij,ij->i", vecs, main_normals[nn_idx])
+        is_internal = (dots < 0).sum() > len(dots) / 2
         if is_internal:
             isolated[comp_face_idx] = True
             n_internal_frags += 1
             n_internal_frag_faces += len(comp_face_idx)
         else:
+            external_cis.add(ci)
             n_kept_frags += 1
+
+    # Pass 2: for external components, build combined structural surface
+    # and re-check all currently-external components against it.
+    # Some externals may actually be organelles inside OTHER externals.
+    if external_cis:
+        struct_face_idx = list(main_face_idx)
+        for eci in external_cis:
+            struct_face_idx.extend(np.where(face_comp == eci)[0].tolist())
+        struct_face_idx = np.array(struct_face_idx)
+        struct_centroids = mesh.triangles_center[struct_face_idx]
+        struct_normals = mesh.face_normals[struct_face_idx]
+        struct_tree = KDTree(struct_centroids)
+
+        newly_isolated = set()
+        for ci in list(external_cis):
+            comp_face_idx = np.where(face_comp == ci)[0]
+            comp_verts = np.unique(mesh.faces[comp_face_idx])
+            coords = mesh.vertices[comp_verts]
+            _, nn_idx = struct_tree.query(coords)
+            vecs = coords - struct_centroids[nn_idx]
+            dots = np.einsum("ij,ij->i", vecs, struct_normals[nn_idx])
+            is_internal = (dots < 0).sum() > len(dots) / 2
+            if is_internal:
+                isolated[comp_face_idx] = True
+                newly_isolated.add(ci)
+                n_internal_frags += 1
+                n_internal_frag_faces += len(comp_face_idx)
+                n_kept_frags -= 1
 
     if verbose:
         print(
