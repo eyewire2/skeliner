@@ -356,6 +356,20 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             if suffix in (".obj", ".ply", ".stl"):
                 mesh = trimesh.load_mesh(str(tmp_path), process=False)
                 print(f"Uploaded mesh: {len(mesh.vertices):,} verts, {len(mesh.faces):,} faces")
+
+                # ── Clear previous session data ──────────────────────
+                # Remove old mesh/skeleton files (keep the new upload)
+                for old_file in port_dir.iterdir():
+                    if old_file == tmp_path:
+                        continue
+                    if old_file.suffix in (".obj", ".ply", ".stl", ".npz", ".swc"):
+                        old_file.unlink(missing_ok=True)
+                # Reset skeletons and annotations
+                skeleton_states.clear()
+                mesh_state["soma"] = None
+                annotations_path.write_text("{}", encoding="utf-8")
+                await broadcast({"type": "all_skeletons_removed"})
+
                 buffers = _mesh_to_buffers(mesh)
 
                 mesh_state["mesh"] = mesh

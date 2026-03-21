@@ -1436,7 +1436,7 @@ def find_soma(
     mesh: trimesh.Trimesh,
     *,
     max_fragment_faces: int = 50,
-    density_cutoff: float = 0.35,
+    density_cutoff: float = 0.5,
     verbose: bool = False,
 ) -> Soma | None:
     """Estimate soma from the spatial clustering of leftover small fragments.
