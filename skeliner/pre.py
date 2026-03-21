@@ -2768,27 +2768,23 @@ def find_rims(
         if not boundary_edges:
             continue
 
-        # Count boundary loops (connected components of boundary edges)
-        n_loops = _count_edge_loops(boundary_edges)
-        if n_loops <= 1:
-            continue  # single loop = flat patch, not a pocket
-
         # Fold ratio: pocket surface area / rim enclosed planar area.
         # A real pocket folds inward through a small opening (high ratio).
         # A flat patch has ratio ≈ 1 (same area inside and outside).
         pocket_area = float(mesh.area_faces[cluster].sum())
         opening_area = _rim_enclosed_area(boundary_edges, mesh.vertices)
-        if opening_area > 0:
-            fold_ratio = pocket_area / opening_area
-            if fold_ratio < min_fold_ratio:
-                continue
+        if opening_area <= 0:
+            continue  # no measurable opening = not a pocket entrance
+        fold_ratio = pocket_area / opening_area
+        if fold_ratio < min_fold_ratio:
+            continue
 
         rims.append(boundary_edges)
 
     if verbose:
         print(
             f"[skeliner.pre] Rims: {len(rims)} pockets "
-            f"(multi-loop, fold >= {min_fold_ratio}), "
+            f"(fold >= {min_fold_ratio}), "
             f"{sum(len(r) for r in rims):,} rim edges"
         )
 
@@ -3051,13 +3047,56 @@ def find_pocket_organelles(
     # Cluster filter to remove noise
     pocket = _filter_small_clusters(mesh, pocket, min_cluster_size)
 
+    # Post-validate: split pocket into connected components and reject
+    # components whose area is too small relative to their boundary
+    # opening (surface dips, not real pockets).
+    pocket_idx = set(np.where(pocket)[0].tolist())
+    pocket_visited: set[int] = set()
+    n_rejected = 0
+    for start in list(pocket_idx):
+        if start in pocket_visited:
+            continue
+        comp: list[int] = []
+        pq = deque([start])
+        while pq:
+            fi = pq.popleft()
+            if fi in pocket_visited:
+                continue
+            pocket_visited.add(fi)
+            comp.append(fi)
+            for nfi in adj.get(fi, set()):
+                if nfi in pocket_idx and nfi not in pocket_visited:
+                    pq.append(nfi)
+
+        comp_set = set(comp)
+        boundary_edges = []
+        for fi in comp:
+            f = mesh.faces[fi]
+            for i in range(3):
+                e = (min(int(f[i]), int(f[(i+1)%3])),
+                     max(int(f[i]), int(f[(i+1)%3])))
+                for nfi in edge_to_face.get(e, []):
+                    if nfi not in comp_set:
+                        boundary_edges.append(e)
+                        break
+
+        pocket_area = float(mesh.area_faces[comp].sum())
+        opening_area = _rim_enclosed_area(boundary_edges, mesh.vertices)
+        if opening_area > 0:
+            fold_ratio = pocket_area / opening_area
+            if fold_ratio < min_fold_ratio:
+                for fi in comp:
+                    pocket[fi] = False
+                n_rejected += 1
+
     if verbose:
         print(
             f"[skeliner.pre] Pocket organelles (>= {min_cluster_size}): "
             f"{pocket.sum():,} faces "
             f"(initial {initial_count:,}, "
             f"bridged +{bridge_count:,}, "
-            f"holes +{hole_count:,})"
+            f"holes +{hole_count:,}, "
+            f"rejected {n_rejected})"
         )
     return pocket
 
@@ -3130,26 +3169,38 @@ def find_isolated_organelles(
             external_cis.add(ci)
             n_kept_frags += 1
 
-    # Pass 2: for external components, build combined structural surface
-    # and re-check all currently-external components against it.
-    # Some externals may actually be organelles inside OTHER externals.
+    # Pass 2: build ONE combined surface from main + all externals.
+    # For each external component, query against it.  If the nearest
+    # face belongs to the same component, use the second nearest.
     if external_cis:
-        struct_face_idx = list(main_face_idx)
+        ext_face_list = []
+        ext_face_comp_ids = []
         for eci in external_cis:
-            struct_face_idx.extend(np.where(face_comp == eci)[0].tolist())
-        struct_face_idx = np.array(struct_face_idx)
-        struct_centroids = mesh.triangles_center[struct_face_idx]
-        struct_normals = mesh.face_normals[struct_face_idx]
-        struct_tree = KDTree(struct_centroids)
+            eci_faces = np.where(face_comp == eci)[0]
+            ext_face_list.append(eci_faces)
+            ext_face_comp_ids.append(np.full(len(eci_faces), eci, dtype=np.intp))
+
+        all_struct_faces = np.concatenate([main_face_idx] + ext_face_list)
+        all_struct_comp = np.concatenate(
+            [np.full(len(main_face_idx), main_ci, dtype=np.intp)] + ext_face_comp_ids
+        )
+        all_struct_centroids = mesh.triangles_center[all_struct_faces]
+        all_struct_normals = mesh.face_normals[all_struct_faces]
+        struct_tree = KDTree(all_struct_centroids)
 
         newly_isolated = set()
         for ci in list(external_cis):
             comp_face_idx = np.where(face_comp == ci)[0]
             comp_verts = np.unique(mesh.faces[comp_face_idx])
             coords = mesh.vertices[comp_verts]
-            _, nn_idx = struct_tree.query(coords)
-            vecs = coords - struct_centroids[nn_idx]
-            dots = np.einsum("ij,ij->i", vecs, struct_normals[nn_idx])
+            # Query k=2 so we can skip self-matches
+            _, nn_idx = struct_tree.query(coords, k=2)
+            # For each vertex, prefer the nearest face NOT from ci
+            k0_comp = all_struct_comp[nn_idx[:, 0]]
+            use_k1 = k0_comp == ci
+            chosen = np.where(use_k1, nn_idx[:, 1], nn_idx[:, 0])
+            vecs = coords - all_struct_centroids[chosen]
+            dots = np.einsum("ij,ij->i", vecs, all_struct_normals[chosen])
             is_internal = (dots < 0).sum() > len(dots) / 2
             if is_internal:
                 isolated[comp_face_idx] = True
