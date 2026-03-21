@@ -1627,9 +1627,9 @@ def find_soma(
     spread_ratio = 1.0  # default: assume no soma
     if len(nonzero) >= 3:
         width_thresh, _ = _otsu_threshold(nonzero)
-        above_indices = np.where(
-            nonzero_mask & (largest_comp_size > width_thresh)
-        )[0].astype(float)
+        above_indices = np.where(nonzero_mask & (largest_comp_size > width_thresh))[
+            0
+        ].astype(float)
         all_indices = np.where(nonzero_mask)[0].astype(float)
 
         if len(above_indices) >= 2 and np.std(all_indices) > 0:
@@ -2336,15 +2336,29 @@ def ensure_watertight(
 def _outward_dot(
     mesh: trimesh.Trimesh,
     radius: float,
+    vert_comp: np.ndarray | None = None,
 ) -> np.ndarray:
     """Per-face outward score: dot(face_normal, direction_from_local_COM).
 
-    For each face, finds all vertices within *radius* of its centroid,
-    computes their center of mass, and dots the face normal against
-    the direction from that COM to the face centroid.
+    For each face, finds all vertices within *radius* of its centroid
+    **on the same component**, computes their center of mass, and dots
+    the face normal against the direction from that COM to the face
+    centroid.
 
     Surface faces point outward (positive), internal faces point
     inward (negative).
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    radius : float
+        Ball-query radius for local centre-of-mass.
+    vert_comp : np.ndarray or None
+        Per-vertex component ID ``(nVertices,)``.  When provided, only
+        vertices from the same component are used for the local COM.
+        This gives correct outward-dot values for disconnected
+        components.
 
     Returns
     -------
@@ -2354,15 +2368,48 @@ def _outward_dot(
     verts = mesh.vertices
     face_centers = mesh.triangles_center
     face_normals = mesh.face_normals
-    vtree = KDTree(verts)
+
+    if vert_comp is None:
+        # Single KDTree for the whole mesh (legacy path)
+        vtree = KDTree(verts)
+        outward_dots = np.zeros(len(mesh.faces), dtype=np.float64)
+        for fi in range(len(mesh.faces)):
+            fc = face_centers[fi]
+            idx = vtree.query_ball_point(fc, radius)
+            if len(idx) < 4:
+                continue
+            local_com = verts[idx].mean(axis=0)
+            outward_dir = fc - local_com
+            norm = np.linalg.norm(outward_dir)
+            if norm < 1e-10:
+                continue
+            outward_dir /= norm
+            outward_dots[fi] = np.dot(face_normals[fi], outward_dir)
+        return outward_dots
+
+    # Per-component KDTrees
+    face_comp = vert_comp[mesh.faces[:, 0]]
+    comp_ids = np.unique(face_comp)
+    comp_trees: dict[int, tuple[KDTree, np.ndarray]] = {}
+    for ci in comp_ids:
+        ci = int(ci)
+        mask = vert_comp == ci
+        comp_verts_idx = np.where(mask)[0]
+        if len(comp_verts_idx) < 4:
+            continue
+        comp_trees[ci] = (KDTree(verts[comp_verts_idx]), comp_verts_idx)
 
     outward_dots = np.zeros(len(mesh.faces), dtype=np.float64)
     for fi in range(len(mesh.faces)):
-        fc = face_centers[fi]
-        idx = vtree.query_ball_point(fc, radius)
-        if len(idx) < 4:
+        ci = int(face_comp[fi])
+        if ci not in comp_trees:
             continue
-        local_com = verts[idx].mean(axis=0)
+        tree, comp_verts_idx = comp_trees[ci]
+        fc = face_centers[fi]
+        local_idx = tree.query_ball_point(fc, radius)
+        if len(local_idx) < 4:
+            continue
+        local_com = verts[comp_verts_idx[local_idx]].mean(axis=0)
         outward_dir = fc - local_com
         norm = np.linalg.norm(outward_dir)
         if norm < 1e-10:
@@ -2457,15 +2504,8 @@ def _organelle_precompute(
                 f"({radius_multiplier}x median edge {median_edge:.1f})"
             )
 
-    outward_dots = _outward_dot(mesh, radius)
-
-    if verbose:
-        raw_count = (outward_dots < 0).sum()
-        print(
-            f"[skeliner.pre] Raw internal faces: {raw_count:,} "
-            f"({100 * raw_count / len(mesh.faces):.1f}%)"
-        )
-
+    # Compute connected components first so _outward_dot can use
+    # per-component KDTrees for correct local COM.
     edge_list = set()
     for face in mesh.faces:
         for i in range(3):
@@ -2482,6 +2522,23 @@ def _organelle_precompute(
             vert_comp[v] = ci
     face_comp = vert_comp[mesh.faces[:, 0]]
     main_face_mask = face_comp == main_ci
+
+    if verbose:
+        n_comps = len(comps)
+        n_structural = sum(1 for c in comps if len(c) >= 100)
+        print(
+            f"[skeliner.pre] Components: {n_comps} total, "
+            f"{n_structural} structural (>= 100 verts)"
+        )
+
+    outward_dots = _outward_dot(mesh, radius, vert_comp=vert_comp)
+
+    if verbose:
+        raw_count = int((outward_dots < 0).sum())
+        print(
+            f"[skeliner.pre] Raw internal faces: {raw_count:,} "
+            f"({100 * raw_count / len(mesh.faces):.1f}%)"
+        )
 
     return outward_dots, face_comp, main_ci, main_face_mask
 
@@ -3105,28 +3162,79 @@ def find_organelles(
     isolated : np.ndarray
         Boolean mask ``(nFaces,)`` — isolated internal fragment faces.
     """
+    import time as _time
+
+    _p = "[skeliner.pre]"
+    t_total = _time.perf_counter()
+
+    # ── 1. Precompute outward dots and components ─────────────────
     precomputed = _organelle_precompute(
-        mesh,
-        radius,
-        radius_multiplier,
-        verbose,
+        mesh, radius, radius_multiplier, verbose,
+    )
+    _, face_comp, main_ci, _ = precomputed
+
+    # ── 2. Find isolated organelles (small internal components) ───
+    isolated = find_isolated_organelles(
+        mesh, radius=radius, radius_multiplier=radius_multiplier,
+        verbose=verbose, _precomputed=precomputed,
+    )
+
+    # ── 3. Identify structural components (non-isolated) ──────────
+    #       Build a mask covering all non-isolated components so that
+    #       find_pocket_organelles detects pockets on all of them in
+    #       a single pass (the outward dots are already per-component).
+    isolated_faces_set = set(np.where(isolated)[0].tolist())
+    structural_comps = []
+    for ci in np.unique(face_comp):
+        comp_face_idx = np.where(face_comp == ci)[0]
+        non_iso_count = sum(1 for fi in comp_face_idx if fi not in isolated_faces_set)
+        if non_iso_count >= min_cluster_size:
+            structural_comps.append(int(ci))
+
+    if verbose and len(structural_comps) > 1:
+        other = [ci for ci in structural_comps if ci != main_ci]
+        sizes = sorted([int((face_comp == ci).sum()) for ci in other], reverse=True)
+        print(
+            f"{_p} Structural components: main + "
+            f"{len(other)} disconnected "
+            f"({', '.join(f'{s:,}f' for s in sizes[:5])}"
+            + ("..." if len(sizes) > 5 else "") + ")"
+        )
+
+    # ── 4. Run pocket detection on all structural components ──────
+    #       Replace main_face_mask with structural_face_mask in the
+    #       precomputed tuple so pocket detection covers all components.
+    structural_mask = np.zeros(len(mesh.faces), dtype=bool)
+    for ci in structural_comps:
+        structural_mask[face_comp == ci] = True
+
+    precomputed_structural = (
+        precomputed[0],  # outward_dots
+        precomputed[1],  # face_comp
+        precomputed[2],  # main_ci
+        structural_mask, # structural_face_mask (replaces main_face_mask)
     )
 
     pocket = find_pocket_organelles(
-        mesh,
-        radius=radius,
-        radius_multiplier=radius_multiplier,
+        mesh, radius=radius, radius_multiplier=radius_multiplier,
         min_cluster_size=min_cluster_size,
-        verbose=verbose,
-        _precomputed=precomputed,
+        verbose=verbose, _precomputed=precomputed_structural,
     )
-    isolated = find_isolated_organelles(
-        mesh,
-        radius=radius,
-        radius_multiplier=radius_multiplier,
-        verbose=verbose,
-        _precomputed=precomputed,
-    )
+
+    if verbose and len(structural_comps) > 1:
+        main_pocket = int(pocket[face_comp == main_ci].sum())
+        other_pocket = int(pocket.sum()) - main_pocket
+        print(
+            f"{_p} Pocket organelles: {int(pocket.sum()):,} faces "
+            f"(main: {main_pocket:,}, other: {other_pocket:,})"
+        )
+
+    dt_total = _time.perf_counter() - t_total
+    if verbose:
+        print(
+            f"{_p} find_organelles done: pocket={int(pocket.sum()):,}, "
+            f"isolated={int(isolated.sum()):,} ({dt_total:.1f}s)"
+        )
 
     return pocket, isolated
 
