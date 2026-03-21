@@ -710,7 +710,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
             mesh_state["soma"] = soma
         components = await _run_with_log(
-            find_disconnected, mesh, verbose=True, _precomputed_soma=soma
+            find_disconnected, mesh, verbose=True, _precomputed_soma=soma,
+            organelle_mask=mesh_state.get("organelle_mask"),
         )
         mesh_state["disconnected"] = components
 

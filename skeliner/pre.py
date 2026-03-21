@@ -1765,13 +1765,13 @@ def find_disconnected(
     *,
     verbose: bool = False,
     _precomputed_soma: Soma | None = None,
+    organelle_mask: np.ndarray | None = None,
 ) -> list[list[int]]:
     """Detect disconnected mesh components from segmentation errors.
 
     Returns disconnected components — broken neurite segments that are
-    separate from the main mesh.  Soma-region components and components
-    enclosed by the main mesh (residual organelles) are excluded.
-    Should be run after remove_organelles.
+    separate from the main mesh.  Soma-region components, organelle
+    components, and components enclosed by the main mesh are excluded.
 
     Parameters
     ----------
@@ -1781,6 +1781,9 @@ def find_disconnected(
         Print summary.
     _precomputed_soma : Soma or None
         Pre-computed soma from :func:`find_soma`.
+    organelle_mask : np.ndarray or None
+        Boolean mask ``(nFaces,)`` of organelle faces.  Components that
+        are entirely organelle are skipped.
 
     Returns
     -------
@@ -1815,12 +1818,21 @@ def find_disconnected(
 
     components = []
     n_soma_excluded = 0
+    n_organelle_excluded = 0
     n_enclosed_excluded = 0
     for cid, fis in comp_faces.items():
         # Need at least 7 faces: 3 for each tip + 1 body face to
         # bridge back to two other parts
         if len(fis) < 7:
             continue
+
+        # Skip components that are entirely organelle
+        if organelle_mask is not None:
+            fis_arr = np.asarray(fis)
+            if organelle_mask[fis_arr].all():
+                n_organelle_excluded += 1
+                continue
+
         verts = np.unique(mesh.faces[fis])
         coords = mesh.vertices[verts]
         centroid = coords.mean(axis=0)
@@ -1861,6 +1873,8 @@ def find_disconnected(
         excluded = []
         if n_soma_excluded:
             excluded.append(f"{n_soma_excluded} in soma")
+        if n_organelle_excluded:
+            excluded.append(f"{n_organelle_excluded} organelle")
         if n_enclosed_excluded:
             excluded.append(f"{n_enclosed_excluded} enclosed")
         exc_msg = f", {', '.join(excluded)} excluded" if excluded else ""
