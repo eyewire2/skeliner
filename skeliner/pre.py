@@ -3127,80 +3127,47 @@ def find_isolated_organelles(
     n_internal_frag_faces = 0
     n_kept_frags = 0
 
-    # Two-pass approach:
-    # Pass 1: check every non-main component against the main component.
-    #         Components classified as external are "structural" (disconnected
-    #         neurites, offset layers).
-    # Pass 2: re-check components that were external in pass 1 against ALL
-    #         structural surfaces (main + pass-1 externals).  This catches
-    #         organelles inside disconnected structural components.
+    # Classify each non-main component using outward_dots.
+    # Organelle membranes have predominantly negative outward_dots
+    # (faces point inward); structural components have positive.
+    # For tiny components where outward_dots are all zero (too few
+    # neighbours for valid local COM), fall back to the geometric
+    # inside/outside test against the main component.
     main_face_idx = np.where(face_comp == main_ci)[0]
     main_centroids = mesh.triangles_center[main_face_idx]
     main_normals = mesh.face_normals[main_face_idx]
-    main_tree = KDTree(main_centroids)
+    main_tree = None  # built lazily for fallback
 
-    external_cis: set[int] = set()
-
-    # Pass 1: classify against main component
     for ci in range(n_comps):
         if ci == main_ci:
             continue
         comp_face_idx = np.where(face_comp == ci)[0]
         if len(comp_face_idx) == 0:
             continue
-        comp_verts = np.unique(mesh.faces[comp_face_idx])
-        coords = mesh.vertices[comp_verts]
-        _, nn_idx = main_tree.query(coords)
-        vecs = coords - main_centroids[nn_idx]
-        dots = np.einsum("ij,ij->i", vecs, main_normals[nn_idx])
-        is_internal = (dots < 0).sum() > len(dots) / 2
+
+        comp_dots = outward_dots[comp_face_idx]
+        n_valid = np.count_nonzero(comp_dots)
+
+        if n_valid > 0:
+            # Use outward_dots: majority negative → isolated organelle
+            is_internal = (comp_dots < 0).sum() > n_valid / 2
+        else:
+            # Fallback: geometric test against main surface
+            if main_tree is None:
+                main_tree = KDTree(main_centroids)
+            comp_verts = np.unique(mesh.faces[comp_face_idx])
+            coords = mesh.vertices[comp_verts]
+            _, nn_idx = main_tree.query(coords)
+            vecs = coords - main_centroids[nn_idx]
+            dots = np.einsum("ij,ij->i", vecs, main_normals[nn_idx])
+            is_internal = (dots < 0).sum() > len(dots) / 2
+
         if is_internal:
             isolated[comp_face_idx] = True
             n_internal_frags += 1
             n_internal_frag_faces += len(comp_face_idx)
         else:
-            external_cis.add(ci)
             n_kept_frags += 1
-
-    # Pass 2: build ONE combined surface from main + all externals.
-    # For each external component, query against it.  If the nearest
-    # face belongs to the same component, use the second nearest.
-    if external_cis:
-        ext_face_list = []
-        ext_face_comp_ids = []
-        for eci in external_cis:
-            eci_faces = np.where(face_comp == eci)[0]
-            ext_face_list.append(eci_faces)
-            ext_face_comp_ids.append(np.full(len(eci_faces), eci, dtype=np.intp))
-
-        all_struct_faces = np.concatenate([main_face_idx] + ext_face_list)
-        all_struct_comp = np.concatenate(
-            [np.full(len(main_face_idx), main_ci, dtype=np.intp)] + ext_face_comp_ids
-        )
-        all_struct_centroids = mesh.triangles_center[all_struct_faces]
-        all_struct_normals = mesh.face_normals[all_struct_faces]
-        struct_tree = KDTree(all_struct_centroids)
-
-        newly_isolated = set()
-        for ci in list(external_cis):
-            comp_face_idx = np.where(face_comp == ci)[0]
-            comp_verts = np.unique(mesh.faces[comp_face_idx])
-            coords = mesh.vertices[comp_verts]
-            # Query k=2 so we can skip self-matches
-            _, nn_idx = struct_tree.query(coords, k=2)
-            # For each vertex, prefer the nearest face NOT from ci
-            k0_comp = all_struct_comp[nn_idx[:, 0]]
-            use_k1 = k0_comp == ci
-            chosen = np.where(use_k1, nn_idx[:, 1], nn_idx[:, 0])
-            vecs = coords - all_struct_centroids[chosen]
-            dots = np.einsum("ij,ij->i", vecs, all_struct_normals[chosen])
-            is_internal = (dots < 0).sum() > len(dots) / 2
-            if is_internal:
-                isolated[comp_face_idx] = True
-                newly_isolated.add(ci)
-                n_internal_frags += 1
-                n_internal_frag_faces += len(comp_face_idx)
-                n_kept_frags -= 1
 
     if verbose:
         print(
