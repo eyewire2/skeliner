@@ -1399,6 +1399,39 @@ def find_fragments(
     return fragment
 
 
+def _otsu_threshold(values: np.ndarray) -> tuple[float, float]:
+    """Otsu's method on continuous 1-D data.
+
+    Returns ``(threshold, separability)`` where *separability* is the
+    ratio of between-class variance to total variance (0 = no split,
+    1 = perfect bimodal separation).
+    """
+    x = np.sort(values)
+    n = len(x)
+    if n < 2:
+        return float(x[0]), 0.0
+
+    total_var = float(np.var(x))
+    if total_var < 1e-12:
+        return float(x[0]), 0.0
+
+    best_thresh = float(x[0])
+    best_between = 0.0
+
+    # Scan every midpoint between consecutive unique values
+    for i in range(1, n):
+        if x[i] == x[i - 1]:
+            continue
+        left, right = x[:i], x[i:]
+        w0, w1 = i / n, (n - i) / n
+        between = w0 * w1 * (left.mean() - right.mean()) ** 2
+        if between > best_between:
+            best_between = between
+            best_thresh = float(x[i - 1] + x[i]) / 2.0
+
+    return best_thresh, best_between / total_var
+
+
 def find_soma(
     mesh: trimesh.Trimesh,
     *,
@@ -1457,9 +1490,25 @@ def find_soma(
 
     center = np.median(centroids, axis=0)
     dists = np.linalg.norm(centroids - center, axis=1)
-    core = centroids[dists < 2 * np.median(dists)]
+
+    threshold, _ = _otsu_threshold(dists)
+    core = centroids[dists <= threshold]
     if len(core) < 3:
         core = centroids
+
+    # Reject if Otsu's split didn't find a meaningfully tight cluster:
+    # compare core spread to total spread.  A real soma cluster has
+    # core_std << total_std; when they are similar the split is spurious.
+    total_std = float(np.std(dists))
+    core_std = float(np.std(np.linalg.norm(core - np.median(core, axis=0), axis=1)))
+    if total_std > 0 and core_std / total_std > 0.35:
+        if verbose:
+            print(
+                f"[skeliner.pre] Soma: fragments don't cluster "
+                f"(core/total spread = {core_std / total_std:.2f})"
+            )
+        return None
+
     center = np.median(core, axis=0)
 
     # ── 2. Build main-component vertex adjacency ─────────────────────
