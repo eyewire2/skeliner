@@ -116,6 +116,34 @@ class Soma:
         ρ2 = (ξ**2).sum(axis=-1)
         return ρ2 <= inside_frac**2
 
+    def remap(self, vert_map: np.ndarray) -> "Soma":
+        """Return a copy with vertex indices translated by *vert_map*.
+
+        Parameters
+        ----------
+        vert_map : (nOldVerts,) int64
+            ``vert_map[old_idx]`` gives the new index, or ``-1`` if the
+            vertex was removed.
+
+        Returns
+        -------
+        Soma
+            New Soma with the same geometry but remapped verts.
+        """
+        if self.verts is None:
+            new_verts = None
+        else:
+            mapped = vert_map[self.verts]
+            new_verts = mapped[mapped >= 0]
+            if len(new_verts) == 0:
+                new_verts = None
+        return Soma(
+            center=self.center.copy(),
+            axes=self.axes.copy(),
+            R=self.R.copy(),
+            verts=new_verts,
+        )
+
     def distance(self, x, to="center"):
         """
         Compute the distance from *x* to the soma.

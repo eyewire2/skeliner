@@ -285,6 +285,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         def flush(self):
             self._original.flush()
 
+    async def _log(text: str):
+        """Print to terminal AND broadcast to browser."""
+        print(text)
+        await broadcast({"type": "log", "text": text})
+
     async def _run_with_log(func, *args, **kwargs):
         """Run *func* in executor, streaming its stdout to WS clients."""
         loop = asyncio.get_event_loop()
@@ -707,8 +712,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh = mesh_state["mesh"]
         soma = mesh_state.get("soma")
         if soma is None:
+            await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
             mesh_state["soma"] = soma
+        await _log("[skeliner.pre] Detecting disconnected components...")
         components = await _run_with_log(
             find_disconnected, mesh, verbose=True, _precomputed_soma=soma,
             organelle_mask=mesh_state.get("organelle_mask"),
@@ -716,6 +723,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh_state["disconnected"] = components
 
         if not components:
+            await _log("[skeliner.pre] No disconnected components found")
             return JSONResponse({"ok": False, "nComponents": 0})
 
         ann = {}
@@ -806,10 +814,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         # Use cached soma or compute it
         soma = mesh_state.get("soma")
         if soma is None:
+            await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
             mesh_state["soma"] = soma
 
         cached_disc = mesh_state.get("disconnected")
+        await _log("[skeliner.pre] Detecting gaps...")
         gaps = await _run_with_log(
             find_gaps, mesh, verbose=True,
             _precomputed_soma=soma,
@@ -863,8 +873,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         )
         n_after = len(new_mesh.faces)
 
+        _clear_annotations("gap ", "disconnected ")
         await _apply_new_mesh(new_mesh)
         mesh_state["gap_clusters"] = None
+        await _log(f"Remove gaps: {n_after:,} faces after bridging")
 
         return JSONResponse({
             "ok": True,
@@ -1066,6 +1078,24 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nFaces": n_rims})
 
+    def _clear_annotations(*prefixes: str) -> None:
+        """Remove highlight annotations whose label starts with any prefix."""
+        if not annotations_path.exists():
+            return
+        try:
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            return
+        if "highlights" not in ann:
+            return
+        ann["highlights"] = [
+            h for h in ann["highlights"]
+            if not any(h.get("label", "").startswith(p) for p in prefixes)
+        ]
+        annotations_path.write_text(
+            json.dumps(ann, separators=(",", ":")), encoding="utf-8"
+        )
+
     async def _apply_new_mesh(new_mesh):
         """Replace the current mesh with a modified one and broadcast."""
         # Save current mesh for undo
@@ -1078,6 +1108,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh_state["mesh"] = new_mesh
         mesh_state["organelle_mask"] = None  # invalidate caches
         mesh_state["_organelle_precomputed"] = None
+        # Soma survives — vertex indices are preserved across face removals
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None
         mesh_state["hole_loops"] = None
@@ -1086,8 +1117,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         buffers = _mesh_to_buffers(new_mesh, centroid=original_centroid)
         mesh_state["buffers"] = buffers
 
-        # Clear annotations (they reference old face indices)
-        annotations_path.write_text("{}", encoding="utf-8")
+        # Both vertex and face indices are stable — all annotations
+        # survive mesh changes without remapping.
 
         buffers["keepCamera"] = True
         await broadcast({"type": "mesh_loaded", "payload": buffers})
@@ -1133,26 +1164,28 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         n_before = len(mesh.faces)
         cached = mesh_state.get("organelle_mask")
 
-        if cached is not None and len(cached) == len(mesh.faces) and cached.any():
-            # Use cached detection result
-            print(f"Using cached organelle mask ({int(cached.sum()):,} faces)")
-            keep = ~cached
-            new_mesh = mesh.submesh([np.where(keep)[0]], append=True)
-            new_mesh.remove_unreferenced_vertices()
-        else:
-            # No cache — run full detection + removal
-            from skeliner.pre import remove_organelles as _remove_organelles
-            new_mesh = await _run_with_log(_remove_organelles, mesh, verbose=True)
+        from skeliner.pre import _rebuild_mesh
 
-        n_after = len(new_mesh.faces)
+        def _do_remove():
+            if cached is not None and len(cached) == len(mesh.faces) and cached.any():
+                print(f"[skeliner.pre] Using cached organelle mask ({int(cached.sum()):,} faces)")
+                return _rebuild_mesh(mesh, ~cached)
+            else:
+                from skeliner.pre import remove_organelles as _remove_organelles
+                return _remove_organelles(mesh, verbose=True)
 
+        new_mesh = await _run_with_log(_do_remove)
+
+        n_after = n_before - int((new_mesh.faces == 0).all(axis=1).sum()) if len(new_mesh.faces) == n_before else len(new_mesh.faces)
+
+        _clear_annotations("organelle:")
         await _apply_new_mesh(new_mesh)
-        print(f"Remove organelles: {n_before:,} → {n_after:,} faces ({n_before - n_after:,} removed)")
+        n_degen = int(np.all(new_mesh.faces == 0, axis=1).sum())
+        await _log(f"Remove organelles: {n_before:,} faces, {n_degen:,} degenerated")
         return JSONResponse({
             "ok": True,
             "facesBefore": n_before,
-            "facesAfter": n_after,
-            "facesRemoved": n_before - n_after,
+            "facesRemoved": n_degen,
         })
 
     async def do_remove_fusions(request):
@@ -1173,8 +1206,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         )
         n_after = len(new_mesh.faces)
 
+        _clear_annotations("fusion ")
         await _apply_new_mesh(new_mesh)
-        print(f"Remove fusions: {n_before:,} → {n_after:,} faces ({n_before - n_after:,} removed)")
+        n_degen = int(np.all(new_mesh.faces == 0, axis=1).sum())
+        await _log(f"Remove fusions: {n_degen:,} faces degenerated")
         return JSONResponse({
             "ok": True,
             "facesBefore": n_before,
@@ -1194,15 +1229,19 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         n_before = len(mesh.faces)
         cached = mesh_state.get("fragment_mask")
 
-        if cached is not None and len(cached) == len(mesh.faces) and cached.any():
-            print(f"Using cached fragment mask ({int(cached.sum()):,} faces)")
-            new_mesh = _remove_fragments(mesh, _precomputed=cached)
-        else:
-            new_mesh = await _run_with_log(_remove_fragments, mesh, verbose=True)
-        n_after = len(new_mesh.faces)
+        def _do_remove():
+            if cached is not None and len(cached) == len(mesh.faces) and cached.any():
+                print(f"[skeliner.pre] Using cached fragment mask ({int(cached.sum()):,} faces)")
+                return _remove_fragments(mesh, _precomputed=cached, verbose=True)
+            else:
+                return _remove_fragments(mesh, verbose=True)
 
+        new_mesh = await _run_with_log(_do_remove)
+
+        _clear_annotations("fragments ")
         await _apply_new_mesh(new_mesh)
-        print(f"Remove fragments: {n_before:,} → {n_after:,} faces ({n_before - n_after:,} removed)")
+        n_degen = int(np.all(new_mesh.faces == 0, axis=1).sum())
+        await _log(f"Remove fragments: {n_degen:,} faces degenerated")
         return JSONResponse({
             "ok": True,
             "facesBefore": n_before,
@@ -1231,8 +1270,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         )
         n_after = len(new_mesh.faces)
 
+        _clear_annotations("hole ")
         await _apply_new_mesh(new_mesh)
-        print(f"Fill holes: {n_before:,} → {n_after:,} faces ({n_after - n_before:,} added)")
+        await _log(f"Fill holes: {n_before:,} → {n_after:,} faces ({n_after - n_before:,} added)")
         return JSONResponse({
             "ok": True,
             "facesBefore": n_before,

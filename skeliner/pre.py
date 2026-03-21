@@ -10,6 +10,7 @@ from scipy.spatial import KDTree
 from skeliner.dataclass import Soma
 
 __all__ = [
+    "compact_mesh",
     "ensure_watertight",
     "fill_holes",
     "find_disconnected",
@@ -120,6 +121,9 @@ def find_holes(
     for e, fis in edge_to_faces.items():
         if len(fis) == 1 and face_comp[fis[0]] == main_comp:
             boundary_edges.append(e)
+
+    if verbose:
+        print(f"[skeliner.pre] Holes: {len(boundary_edges)} boundary edges")
 
     if not boundary_edges:
         if verbose:
@@ -1118,29 +1122,26 @@ def _stitch_and_rebuild(
                 f"{len(tris)} stitch faces"
             )
 
-    keep = np.ones(len(mesh.faces), dtype=bool)
+    # Degenerate removed faces, append stitch faces at the end
+    new_faces = mesh.faces.copy()
     for fi in sel:
-        keep[fi] = False
-    kept_faces = mesh.faces[keep]
+        new_faces[fi] = 0
 
     # Combine existing + new vertices
     if new_verts:
         all_vertices = np.vstack([mesh.vertices, np.array(new_verts)])
     else:
-        all_vertices = mesh.vertices.copy()
+        all_vertices = mesh.vertices
 
     if all_stitch:
         stitch_faces = np.array(all_stitch, dtype=np.int64)
-        all_faces = np.vstack([kept_faces, stitch_faces])
-    else:
-        all_faces = kept_faces
+        new_faces = np.vstack([new_faces, stitch_faces])
 
     result = trimesh.Trimesh(
         vertices=all_vertices,
-        faces=all_faces,
+        faces=new_faces,
         process=False,
     )
-    result.remove_unreferenced_vertices()
 
     if verbose:
         print(
@@ -1213,13 +1214,7 @@ def merge_selected_faces(
         keep = np.ones(len(mesh.faces), dtype=bool)
         for fi in sel:
             keep[fi] = False
-        result = trimesh.Trimesh(
-            vertices=mesh.vertices,
-            faces=mesh.faces[keep],
-            process=False,
-        )
-        result.remove_unreferenced_vertices()
-        return result
+        return _rebuild_mesh(mesh, keep)
 
     # Pair loops by closest centroid
     centroids = [mesh.vertices[lp].mean(axis=0) for lp in loops]
@@ -1431,6 +1426,145 @@ def _otsu_threshold(values: np.ndarray) -> tuple[float, float]:
     return best_thresh, best_between / total_var
 
 
+def _assign_soma_verts(
+    mesh: trimesh.Trimesh,
+    soma: "Soma",
+    main_fi: np.ndarray | None = None,
+    adj: dict | None = None,
+    verbose: bool = False,
+) -> "Soma":
+    """Assign mesh vertices to an existing soma ellipsoid.
+
+    Performs containment, edge-dilation, pocket absorption, and
+    disconnected-component absorption.  Refits the ellipsoid to the
+    final vertex set.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        The mesh (may differ from the one used to detect the soma).
+    soma : Soma
+        Soma with fitted geometry (center/axes/R).
+    main_fi : np.ndarray or None
+        Face indices of the main component.  Computed if not provided.
+    adj : dict or None
+        Vertex adjacency on the main component.  Computed if not provided.
+    verbose : bool, default False
+        Print progress.
+    """
+    from collections import deque
+
+    _log = "[skeliner.pre]   soma verts:"
+
+    if main_fi is None:
+        labels, main = _face_edge_components(mesh)
+        main_fi = np.where(labels == main)[0]
+
+    if adj is None:
+        adj = defaultdict(list)
+        for fi in main_fi:
+            v = mesh.faces[fi]
+            for i in range(3):
+                a, b = int(v[i]), int(v[(i + 1) % 3])
+                adj[a].append(b)
+                adj[b].append(a)
+
+    # Containment: main-component vertices inside the ellipsoid
+    all_main_verts = np.unique(mesh.faces[main_fi])
+    inside = soma.contains(mesh.vertices[all_main_verts])
+    soma_set: set[int] = set(all_main_verts[inside].tolist())
+    if verbose:
+        print(f"{_log} {len(soma_set):,} inside ellipsoid")
+
+    # Dilate along mesh edges (a few average edge lengths past the
+    # ellipsoid surface, measured in body-coord units).
+    avg_edge = float(mesh.edges_unique_length.mean())
+    edge_in_body = avg_edge / float(soma.axes.min())
+    dilation_limit = 1.0 + 3.0 * edge_in_body
+
+    n_dilated = 0
+    prev_size = 0
+    while len(soma_set) != prev_size:
+        prev_size = len(soma_set)
+        frontier = set()
+        for v in soma_set:
+            for nv in adj.get(v, []):
+                if nv not in soma_set:
+                    frontier.add(nv)
+        if not frontier:
+            break
+        frontier_arr = np.fromiter(frontier, dtype=np.intp)
+        body = soma._body_coords(mesh.vertices[frontier_arr])
+        body_dist = np.sqrt((body**2).sum(axis=1))
+        accept = frontier_arr[body_dist < dilation_limit]
+        if len(accept) == 0:
+            break
+        n_dilated += len(accept)
+        soma_set.update(accept.tolist())
+    if verbose:
+        print(f"{_log} +{n_dilated:,} dilated → {len(soma_set):,}")
+
+    # Absorb pockets: connected components of non-soma verts that are
+    # topologically trapped (only reachable through the soma).
+    all_main_set = set(all_main_verts.tolist())
+    n_absorbed_total = 0
+    for _iteration in range(10):
+        outside = all_main_set - soma_set
+        visited: set[int] = set()
+        absorbed = 0
+        for start in outside:
+            if start in visited:
+                continue
+            comp: list[int] = []
+            pocket_queue = deque([start])
+            while pocket_queue:
+                v = pocket_queue.popleft()
+                if v in visited:
+                    continue
+                visited.add(v)
+                comp.append(v)
+                for nv in adj[v]:
+                    if nv in outside and nv not in visited:
+                        pocket_queue.append(nv)
+            comp_set = set(comp)
+            trapped = all(
+                nv in soma_set or nv in comp_set for v in comp for nv in adj.get(v, [])
+            )
+            if trapped and len(comp) < len(soma_set):
+                soma_set.update(comp)
+                absorbed += len(comp)
+        n_absorbed_total += absorbed
+        if absorbed == 0:
+            break
+    if verbose and n_absorbed_total:
+        print(f"{_log} +{n_absorbed_total:,} absorbed pockets → {len(soma_set):,}")
+
+    # Absorb disconnected-component vertices inside the ellipsoid.
+    all_verts = np.arange(len(mesh.vertices))
+    non_main_mask = np.ones(len(mesh.vertices), dtype=bool)
+    non_main_mask[all_main_verts] = False
+    non_main_verts = all_verts[non_main_mask]
+    n_disconn = 0
+    if non_main_verts.size:
+        inside_non_main = soma.contains(mesh.vertices[non_main_verts])
+        n_disconn = int(inside_non_main.sum())
+        soma_set.update(non_main_verts[inside_non_main].tolist())
+    if verbose and n_disconn:
+        print(f"{_log} +{n_disconn:,} disconnected → {len(soma_set):,}")
+
+    # Refit ellipsoid to the final vertex set.
+    soma_verts_arr = np.fromiter(sorted(soma_set), dtype=np.intp)
+    if len(soma_verts_arr) >= 4:
+        try:
+            soma = Soma.fit(mesh.vertices[soma_verts_arr], verts=soma_verts_arr)
+        except ValueError:
+            soma.verts = soma_verts_arr
+    else:
+        soma.verts = soma_verts_arr
+
+    return soma
+
+
 def find_soma(
     mesh: trimesh.Trimesh,
     *,
@@ -1487,6 +1621,11 @@ def find_soma(
         centroids.append(mesh.vertices[verts].mean(axis=0))
 
     centroids = np.asarray(centroids)
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma: {organelle_mask.sum():,} organelle faces, "
+            f"{len(centroids)} clusters"
+        )
     if len(centroids) < 3:
         if verbose:
             print("[skeliner.pre] Soma: too few organelle clusters")
@@ -1534,8 +1673,15 @@ def find_soma(
         return None
 
     center = np.median(core, axis=0)
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma: dense cluster {len(core)}/{len(centroids)} "
+            f"fragments, nn_thresh={nn_thresh:.0f}"
+        )
 
     # ── 2. Build main-component vertex adjacency ─────────────────────
+    if verbose:
+        print("[skeliner.pre] Soma: building vertex adjacency...")
     main_fi = np.where(labels == main)[0]
     adj: dict[int, list[int]] = defaultdict(list)
     for fi in main_fi:
@@ -1546,6 +1692,8 @@ def find_soma(
             adj[b].append(a)
 
     # ── 3. BFS from nearest vertex to centre (no hard cap) ───────
+    if verbose:
+        print("[skeliner.pre] Soma: BFS ring analysis...")
     main_verts = np.fromiter(adj.keys(), dtype=np.intp)
     seed = int(
         main_verts[
@@ -1638,6 +1786,12 @@ def find_soma(
     # Reject if spread_ratio is too high (wide rings not localized).
     # Use Otsu on [spread_ratio, 1.0 - spread_ratio] to decide:
     # if spread_ratio is closer to 0 than to 1, it's concentrated.
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma: peak ring {peak_ring}, "
+            f"cutoff ring {cutoff}/{max_ring}, "
+            f"spread_ratio={spread_ratio:.3f}"
+        )
     if spread_ratio > 1.0 / 3:
         if verbose:
             print(
@@ -1654,96 +1808,7 @@ def find_soma(
 
     soma = Soma.fit(mesh.vertices[bfs_verts_arr])
 
-    # ── 6. Assign verts: main-component vertices inside the ellipsoid
-    all_main_verts = np.unique(mesh.faces[main_fi])
-    inside = soma.contains(mesh.vertices[all_main_verts])
-    soma_set: set[int] = set(all_main_verts[inside].tolist())
-
-    # ── 7. Dilate the soma boundary, then absorb pockets ──────────
-    #       The dilation distance and pocket absorption distance are
-    #       derived from mesh resolution: a few average edge lengths
-    #       expressed in body-coord units.
-    avg_edge = float(mesh.edges_unique_length.mean())
-    edge_in_body = avg_edge / float(soma.axes.min())
-    dilation_limit = 1.0 + 3.0 * edge_in_body
-
-    # 7a. Dilate: grow soma boundary along mesh edges, accepting
-    #     neighbours within a few edge-lengths of the ellipsoid surface.
-    prev_size = 0
-    while len(soma_set) != prev_size:
-        prev_size = len(soma_set)
-        frontier = set()
-        for v in soma_set:
-            for nv in adj.get(v, []):
-                if nv not in soma_set:
-                    frontier.add(nv)
-        if not frontier:
-            break
-        frontier_arr = np.fromiter(frontier, dtype=np.intp)
-        body = soma._body_coords(mesh.vertices[frontier_arr])
-        body_dist = np.sqrt((body**2).sum(axis=1))
-        accept = frontier_arr[body_dist < dilation_limit]
-        if len(accept) == 0:
-            break
-        soma_set.update(accept.tolist())
-
-    # 7b. Absorb pockets: connected components of non-soma verts
-    #     that are topologically trapped — their only path to the
-    #     rest of the mesh goes through the soma.
-    all_main_set = set(all_main_verts.tolist())
-    for _iteration in range(10):
-        outside = all_main_set - soma_set
-        visited: set[int] = set()
-        absorbed = 0
-        for start in outside:
-            if start in visited:
-                continue
-            comp: list[int] = []
-            pocket_queue = deque([start])
-            while pocket_queue:
-                v = pocket_queue.popleft()
-                if v in visited:
-                    continue
-                visited.add(v)
-                comp.append(v)
-                for nv in adj[v]:
-                    if nv in outside and nv not in visited:
-                        pocket_queue.append(nv)
-            # Trapped = every neighbour of the component is either
-            # inside the component itself or inside the soma.
-            # Only absorb if the component is small relative to the
-            # current soma (a pocket, not a neurite branch).
-            comp_set = set(comp)
-            trapped = all(
-                nv in soma_set or nv in comp_set for v in comp for nv in adj.get(v, [])
-            )
-            if trapped and len(comp) < len(soma_set):
-                soma_set.update(comp)
-                absorbed += len(comp)
-        if absorbed == 0:
-            break
-
-    # ── 8. Absorb disconnected-component vertices inside the ellipsoid
-    #       Small fragments (failed organelle removals) that sit inside
-    #       the soma region should be part of the soma, not left as
-    #       stray vertices that create noise in downstream binning.
-    all_verts = np.arange(len(mesh.vertices))
-    non_main_mask = np.ones(len(mesh.vertices), dtype=bool)
-    non_main_mask[all_main_verts] = False
-    non_main_verts = all_verts[non_main_mask]
-    if non_main_verts.size:
-        inside_non_main = soma.contains(mesh.vertices[non_main_verts])
-        soma_set.update(non_main_verts[inside_non_main].tolist())
-
-    # ── 9. Refit ellipsoid to the final soma vertices ───────────
-    soma_verts_arr = np.fromiter(sorted(soma_set), dtype=np.intp)
-    if len(soma_verts_arr) >= 4:
-        try:
-            soma = Soma.fit(mesh.vertices[soma_verts_arr], verts=soma_verts_arr)
-        except ValueError:
-            soma.verts = soma_verts_arr
-    else:
-        soma.verts = soma_verts_arr
+    soma = _assign_soma_verts(mesh, soma, main_fi, adj, verbose=verbose)
 
     if verbose:
         print(
@@ -1793,6 +1858,9 @@ def find_disconnected(
     """
     labels, main = _face_edge_components(mesh)
     n_faces = len(mesh.faces)
+    if verbose:
+        n_total_comps = int(labels.max()) + 1 if len(labels) else 0
+        print(f"[skeliner.pre] Disconnected: {n_total_comps} total components")
 
     # Locate soma so we can exclude components inside it
     soma = (
@@ -1803,6 +1871,8 @@ def find_disconnected(
 
     # Build KD-tree of main-component face centroids + normals
     # for inside/outside classification
+    if verbose:
+        print("[skeliner.pre] Disconnected: building KDTree...")
     main_face_idx = np.where(labels == main)[0]
     main_centroids = mesh.triangles_center[main_face_idx]
     main_normals = mesh.face_normals[main_face_idx]
@@ -1815,6 +1885,13 @@ def find_disconnected(
         if cid == main:
             continue
         comp_faces.setdefault(cid, []).append(fi)
+
+    if verbose:
+        n_small = sum(1 for fis in comp_faces.values() if len(fis) < 7)
+        print(
+            f"[skeliner.pre] Disconnected: {len(comp_faces)} non-main "
+            f"components, {n_small} dropped by < 7 filter"
+        )
 
     components = []
     n_soma_excluded = 0
@@ -1932,6 +2009,9 @@ def find_gaps(
             _precomputed_soma=_precomputed_soma,
         )
 
+    if verbose:
+        print(f"[skeliner.pre] Gaps: {len(disc)} disconnected components")
+
     if not disc:
         return []
 
@@ -1959,6 +2039,9 @@ def find_gaps(
             "tree": KDTree(mesh.vertices[verts]),
         }
 
+    if verbose:
+        print(f"[skeliner.pre] Gaps: built KDTrees for {len(disc) + 1} components")
+
     # For each disconnected component, find its nearest neighbour.
     # Deduplicate: if A→B and B→A both exist, keep only one.
     gaps = []
@@ -1967,6 +2050,8 @@ def find_gaps(
     all_cids = [main] + disc_cids
 
     # Build face adjacency for BFS-based tip selection
+    if verbose:
+        print("[skeliner.pre] Gaps: building face adjacency...")
     from collections import deque as _deque
 
     edge_to_faces_gap: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -2046,6 +2131,9 @@ def find_gaps(
                 int(idxs[min_i]),  # idx into cid_b's coords
             )
 
+    if verbose:
+        print(f"[skeliner.pre] Gaps: computed {len(edge_info)} pairwise distances")
+
     # Prim's MST from main
     connected: set[int] = {main}
     remaining: set[int] = set(disc_cids)
@@ -2069,10 +2157,14 @@ def find_gaps(
         dist, ca, idx_a, cb, idx_b = edge_info[key]
         _add_gap(ca, cb, idx_a, idx_b, dist)
 
+    if verbose:
+        print(f"[skeliner.pre] Gaps: MST connected {len(connected)} components, {len(gaps)} gaps found")
+
     # Sort by gap distance
     gaps.sort(key=lambda x: x[2])
 
     if verbose:
+        print(f"[skeliner.pre] Gaps: {len(gaps)} gaps found")
         for i, (fa, fb, dist) in enumerate(gaps):
             ca = mesh.vertices[mesh.faces[fa]].mean(axis=(0, 1))
             print(
@@ -2096,6 +2188,7 @@ def remove_gaps(
 
     All gap tip faces are removed at once and boundary loops from each
     gap are paired and zipper-stitched, then the mesh is rebuilt once.
+    Vertex indices are preserved.
 
     Parameters
     ----------
@@ -2222,14 +2315,10 @@ def remove_islands(
             print("[skeliner.pre] No islands to remove")
         return mesh
 
-    clean = mesh.submesh([np.where(~islands)[0]], append=True)
-    clean.remove_unreferenced_vertices()
+    clean = _rebuild_mesh(mesh, ~islands)
 
     if verbose:
-        print(
-            f"[skeliner.pre] Removed islands: {n_removed} faces, "
-            f"{len(mesh.vertices) - len(clean.vertices)} verts"
-        )
+        print(f"[skeliner.pre] Removed {n_removed} island faces")
     return clean
 
 
@@ -2253,8 +2342,7 @@ def remove_fins(
             print("[skeliner.pre] No fins to remove")
         return mesh
 
-    result = mesh.submesh([np.where(~fins)[0]], append=True)
-    result.remove_unreferenced_vertices()
+    result = _rebuild_mesh(mesh, ~fins)
 
     if verbose:
         print(f"[skeliner.pre] Removed {n_removed} fin faces")
@@ -2292,6 +2380,8 @@ def remove_fragments(
     """
     if _precomputed is not None:
         fragment = _precomputed
+        if verbose:
+            print(f"[skeliner.pre] Using provided fragment mask ({int(fragment.sum()):,} faces)")
     else:
         fragment = find_fragments(mesh, min_faces=min_faces, verbose=verbose)
 
@@ -2299,8 +2389,11 @@ def remove_fragments(
     if n_removed == 0:
         return mesh
 
-    result = mesh.submesh([np.where(~fragment)[0]], append=True)
-    result.remove_unreferenced_vertices()
+    result = _rebuild_mesh(mesh, ~fragment)
+
+    if verbose:
+        print(f"[skeliner.pre] Removed {n_removed:,} fragment faces")
+
     return result
 
 
@@ -3140,6 +3233,8 @@ def find_isolated_organelles(
     n_internal_frags = 0
     n_internal_frag_faces = 0
     n_kept_frags = 0
+    n_via_dots = 0
+    n_via_geo = 0
 
     # Classify each non-main component using outward_dots.
     # Organelle membranes have predominantly negative outward_dots
@@ -3165,6 +3260,7 @@ def find_isolated_organelles(
         if n_valid > 0:
             # Use outward_dots: majority negative → isolated organelle
             is_internal = (comp_dots < 0).sum() > n_valid / 2
+            n_via_dots += 1
         else:
             # Fallback: geometric test against main surface
             if main_tree is None:
@@ -3175,6 +3271,7 @@ def find_isolated_organelles(
             vecs = coords - main_centroids[nn_idx]
             dots = np.einsum("ij,ij->i", vecs, main_normals[nn_idx])
             is_internal = (dots < 0).sum() > len(dots) / 2
+            n_via_geo += 1
 
         if is_internal:
             isolated[comp_face_idx] = True
@@ -3184,6 +3281,10 @@ def find_isolated_organelles(
             n_kept_frags += 1
 
     if verbose:
+        print(
+            f"[skeliner.pre] Isolated: {n_via_dots:,} via outward_dots, "
+            f"{n_via_geo:,} via geometric fallback"
+        )
         print(
             f"[skeliner.pre] Isolated fragments: {n_internal_frags:,} "
             f"({n_internal_frag_faces:,} faces), "
@@ -3404,6 +3505,9 @@ def find_fusions(
         else radius_multiplier * float(np.median(mesh.edges_unique_length)),
     )
 
+    if verbose:
+        print("[skeliner.pre] Outward dots computed")
+
     # ── Seed detection ───────────────────────────────────────────────
     # Signal 1: negative-dot faces at non-manifold edges
     nm_neg_faces: set[int] = set()
@@ -3500,6 +3604,12 @@ def find_fusions(
                     f"{len(_comp_sizes)} components, "
                     f"sizes {_comp_sizes}"
                 )
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Fusions: scanned {n_verts:,} vertices, "
+            f"{len(fan_vertex_clusters)} fan fusions found"
+        )
 
     if not seed_faces and not fan_vertex_clusters:
         if verbose:
@@ -3806,8 +3916,7 @@ def remove_fusions(
         keep = np.ones(len(mesh.faces), dtype=bool)
         for fi in all_fusion:
             keep[fi] = False
-        mesh = mesh.submesh([np.where(keep)[0]], append=True)
-        mesh.remove_unreferenced_vertices()
+        mesh = _rebuild_mesh(mesh, keep)
         if verbose:
             print(
                 f"[skeliner.pre] Removed {len(all_fusion)} fusion faces "
@@ -3817,7 +3926,43 @@ def remove_fusions(
     # Step 2: split shared vertices
     mesh = _split_fan_vertices(mesh, verbose=verbose)
 
+    if verbose:
+        print(f"[skeliner.pre] Fusions: {len(all_fusion)} faces removed, vertices split")
+
     return mesh
+
+
+def _rebuild_mesh(
+    mesh: trimesh.Trimesh,
+    keep_mask: np.ndarray,
+) -> trimesh.Trimesh:
+    """Remove faces from a mesh, preserving all indices.
+
+    Removed faces are replaced with degenerate triangles ``[0, 0, 0]``
+    so that both vertex and face indices remain stable.  Downstream
+    data (``soma.verts``, face-based annotations) stays valid without
+    any remapping.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Original mesh.
+    keep_mask : np.ndarray
+        Boolean mask ``(nFaces,)`` — True for faces to keep.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with removed faces degenerated.  Same vertex and face
+        array sizes as the input.
+    """
+    new_faces = mesh.faces.copy()
+    new_faces[~keep_mask] = 0
+    return trimesh.Trimesh(
+        vertices=mesh.vertices,
+        faces=new_faces,
+        process=False,
+    )
 
 
 def remove_organelles(
@@ -3835,6 +3980,10 @@ def remove_organelles(
     connected or semi-connected components sitting *inside* the
     neuron body.  They bias skeleton-node positions and radius estimates
     and should be removed before skeletonisation.
+
+    Vertex indices are preserved (unreferenced vertices are left in
+    the array) so that vertex-based data like ``soma.verts`` remains
+    valid without remapping.
 
     Note: this does NOT remove the nucleus membrane inside the soma.
     Use :func:`remove_nucleus` after skeletonisation for that.
@@ -3863,19 +4012,15 @@ def remove_organelles(
     Returns
     -------
     trimesh.Trimesh
-        Cleaned mesh with internal fragments removed.
+        Cleaned mesh with internal fragments removed.  Vertex indices
+        are unchanged from the input mesh.
 
     Examples
     --------
-    # Detect once
     pocket, isolated = find_organelles(mesh, verbose=True)
-
-    # Reuse for removal — no recomputation
+    soma = find_soma(mesh, organelle_mask=pocket | isolated)
     clean = remove_organelles(mesh, organelle_mask=pocket | isolated)
-
-    # Or the old way still works (auto-detects if no mask given):
-
-    clean = remove_organelles(mesh)  # detects internally
+    # soma.verts is still valid on clean — no remapping needed
     """
     if organelle_mask is not None and len(organelle_mask) == len(mesh.faces):
         organelle = np.asarray(organelle_mask, dtype=bool)
@@ -3899,16 +4044,12 @@ def remove_organelles(
             print("[skeliner.pre] Nothing to remove")
         return mesh
 
-    keep = ~organelle
-    clean = mesh.submesh([np.where(keep)[0]], append=True)
-    clean.remove_unreferenced_vertices()
+    clean = _rebuild_mesh(mesh, ~organelle)
 
     if verbose:
         print(
-            f"[skeliner.pre] Result: {len(clean.vertices):,} verts, "
-            f"{len(clean.faces):,} faces "
-            f"(removed {organelle.sum():,} faces, "
-            f"{len(mesh.vertices) - len(clean.vertices):,} verts)"
+            f"[skeliner.pre] Result: {len(clean.faces):,} faces "
+            f"(removed {organelle.sum():,} faces)"
         )
 
     return clean
@@ -4030,11 +4171,13 @@ def remove_nucleus(
     # Step 4: collect large inward components = nucleus
     nucleus_mask = np.zeros(n_faces, dtype=bool)
     n_nucleus_comps = 0
+    n_small_inward = 0
 
     for cl in comps:
         if is_outward[cl[0]]:
             continue
         if len(cl) < min_nucleus_faces:
+            n_small_inward += 1
             continue
         for i in cl:
             nucleus_mask[int(inside_idx[i])] = True
@@ -4046,6 +4189,11 @@ def remove_nucleus(
             f"[skeliner.pre] Nucleus: {n_nucleus_comps} component(s), "
             f"{n_nucleus:,} faces"
         )
+        if n_small_inward > 0:
+            print(
+                f"[skeliner.pre]   Skipped {n_small_inward} inward component(s) "
+                f"below min_nucleus_faces={min_nucleus_faces}"
+            )
 
     if n_nucleus == 0:
         if verbose:
@@ -4053,14 +4201,90 @@ def remove_nucleus(
         return mesh
 
     keep = ~nucleus_mask
-    clean = mesh.submesh([np.where(keep)[0]], append=True)
-    clean.remove_unreferenced_vertices()
+    clean = _rebuild_mesh(mesh, keep)
 
     if verbose:
         print(
-            f"[skeliner.pre] Result: {len(clean.vertices):,} verts, "
-            f"{len(clean.faces):,} faces "
+            f"[skeliner.pre] Result: {len(clean.faces):,} faces "
             f"(removed {n_nucleus:,} nucleus faces)"
         )
 
     return clean
+
+
+def compact_mesh(
+    mesh: trimesh.Trimesh,
+    *,
+    soma: Soma | None = None,
+    verbose: bool = False,
+) -> tuple[trimesh.Trimesh, np.ndarray, Soma | None]:
+    """Remove unreferenced vertices and compact indices.
+
+    Call once at the end of preprocessing, after all face removals.
+    Returns a ``vert_map`` for translating any remaining vertex-index
+    data, and a remapped soma if provided.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Mesh after face removals.
+    soma : Soma or None
+        If provided, ``soma.verts`` is remapped to the new indices.
+    verbose : bool, default False
+        Print summary.
+
+    Returns
+    -------
+    clean : trimesh.Trimesh
+        Compacted mesh with no unreferenced vertices.
+    vert_map : np.ndarray
+        ``(nOldVerts,)`` int64 — ``vert_map[old]`` is the new index,
+        or ``-1`` if the vertex was removed.
+    soma : Soma or None
+        Remapped soma, or None if not provided.
+
+    Examples
+    --------
+    pocket, isolated = find_organelles(mesh)
+    soma = find_soma(mesh, organelle_mask=pocket | isolated)
+    mesh = remove_organelles(mesh, organelle_mask=pocket | isolated)
+    # ... more removals ...
+    mesh, vert_map, soma = compact_mesh(mesh, soma=soma)
+    """
+    # Strip degenerate faces (from _rebuild_mesh) and compact vertices
+    good = ~np.all(mesh.faces == mesh.faces[:, :1], axis=1)
+    live_faces = mesh.faces[good]
+
+    referenced = np.sort(np.unique(live_faces.ravel()))
+    n_old = len(mesh.vertices)
+    vert_map = np.full(n_old, -1, dtype=np.int64)
+    vert_map[referenced] = np.arange(len(referenced), dtype=np.int64)
+
+    clean = trimesh.Trimesh(
+        vertices=mesh.vertices[referenced],
+        faces=vert_map[live_faces],
+        process=False,
+    )
+
+    if verbose:
+        n_removed_v = n_old - len(clean.vertices)
+        n_removed_f = len(mesh.faces) - len(clean.faces)
+        print(
+            f"[skeliner.pre] Compact: {n_old:,} → {len(clean.vertices):,} verts "
+            f"({n_removed_v:,} removed), "
+            f"{len(mesh.faces):,} → {len(clean.faces):,} faces "
+            f"({n_removed_f:,} removed)"
+        )
+
+    remapped_soma = None
+    if soma is not None:
+        remapped_soma = soma.remap(vert_map)
+        if verbose:
+            n_before = len(soma.verts) if soma.verts is not None else 0
+            n_after = len(remapped_soma.verts) if remapped_soma.verts is not None else 0
+            print(
+                f"[skeliner.pre] Soma remap: {n_before:,} → {n_after:,} verts "
+                f"({n_before - n_after:,} dropped)"
+            )
+
+    return clean, vert_map, remapped_soma
