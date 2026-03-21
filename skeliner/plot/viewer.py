@@ -1010,13 +1010,19 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import find_rims
+        from skeliner.pre import find_rims, _organelle_precompute
 
         mesh = mesh_state["mesh"]
         centroid = mesh_state["centroid"]
 
+        # Reuse cached precomputed data
+        precomputed = mesh_state.get("_organelle_precomputed")
+        if precomputed is None or len(precomputed[0]) != len(mesh.faces):
+            precomputed = _organelle_precompute(mesh, None, 5.0, True)
+            mesh_state["_organelle_precomputed"] = precomputed
+
         def _run():
-            rims = find_rims(mesh, verbose=True)
+            rims = find_rims(mesh, verbose=True, _precomputed=precomputed)
             verts = np.asarray(mesh.vertices, dtype=np.float32)
             colors = [
                 [0.2, 1.0, 0.6], [0.1, 0.8, 0.9], [0.9, 1.0, 0.2],
@@ -1059,6 +1065,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh_state["mesh"] = new_mesh
         mesh_state["organelle_mask"] = None  # invalidate caches
+        mesh_state["_organelle_precomputed"] = None
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None
         mesh_state["hole_loops"] = None

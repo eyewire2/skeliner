@@ -2770,7 +2770,7 @@ def find_rims(
 
         # Fold ratio: pocket surface area / rim enclosed planar area.
         # A real pocket folds inward through a small opening (high ratio).
-        # A flat patch has ratio ≈ 1 (same area inside and outside).
+        # A flat patch has ratio near 1.
         pocket_area = float(mesh.area_faces[cluster].sum())
         opening_area = _rim_enclosed_area(boundary_edges, mesh.vertices)
         if opening_area <= 0:
@@ -3047,9 +3047,9 @@ def find_pocket_organelles(
     # Cluster filter to remove noise
     pocket = _filter_small_clusters(mesh, pocket, min_cluster_size)
 
-    # Post-validate: split pocket into connected components and reject
-    # components whose area is too small relative to their boundary
-    # opening (surface dips, not real pockets).
+    # Post-validate: reject pocket components that are just surface dips.
+    # A real pocket has much more surface area than its adjacent non-pocket
+    # faces (the "cap").  A shallow dip has pocket_area ≈ cap_area.
     pocket_idx = set(np.where(pocket)[0].tolist())
     pocket_visited: set[int] = set()
     n_rejected = 0
@@ -3069,25 +3069,18 @@ def find_pocket_organelles(
                     pq.append(nfi)
 
         comp_set = set(comp)
-        boundary_edges = []
+        cap_faces: set[int] = set()
         for fi in comp:
-            f = mesh.faces[fi]
-            for i in range(3):
-                e = (min(int(f[i]), int(f[(i+1)%3])),
-                     max(int(f[i]), int(f[(i+1)%3])))
-                for nfi in edge_to_face.get(e, []):
-                    if nfi not in comp_set:
-                        boundary_edges.append(e)
-                        break
+            for nfi in adj.get(fi, set()):
+                if nfi not in comp_set:
+                    cap_faces.add(nfi)
 
         pocket_area = float(mesh.area_faces[comp].sum())
-        opening_area = _rim_enclosed_area(boundary_edges, mesh.vertices)
-        if opening_area > 0:
-            fold_ratio = pocket_area / opening_area
-            if fold_ratio < min_fold_ratio:
-                for fi in comp:
-                    pocket[fi] = False
-                n_rejected += 1
+        cap_area = float(mesh.area_faces[list(cap_faces)].sum()) if cap_faces else 0.0
+        if cap_area <= 0 or pocket_area / cap_area < min_fold_ratio:
+            for fi in comp:
+                pocket[fi] = False
+            n_rejected += 1
 
     if verbose:
         print(
