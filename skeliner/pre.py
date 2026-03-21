@@ -1435,23 +1435,27 @@ def _otsu_threshold(values: np.ndarray) -> tuple[float, float]:
 def find_soma(
     mesh: trimesh.Trimesh,
     *,
+    organelle_mask: np.ndarray | None = None,
     verbose: bool = False,
 ) -> Soma | None:
-    """Estimate soma from the spatial clustering of leftover small fragments.
+    """Estimate soma from the spatial clustering of organelles.
 
-    After organelle removal, leftover internal fragments (failed removals)
-    cluster densely inside the soma.  Their median gives a robust centre.
-    A BFS flood on the main-component surface grows outward from that
-    centre; the soma boundary is determined by Otsu thresholding on
-    per-ring vertex counts (high counts = soma, low counts = neurite).
+    Organelles (mitochondria, ER, nucleus membrane) are densely packed
+    inside the soma.  Their centroids cluster tightly in 3-D, giving a
+    robust soma centre.  A BFS flood on the main-component surface
+    grows outward from that centre; the soma boundary is where the
+    largest connected ring component peaks and drops (Otsu).
 
-    All internal thresholds are derived from the mesh data — none are
-    hard-coded.
+    All internal thresholds are derived from the mesh data.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
-        Input mesh (with or without organelles removed).
+        Input mesh (before organelle removal).
+    organelle_mask : np.ndarray or None
+        Pre-computed boolean face mask from :func:`find_organelles`
+        (``pocket | isolated``).  If provided, organelle detection is
+        skipped and this mask is used directly.
     verbose : bool, default False
         Print summary.
 
@@ -1464,28 +1468,29 @@ def find_soma(
 
     labels, main = _face_edge_components(mesh)
 
-    # ── 1. Locate fragments (islands + fins) and compute centroids ─
-    frag_mask = find_fragments(mesh)
-    if frag_mask.sum() == 0:
+    # ── 1. Locate organelle clusters and compute centroids ──────
+    if organelle_mask is None:
+        pocket, isolated = find_organelles(mesh, verbose=verbose)
+        organelle_mask = pocket | isolated
+    if organelle_mask.sum() == 0:
         if verbose:
-            print("[skeliner.pre] Soma: no fragments found")
+            print("[skeliner.pre] Soma: no organelles found")
         return None
 
-    # Group fragment faces into connected clusters and get centroids
-    frag_fi = np.where(frag_mask)[0]
-    frag_labels, _ = _face_edge_components(
-        trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces[frag_fi], process=False)
+    org_fi = np.where(organelle_mask)[0]
+    org_labels, _ = _face_edge_components(
+        trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces[org_fi], process=False)
     )
     centroids = []
-    for cid in np.unique(frag_labels):
-        local_fi = frag_fi[frag_labels == cid]
+    for cid in np.unique(org_labels):
+        local_fi = org_fi[org_labels == cid]
         verts = np.unique(mesh.faces[local_fi])
         centroids.append(mesh.vertices[verts].mean(axis=0))
 
     centroids = np.asarray(centroids)
     if len(centroids) < 3:
         if verbose:
-            print("[skeliner.pre] Soma: too few fragment clusters")
+            print("[skeliner.pre] Soma: too few organelle clusters")
         return None
 
     # ── 1b. Find the dense cluster of fragments (soma) ──────────
@@ -1703,7 +1708,16 @@ def find_soma(
         inside_non_main = soma.contains(mesh.vertices[non_main_verts])
         soma_set.update(non_main_verts[inside_non_main].tolist())
 
-    soma.verts = np.fromiter(sorted(soma_set), dtype=np.intp)
+    # ── 9. Refit ellipsoid to the final soma vertices ───────────
+    soma_verts_arr = np.fromiter(sorted(soma_set), dtype=np.intp)
+    if len(soma_verts_arr) >= 4:
+        try:
+            soma = Soma.fit(mesh.vertices[soma_verts_arr], verts=soma_verts_arr)
+        except ValueError:
+            soma.verts = soma_verts_arr
+    else:
+        soma.verts = soma_verts_arr
+
 
     if verbose:
         print(
