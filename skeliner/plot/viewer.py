@@ -377,6 +377,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 skeleton_states.clear()
                 mesh_state["soma"] = None
                 mesh_state["organelle_mask"] = None
+                mesh_state["_organelle_precomputed"] = None
                 annotations_path.write_text("{}", encoding="utf-8")
                 await broadcast({"type": "all_skeletons_removed"})
 
@@ -581,9 +582,24 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         else:
             combined = np.zeros(len(mesh.faces), dtype=bool)
 
+        from skeliner.pre import (
+            _organelle_precompute, find_pocket_organelles,
+            find_isolated_organelles, find_organelles,
+        )
+
+        # Precompute once, reuse for all detection types
+        precomputed = mesh_state.get("_organelle_precomputed")
+        if precomputed is None or len(precomputed[0]) != len(mesh.faces):
+            precomputed = await _run_with_log(
+                _organelle_precompute, mesh, None, 5.0, True
+            )
+            mesh_state["_organelle_precomputed"] = precomputed
+
         if det_type in ("pocket", "surface"):
-            from skeliner.pre import find_pocket_organelles
-            mask = await _run_with_log(find_pocket_organelles, mesh, verbose=True)
+            mask = await _run_with_log(
+                find_pocket_organelles, mesh, verbose=True,
+                _precomputed=precomputed,
+            )
             combined |= mask
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
@@ -593,8 +609,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "label": f"organelle:pocket ({len(faces):,})",
                 })
         elif det_type == "isolated":
-            from skeliner.pre import find_isolated_organelles
-            mask = await _run_with_log(find_isolated_organelles, mesh, verbose=True)
+            mask = await _run_with_log(
+                find_isolated_organelles, mesh, verbose=True,
+                _precomputed=precomputed,
+            )
             combined |= mask
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
@@ -604,8 +622,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "label": f"organelle:isolated ({len(faces):,})",
                 })
         else:
-            from skeliner.pre import find_organelles
-            surface, isolated = await _run_with_log(find_organelles, mesh, verbose=True)
+            surface, isolated = await _run_with_log(
+                find_organelles, mesh, verbose=True,
+            )
             combined = surface | isolated
             sf = [int(fi) for fi in np.where(surface)[0]]
             iso = [int(fi) for fi in np.where(isolated)[0]]
