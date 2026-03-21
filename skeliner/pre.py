@@ -2365,57 +2365,72 @@ def _outward_dot(
     np.ndarray
         (nFaces,) float64 array of outward dot products.
     """
-    verts = mesh.vertices
-    face_centers = mesh.triangles_center
-    face_normals = mesh.face_normals
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    face_centers = np.asarray(mesh.triangles_center, dtype=np.float64)
+    face_normals = np.asarray(mesh.face_normals, dtype=np.float64)
+    n_faces = len(mesh.faces)
+    outward_dots = np.zeros(n_faces, dtype=np.float64)
+
+    def _compute_batch(vtree, v, face_idx):
+        """Compute outward-dot via sparse_distance_matrix (fully vectorized)."""
+        from scipy.sparse import csr_matrix
+
+        fc = face_centers[face_idx]
+        fn = face_normals[face_idx]
+
+        # Build a KDTree of face centers for this batch
+        fc_tree = KDTree(fc)
+
+        # All (face, vert) pairs within radius — returned as sparse matrix
+        sdm = fc_tree.sparse_distance_matrix(vtree, radius, output_type="coo_matrix")
+
+        if sdm.nnz == 0:
+            return
+
+        # Count neighbors per face
+        row = sdm.row
+        counts = np.bincount(row, minlength=len(face_idx))
+
+        # Build weight matrix: each entry = 1/count (for mean)
+        valid_entries = counts[row] >= 4
+        weights = np.zeros(len(row), dtype=np.float64)
+        weights[valid_entries] = 1.0 / counts[row[valid_entries]]
+
+        W = csr_matrix(
+            (weights, (row, sdm.col)),
+            shape=(len(face_idx), len(v)),
+            dtype=np.float64,
+        )
+
+        # COM = W @ v  (weighted mean of neighbor vertices)
+        local_com = W @ v  # (n_faces, 3)
+
+        # Direction
+        direction = fc - local_com
+        norms = np.linalg.norm(direction, axis=1)
+        valid = (counts >= 4) & (norms > 1e-10)
+
+        # Normalize and dot
+        direction[valid] /= norms[valid, None]
+        dots = np.einsum("ij,ij->i", fn, direction)
+
+        outward_dots[face_idx[valid]] = dots[valid]
 
     if vert_comp is None:
-        # Single KDTree for the whole mesh (legacy path)
         vtree = KDTree(verts)
-        outward_dots = np.zeros(len(mesh.faces), dtype=np.float64)
-        for fi in range(len(mesh.faces)):
-            fc = face_centers[fi]
-            idx = vtree.query_ball_point(fc, radius)
-            if len(idx) < 4:
+        _compute_batch(vtree, verts, np.arange(n_faces))
+    else:
+        face_comp = vert_comp[mesh.faces[:, 0]]
+        for ci in np.unique(face_comp):
+            ci = int(ci)
+            comp_vert_mask = vert_comp == ci
+            comp_verts_idx = np.where(comp_vert_mask)[0]
+            if len(comp_verts_idx) < 4:
                 continue
-            local_com = verts[idx].mean(axis=0)
-            outward_dir = fc - local_com
-            norm = np.linalg.norm(outward_dir)
-            if norm < 1e-10:
-                continue
-            outward_dir /= norm
-            outward_dots[fi] = np.dot(face_normals[fi], outward_dir)
-        return outward_dots
-
-    # Per-component KDTrees
-    face_comp = vert_comp[mesh.faces[:, 0]]
-    comp_ids = np.unique(face_comp)
-    comp_trees: dict[int, tuple[KDTree, np.ndarray]] = {}
-    for ci in comp_ids:
-        ci = int(ci)
-        mask = vert_comp == ci
-        comp_verts_idx = np.where(mask)[0]
-        if len(comp_verts_idx) < 4:
-            continue
-        comp_trees[ci] = (KDTree(verts[comp_verts_idx]), comp_verts_idx)
-
-    outward_dots = np.zeros(len(mesh.faces), dtype=np.float64)
-    for fi in range(len(mesh.faces)):
-        ci = int(face_comp[fi])
-        if ci not in comp_trees:
-            continue
-        tree, comp_verts_idx = comp_trees[ci]
-        fc = face_centers[fi]
-        local_idx = tree.query_ball_point(fc, radius)
-        if len(local_idx) < 4:
-            continue
-        local_com = verts[comp_verts_idx[local_idx]].mean(axis=0)
-        outward_dir = fc - local_com
-        norm = np.linalg.norm(outward_dir)
-        if norm < 1e-10:
-            continue
-        outward_dir /= norm
-        outward_dots[fi] = np.dot(face_normals[fi], outward_dir)
+            comp_verts = verts[comp_verts_idx]
+            vtree = KDTree(comp_verts)
+            comp_face_idx = np.where(face_comp == ci)[0]
+            _compute_batch(vtree, comp_verts, comp_face_idx)
 
     return outward_dots
 
