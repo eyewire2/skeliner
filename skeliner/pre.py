@@ -1024,10 +1024,8 @@ def _zipper_stitch(
                 ib_n = (ib + 1) % nb_r
                 can_a, can_b = sa < na_r, sb < nb_r
                 if can_a and can_b:
-                    da = float(np.linalg.norm(
-                        _vpos(ra_ids[ia_n]) - _vpos(rb_ids[ib])))
-                    db = float(np.linalg.norm(
-                        _vpos(ra_ids[ia]) - _vpos(rb_ids[ib_n])))
+                    da = float(np.linalg.norm(_vpos(ra_ids[ia_n]) - _vpos(rb_ids[ib])))
+                    db = float(np.linalg.norm(_vpos(ra_ids[ia]) - _vpos(rb_ids[ib_n])))
                     adv_a = da <= db
                 else:
                     adv_a = can_a
@@ -1052,14 +1050,10 @@ def _zipper_stitch(
 
             if can_a and can_b:
                 da = float(
-                    np.linalg.norm(
-                        mesh.vertices[la[ia_next]] - mesh.vertices[lb[ib]]
-                    )
+                    np.linalg.norm(mesh.vertices[la[ia_next]] - mesh.vertices[lb[ib]])
                 )
                 db = float(
-                    np.linalg.norm(
-                        mesh.vertices[la[ia]] - mesh.vertices[lb[ib_next]]
-                    )
+                    np.linalg.norm(mesh.vertices[la[ia]] - mesh.vertices[lb[ib_next]])
                 )
                 advance_a = da <= db
             else:
@@ -1208,13 +1202,10 @@ def merge_selected_faces(
         for i, lp in enumerate(loops):
             pts = mesh.vertices[lp]
             perimeter = float(
-                np.linalg.norm(
-                    np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1
-                ).sum()
+                np.linalg.norm(np.diff(np.vstack([pts, pts[:1]]), axis=0), axis=1).sum()
             )
             print(
-                f"[skeliner.pre]   Loop {i}: {len(lp)} verts, "
-                f"perimeter={perimeter:.1f}"
+                f"[skeliner.pre]   Loop {i}: {len(lp)} verts, perimeter={perimeter:.1f}"
             )
 
     if len(loops) < 2:
@@ -1241,9 +1232,7 @@ def merge_selected_faces(
         for ii in range(len(available)):
             for jj in range(ii + 1, len(available)):
                 d = float(
-                    np.linalg.norm(
-                        centroids[available[ii]] - centroids[available[jj]]
-                    )
+                    np.linalg.norm(centroids[available[ii]] - centroids[available[jj]])
                 )
                 if d < best_d:
                     best_d = d
@@ -1414,7 +1403,7 @@ def find_soma(
     mesh: trimesh.Trimesh,
     *,
     max_fragment_faces: int = 50,
-    density_cutoff: float = 0.50,
+    density_cutoff: float = 0.35,
     verbose: bool = False,
 ) -> Soma | None:
     """Estimate soma from the spatial clustering of leftover small fragments.
@@ -1434,7 +1423,7 @@ def find_soma(
     max_fragment_faces : int, default 50
         Components with at most this many faces are treated as the
         indicator fragments whose clustering reveals the soma.
-    density_cutoff : float, default 0.30
+    density_cutoff : float, default 0.35
         Fraction of peak ring-density at which the soma boundary is set.
     verbose : bool, default False
         Print summary.
@@ -1582,6 +1571,18 @@ def find_soma(
                 absorbed += len(comp)
         if absorbed == 0:
             break
+
+    # ── 8. Absorb disconnected-component vertices inside the ellipsoid.
+    #       Small fragments (failed organelle removals) that sit inside
+    #       the soma region should be part of the soma, not left as
+    #       stray vertices that create noise in downstream binning.
+    all_verts = np.arange(len(mesh.vertices))
+    non_main_mask = np.ones(len(mesh.vertices), dtype=bool)
+    non_main_mask[all_main_verts] = False
+    non_main_verts = all_verts[non_main_mask]
+    if non_main_verts.size:
+        inside_non_main = soma.contains(mesh.vertices[non_main_verts])
+        soma_set.update(non_main_verts[inside_non_main].tolist())
 
     soma.verts = np.fromiter(sorted(soma_set), dtype=np.intp)
 
@@ -1866,8 +1867,10 @@ def find_gaps(
             key = (min(cid_a, cid_b), max(cid_a, cid_b))
             edge_info[key] = (
                 cost,
-                cid_a, min_i,       # idx into cid_a's coords
-                cid_b, int(idxs[min_i]),  # idx into cid_b's coords
+                cid_a,
+                min_i,  # idx into cid_a's coords
+                cid_b,
+                int(idxs[min_i]),  # idx into cid_b's coords
             )
 
     # Prim's MST from main
