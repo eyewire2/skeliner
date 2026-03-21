@@ -1436,7 +1436,6 @@ def find_soma(
     mesh: trimesh.Trimesh,
     *,
     max_fragment_faces: int = 50,
-    density_cutoff: float = 0.5,
     verbose: bool = False,
 ) -> Soma | None:
     """Estimate soma from the spatial clustering of leftover small fragments.
@@ -1444,20 +1443,18 @@ def find_soma(
     After organelle removal, leftover internal fragments (failed removals)
     cluster densely inside the soma.  Their median gives a robust centre.
     A BFS flood on the main-component surface grows outward from that
-    centre; the soma boundary is where the frontier ring density (verts
-    per unit distance from centre) drops to *density_cutoff* × peak.
+    centre; the soma boundary is determined by Otsu thresholding on
+    per-ring vertex counts (high counts = soma, low counts = neurite).
 
     The returned :class:`Soma` is fit to the identified surface vertices.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
-        Input mesh (should already have organelles removed).
+        Input mesh (with or without organelles removed).
     max_fragment_faces : int, default 50
         Components with at most this many faces are treated as the
         indicator fragments whose clustering reveals the soma.
-    density_cutoff : float, default 0.35
-        Fraction of peak ring-density at which the soma boundary is set.
     verbose : bool, default False
         Print summary.
 
@@ -1545,29 +1542,24 @@ def find_soma(
                 queue.append(nv)
                 ring_verts[lv + 1].append(nv)
 
-    # ── 4. Ring-density analysis to find soma boundary ───────────────
+    # ── 4. Find soma boundary via Otsu on ring vertex counts ────────
     max_ring = max(ring_verts.keys())
-    densities = np.zeros(max_ring + 1)
-    for lv in range(max_ring + 1):
-        verts_in_ring = ring_verts[lv]
-        n = len(verts_in_ring)
-        if n == 0:
-            continue
-        mean_r = float(
-            np.linalg.norm(mesh.vertices[verts_in_ring] - center, axis=1).mean()
-        )
-        densities[lv] = n / max(mean_r, 1.0)
+    ring_counts = np.array(
+        [len(ring_verts.get(lv, [])) for lv in range(max_ring + 1)],
+        dtype=np.float64,
+    )
+    peak_ring = int(np.argmax(ring_counts))
 
-    # Smooth and find peak
-    window = 5
-    smoothed = np.convolve(densities, np.ones(window) / window, mode="same")
-    peak_ring = int(np.argmax(smoothed))
-    peak_val = smoothed[peak_ring]
+    # Otsu splits post-peak ring counts into "soma" (high) vs "neurite" (low)
+    post_peak = ring_counts[peak_ring:]
+    if len(post_peak) > 1:
+        count_thresh, _ = _otsu_threshold(post_peak)
+    else:
+        count_thresh = 0.0
 
-    # Cutoff: first ring past the peak where density < threshold × peak
-    cutoff = peak_ring
-    for lv in range(peak_ring, len(smoothed)):
-        if smoothed[lv] < density_cutoff * peak_val:
+    cutoff = max_ring
+    for lv in range(peak_ring, max_ring + 1):
+        if ring_counts[lv] < count_thresh:
             cutoff = lv
             break
 
