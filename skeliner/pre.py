@@ -3225,6 +3225,7 @@ def find_organelles(
     radius_multiplier: float = 5.0,
     min_cluster_size: int = 5,
     verbose: bool = False,
+    _precomputed: tuple | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Detect internal mesh fragments (organelle membranes) in a neuron mesh.
 
@@ -3265,9 +3266,12 @@ def find_organelles(
     t_total = _time.perf_counter()
 
     # ── 1. Precompute outward dots and components ─────────────────
-    precomputed = _organelle_precompute(
-        mesh, radius, radius_multiplier, verbose,
-    )
+    if _precomputed is not None:
+        precomputed = _precomputed
+    else:
+        precomputed = _organelle_precompute(
+            mesh, radius, radius_multiplier, verbose,
+        )
     _, face_comp, main_ci, _ = precomputed
 
     # ── 2. Find isolated organelles (small internal components) ───

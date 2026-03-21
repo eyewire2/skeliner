@@ -622,12 +622,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "label": f"organelle:isolated ({len(faces):,})",
                 })
         else:
-            surface, isolated = await _run_with_log(
+            surface, iso_mask = await _run_with_log(
                 find_organelles, mesh, verbose=True,
+                _precomputed=precomputed,
             )
-            combined = surface | isolated
+            combined = surface | iso_mask
             sf = [int(fi) for fi in np.where(surface)[0]]
-            iso = [int(fi) for fi in np.where(isolated)[0]]
+            iso = [int(fi) for fi in np.where(iso_mask)[0]]
             if sf:
                 highlights.append({
                     "faces": sf,
