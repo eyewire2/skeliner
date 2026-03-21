@@ -121,11 +121,12 @@ def _load_skeleton_as_nm(path: Path) -> Any:
         raise ValueError(f"Unsupported skeleton format: {suffix}")
 
 
-def _is_organelle_cache(path: Path) -> bool:
-    """Check if an npz file contains precomputed organelle masks."""
+def _is_organelle_data(path: Path) -> bool:
+    """Check if an npz file contains organelle-related data."""
     try:
         with np.load(path, allow_pickle=False) as data:
-            return "pocket" in data and "isolated" in data
+            known_keys = {"pocket", "isolated", "outward_dots", "face_comp", "main_ci"}
+            return bool(known_keys & set(data.files))
     except Exception:
         return False
 
@@ -417,45 +418,55 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
                 return JSONResponse({"ok": True, "type": "mesh", "name": filename})
 
-            elif suffix == ".npz" and _is_organelle_cache(tmp_path):
-                data = np.load(str(tmp_path))
-                pocket = data["pocket"]
-                isolated = data["isolated"]
-                combined = pocket | isolated
-                mesh_state["organelle_mask"] = combined
-                n_pocket = int(pocket.sum())
-                n_isolated = int(isolated.sum())
-                print(f"Loaded organelle cache: {n_pocket:,} pocket, {n_isolated:,} isolated faces")
+            elif suffix == ".npz" and _is_organelle_data(tmp_path):
+                data = np.load(str(tmp_path), allow_pickle=False)
+                loaded = []
 
-                # Visualize as highlights
-                ann = {}
-                if annotations_path.exists():
-                    ann = json.loads(annotations_path.read_text(encoding="utf-8"))
-                if "highlights" not in ann:
-                    ann["highlights"] = []
-                highlights = []
-                if n_pocket:
-                    faces = np.where(pocket)[0].tolist()
-                    highlights.append({
-                        "faces": faces,
-                        "color": [0.2, 0.6, 1.0],
-                        "label": f"organelle:pocket ({len(faces):,})",
-                    })
-                if n_isolated:
-                    faces = np.where(isolated)[0].tolist()
-                    highlights.append({
-                        "faces": faces,
-                        "color": [1.0, 0.6, 0.2],
-                        "label": f"organelle:isolated ({len(faces):,})",
-                    })
-                ann["highlights"].extend(highlights)
-                annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+                # Masks → organelle_mask
+                if "pocket" in data and "isolated" in data:
+                    pocket = data["pocket"]
+                    isolated = data["isolated"]
+                    mesh_state["organelle_mask"] = pocket | isolated
+                    loaded.append(f"pocket={int(pocket.sum()):,}")
+                    loaded.append(f"isolated={int(isolated.sum()):,}")
 
-                n_faces = n_pocket + n_isolated
+                    # Visualize
+                    ann = {}
+                    if annotations_path.exists():
+                        ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+                    if "highlights" not in ann:
+                        ann["highlights"] = []
+                    if pocket.any():
+                        ann["highlights"].append({
+                            "faces": np.where(pocket)[0].tolist(),
+                            "color": [0.2, 0.6, 1.0],
+                            "label": f"organelle:pocket ({int(pocket.sum()):,})",
+                        })
+                    if isolated.any():
+                        ann["highlights"].append({
+                            "faces": np.where(isolated)[0].tolist(),
+                            "color": [1.0, 0.6, 0.2],
+                            "label": f"organelle:isolated ({int(isolated.sum()):,})",
+                        })
+                    annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+
+                # Precomputed → _organelle_precomputed
+                if "outward_dots" in data and "face_comp" in data:
+                    outward_dots = data["outward_dots"]
+                    face_comp = data["face_comp"]
+                    main_ci = int(data["main_ci"]) if "main_ci" in data else int(
+                        np.argmax(np.bincount(face_comp))
+                    )
+                    mesh_state["_organelle_precomputed"] = (
+                        outward_dots, face_comp, main_ci, face_comp == main_ci
+                    )
+                    loaded.append("precomputed")
+
+                print(f"Loaded organelle npz: {', '.join(loaded)}")
                 await broadcast({"type": "annotations_updated"})
                 return JSONResponse({
                     "ok": True, "type": "organelles", "name": filename,
-                    "nPocket": n_pocket, "nIsolated": n_isolated,
+                    "loaded": loaded,
                 })
 
             elif suffix == ".npz" and _is_l2_graph(tmp_path):
@@ -1332,6 +1343,46 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             headers={"Content-Disposition": f'attachment; filename="{filename}.{fmt}"'},
         )
 
+    async def export_organelles(request):
+        """Save organelle masks + precomputed data to an npz file."""
+        body = await request.json()
+        path = body.get("path")
+        if not path:
+            return JSONResponse({"ok": False, "error": "No path provided"}, status_code=400)
+
+        save_data = {}
+        cached_mask = mesh_state.get("organelle_mask")
+        precomputed = mesh_state.get("_organelle_precomputed")
+
+        if cached_mask is not None:
+            # Split combined mask into pocket/isolated from annotations
+            ann = {}
+            if annotations_path.exists():
+                ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+            pocket = np.zeros(len(cached_mask), dtype=bool)
+            isolated = np.zeros(len(cached_mask), dtype=bool)
+            for h in ann.get("highlights", []):
+                label = h.get("label", "").lower()
+                if "pocket" in label and "false" not in label:
+                    pocket[h["faces"]] = True
+                elif "isolated" in label and "false" not in label:
+                    isolated[h["faces"]] = True
+            save_data["pocket"] = pocket
+            save_data["isolated"] = isolated
+
+        if precomputed is not None:
+            outward_dots, face_comp, main_ci, _ = precomputed
+            save_data["outward_dots"] = outward_dots
+            save_data["face_comp"] = face_comp
+            save_data["main_ci"] = np.array(main_ci)
+
+        if not save_data:
+            return JSONResponse({"ok": False, "error": "No data to save"}, status_code=400)
+
+        np.savez_compressed(path, **save_data)
+        print(f"Saved organelle data to {path} ({', '.join(save_data.keys())})")
+        return JSONResponse({"ok": True, "path": path, "keys": list(save_data.keys())})
+
     async def export_skeleton(request):
         """Export a skeleton as a downloadable SWC or NPZ file."""
         from starlette.responses import Response
@@ -1781,6 +1832,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
+            Route("/export_organelles", export_organelles, methods=["POST"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),

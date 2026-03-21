@@ -2677,7 +2677,7 @@ def find_rims(
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     min_pocket_size: int = 5,
-    min_fold_ratio: float = 2.0,
+    min_fold_ratio: float = 3.0,
     verbose: bool = False,
     _precomputed: tuple | None = None,
 ) -> list[list[tuple[int, int]]]:
@@ -2835,7 +2835,7 @@ def find_pocket_organelles(
     max_hole_size: int = 500,
     hole_enclosure_ratio: float = 0.5,
     min_pocket_size: int = 5,
-    min_fold_ratio: float = 2.0,
+    min_fold_ratio: float = 3.0,
     min_cluster_size: int = 5,
     verbose: bool = False,
     _precomputed: tuple | None = None,
