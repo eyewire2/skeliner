@@ -625,7 +625,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh = mesh_state["mesh"]
         soma = mesh_state.get("soma")
         if soma is None:
-            soma = await _run_with_log(find_soma, mesh, verbose=True)
+            soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
             mesh_state["soma"] = soma
         components = await _run_with_log(
             find_disconnected, mesh, verbose=True, _precomputed_soma=soma
@@ -665,7 +665,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import find_soma
 
         mesh = mesh_state["mesh"]
-        soma = await _run_with_log(find_soma, mesh, verbose=True)
+        soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
         if soma is None:
             return JSONResponse({"ok": False, "error": "No soma found"})
 
@@ -723,7 +723,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         # Use cached soma or compute it
         soma = mesh_state.get("soma")
         if soma is None:
-            soma = await _run_with_log(find_soma, mesh, verbose=True)
+            soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
             mesh_state["soma"] = soma
 
         cached_disc = mesh_state.get("disconnected")
