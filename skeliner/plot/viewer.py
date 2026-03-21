@@ -121,6 +121,15 @@ def _load_skeleton_as_nm(path: Path) -> Any:
         raise ValueError(f"Unsupported skeleton format: {suffix}")
 
 
+def _is_organelle_cache(path: Path) -> bool:
+    """Check if an npz file contains precomputed organelle masks."""
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            return "pocket" in data and "isolated" in data
+    except Exception:
+        return False
+
+
 def _is_l2_graph(path: Path) -> bool:
     """Check if an npz file is an L2 graph (not a skeliner skeleton)."""
     with np.load(path, allow_pickle=False) as data:
@@ -367,6 +376,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 # Reset skeletons and annotations
                 skeleton_states.clear()
                 mesh_state["soma"] = None
+                mesh_state["organelle_mask"] = None
                 annotations_path.write_text("{}", encoding="utf-8")
                 await broadcast({"type": "all_skeletons_removed"})
 
@@ -405,6 +415,47 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     }})
 
                 return JSONResponse({"ok": True, "type": "mesh", "name": filename})
+
+            elif suffix == ".npz" and _is_organelle_cache(tmp_path):
+                data = np.load(str(tmp_path))
+                pocket = data["pocket"]
+                isolated = data["isolated"]
+                combined = pocket | isolated
+                mesh_state["organelle_mask"] = combined
+                n_pocket = int(pocket.sum())
+                n_isolated = int(isolated.sum())
+                print(f"Loaded organelle cache: {n_pocket:,} pocket, {n_isolated:,} isolated faces")
+
+                # Visualize as highlights
+                ann = {}
+                if annotations_path.exists():
+                    ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+                if "highlights" not in ann:
+                    ann["highlights"] = []
+                highlights = []
+                if n_pocket:
+                    faces = np.where(pocket)[0].tolist()
+                    highlights.append({
+                        "faces": faces,
+                        "color": [0.2, 0.6, 1.0],
+                        "label": f"organelle:pocket ({len(faces):,})",
+                    })
+                if n_isolated:
+                    faces = np.where(isolated)[0].tolist()
+                    highlights.append({
+                        "faces": faces,
+                        "color": [1.0, 0.6, 0.2],
+                        "label": f"organelle:isolated ({len(faces):,})",
+                    })
+                ann["highlights"].extend(highlights)
+                annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+
+                n_faces = n_pocket + n_isolated
+                await broadcast({"type": "annotations_updated"})
+                return JSONResponse({
+                    "ok": True, "type": "organelles", "name": filename,
+                    "nPocket": n_pocket, "nIsolated": n_isolated,
+                })
 
             elif suffix == ".npz" and _is_l2_graph(tmp_path):
                 buffers = _l2_graph_to_buffers(tmp_path, mesh_state["centroid"])

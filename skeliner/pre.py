@@ -919,7 +919,6 @@ def _zipper_stitch(
         ``mesh.vertices`` for existing verts and
         ``len(mesh.vertices) + i`` for ``new_verts[i]``.
     """
-    from scipy.spatial import cKDTree
 
     if new_verts is None:
         new_verts_local: list[np.ndarray] = []
@@ -932,7 +931,7 @@ def _zipper_stitch(
     cb = pts_b.mean(axis=0)
 
     # Align starting points
-    tree_b = cKDTree(pts_b)
+    tree_b = KDTree(pts_b)
     dists_q, idxs_q = tree_b.query(pts_a)
     start_a = int(np.argmin(dists_q))
     start_b = int(idxs_q[start_a])
@@ -1497,7 +1496,6 @@ def find_soma(
     #        Build a proximity graph: Otsu on nearest-neighbour
     #        distances gives a data-driven radius.  The largest
     #        connected component is the soma fragment cluster.
-    from scipy.spatial import KDTree
 
     tree = KDTree(centroids)
     dd, _ = tree.query(centroids, k=min(2, len(centroids)))
@@ -1618,6 +1616,36 @@ def find_soma(
             cutoff = lv
             break
 
+    # ── 4b. Validate: is the wide region a localized bulge (soma)?
+    #        Otsu splits ring component sizes into wide vs narrow.
+    #        spread_ratio = std(wide ring positions) / std(all ring positions).
+    #        For a soma this is small (wide rings concentrate at one spot).
+    #        For a uniform-width cell it approaches 1.0.
+    #        Tested on 28 cells (BCs + SACs): soma 0.03–0.21, no-soma 0.46–1.04.
+    nonzero_mask = largest_comp_size > 0
+    nonzero = largest_comp_size[nonzero_mask]
+    spread_ratio = 1.0  # default: assume no soma
+    if len(nonzero) >= 3:
+        width_thresh, _ = _otsu_threshold(nonzero)
+        above_indices = np.where(
+            nonzero_mask & (largest_comp_size > width_thresh)
+        )[0].astype(float)
+        all_indices = np.where(nonzero_mask)[0].astype(float)
+
+        if len(above_indices) >= 2 and np.std(all_indices) > 0:
+            spread_ratio = float(np.std(above_indices) / np.std(all_indices))
+
+    # Reject if spread_ratio is too high (wide rings not localized).
+    # Use Otsu on [spread_ratio, 1.0 - spread_ratio] to decide:
+    # if spread_ratio is closer to 0 than to 1, it's concentrated.
+    if spread_ratio > 1.0 / 3:
+        if verbose:
+            print(
+                f"[skeliner.pre] Soma: no localized bulge "
+                f"(spread_ratio={spread_ratio:.3f})"
+            )
+        return None
+
     # ── 5. Fit ellipsoid from BFS ring vertices ────────────────────
     bfs_set: set[int] = set()
     for lv in range(cutoff + 1):
@@ -1687,8 +1715,7 @@ def find_soma(
             # current soma (a pocket, not a neurite branch).
             comp_set = set(comp)
             trapped = all(
-                nv in soma_set or nv in comp_set
-                for v in comp for nv in adj.get(v, [])
+                nv in soma_set or nv in comp_set for v in comp for nv in adj.get(v, [])
             )
             if trapped and len(comp) < len(soma_set):
                 soma_set.update(comp)
@@ -1717,7 +1744,6 @@ def find_soma(
             soma.verts = soma_verts_arr
     else:
         soma.verts = soma_verts_arr
-
 
     if verbose:
         print(
