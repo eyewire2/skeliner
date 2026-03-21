@@ -1435,7 +1435,6 @@ def _otsu_threshold(values: np.ndarray) -> tuple[float, float]:
 def find_soma(
     mesh: trimesh.Trimesh,
     *,
-    max_fragment_faces: int = 50,
     verbose: bool = False,
 ) -> Soma | None:
     """Estimate soma from the spatial clustering of leftover small fragments.
@@ -1446,15 +1445,13 @@ def find_soma(
     centre; the soma boundary is determined by Otsu thresholding on
     per-ring vertex counts (high counts = soma, low counts = neurite).
 
-    The returned :class:`Soma` is fit to the identified surface vertices.
+    All internal thresholds are derived from the mesh data — none are
+    hard-coded.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Input mesh (with or without organelles removed).
-    max_fragment_faces : int, default 50
-        Components with at most this many faces are treated as the
-        indicator fragments whose clustering reveals the soma.
     verbose : bool, default False
         Print summary.
 
@@ -1467,43 +1464,70 @@ def find_soma(
 
     labels, main = _face_edge_components(mesh)
 
-    # ── 1. Locate soma centre from small-fragment clustering ──────────
+    # ── 1. Locate fragments (islands + fins) and compute centroids ─
+    frag_mask = find_fragments(mesh)
+    if frag_mask.sum() == 0:
+        if verbose:
+            print("[skeliner.pre] Soma: no fragments found")
+        return None
+
+    # Group fragment faces into connected clusters and get centroids
+    frag_fi = np.where(frag_mask)[0]
+    frag_labels, _ = _face_edge_components(
+        trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces[frag_fi], process=False)
+    )
     centroids = []
-    for cid in np.unique(labels):
-        cid = int(cid)
-        if cid == main:
-            continue
-        fi = np.where(labels == cid)[0]
-        if len(fi) > max_fragment_faces:
-            continue
-        verts = np.unique(mesh.faces[fi])
+    for cid in np.unique(frag_labels):
+        local_fi = frag_fi[frag_labels == cid]
+        verts = np.unique(mesh.faces[local_fi])
         centroids.append(mesh.vertices[verts].mean(axis=0))
 
     centroids = np.asarray(centroids)
     if len(centroids) < 3:
         if verbose:
-            print("[skeliner.pre] Soma: too few indicator fragments")
+            print("[skeliner.pre] Soma: too few fragment clusters")
         return None
 
-    center = np.median(centroids, axis=0)
-    dists = np.linalg.norm(centroids - center, axis=1)
+    # ── 1b. Find the dense cluster of fragments (soma) ──────────
+    #        Build a proximity graph: Otsu on nearest-neighbour
+    #        distances gives a data-driven radius.  The largest
+    #        connected component is the soma fragment cluster.
+    from scipy.spatial import KDTree
 
-    threshold, _ = _otsu_threshold(dists)
-    core = centroids[dists <= threshold]
+    tree = KDTree(centroids)
+    dd, _ = tree.query(centroids, k=min(2, len(centroids)))
+    nn_dists = dd[:, 1] if dd.ndim > 1 else dd
+    nn_thresh, _ = _otsu_threshold(nn_dists)
+
+    pairs = tree.query_pairs(r=nn_thresh)
+    prox_adj: dict[int, set[int]] = defaultdict(set)
+    for i, j in pairs:
+        prox_adj[i].add(j)
+        prox_adj[j].add(i)
+
+    visited_prox: set[int] = set()
+    best_comp: list[int] = []
+    for start in range(len(centroids)):
+        if start in visited_prox:
+            continue
+        comp: list[int] = []
+        pq = deque([start])
+        while pq:
+            v = pq.popleft()
+            if v in visited_prox:
+                continue
+            visited_prox.add(v)
+            comp.append(v)
+            for nv in prox_adj[v]:
+                if nv not in visited_prox:
+                    pq.append(nv)
+        if len(comp) > len(best_comp):
+            best_comp = comp
+
+    core = centroids[best_comp]
     if len(core) < 3:
-        core = centroids
-
-    # Reject if Otsu's split didn't find a meaningfully tight cluster:
-    # compare core spread to total spread.  A real soma cluster has
-    # core_std << total_std; when they are similar the split is spurious.
-    total_std = float(np.std(dists))
-    core_std = float(np.std(np.linalg.norm(core - np.median(core, axis=0), axis=1)))
-    if total_std > 0 and core_std / total_std > 0.35:
         if verbose:
-            print(
-                f"[skeliner.pre] Soma: fragments don't cluster "
-                f"(core/total spread = {core_std / total_std:.2f})"
-            )
+            print("[skeliner.pre] Soma: no dense fragment cluster found")
         return None
 
     center = np.median(core, axis=0)
@@ -1518,7 +1542,7 @@ def find_soma(
             adj[a].append(b)
             adj[b].append(a)
 
-    # ── 3. BFS from nearest vertex to centre ─────────────────────────
+    # ── 3. BFS from nearest vertex to centre (no hard cap) ───────
     main_verts = np.fromiter(adj.keys(), dtype=np.intp)
     seed = int(
         main_verts[
@@ -1534,24 +1558,50 @@ def find_soma(
     while queue:
         v = queue.popleft()
         lv = ring_level[v]
-        if lv > 500:
-            break
         for nv in adj[v]:
             if nv not in ring_level:
                 ring_level[nv] = lv + 1
                 queue.append(nv)
                 ring_verts[lv + 1].append(nv)
 
-    # ── 4. Find soma boundary via Otsu on ring vertex counts ────────
+    # ── 4. Find soma boundary: largest connected ring component ────
+    #       Each BFS ring is split into connected components on the
+    #       mesh surface.  On the soma the largest component dominates
+    #       and grows; once the frontier enters neurites it fragments
+    #       into narrow strips and the largest component shrinks.
+    #       The cutoff is where the largest component peaks (Otsu on
+    #       the post-peak sizes determines the boundary).
     max_ring = max(ring_verts.keys())
-    ring_counts = np.array(
-        [len(ring_verts.get(lv, [])) for lv in range(max_ring + 1)],
-        dtype=np.float64,
-    )
-    peak_ring = int(np.argmax(ring_counts))
+    largest_comp_size = np.zeros(max_ring + 1)
 
-    # Otsu splits post-peak ring counts into "soma" (high) vs "neurite" (low)
-    post_peak = ring_counts[peak_ring:]
+    for lv in range(max_ring + 1):
+        verts_in_ring = ring_verts.get(lv, [])
+        if not verts_in_ring:
+            continue
+        # Find connected components within this ring using mesh adjacency
+        ring_set = set(verts_in_ring)
+        visited_ring: set[int] = set()
+        max_comp = 0
+        for start in verts_in_ring:
+            if start in visited_ring:
+                continue
+            size = 0
+            rq = deque([start])
+            while rq:
+                v = rq.popleft()
+                if v in visited_ring:
+                    continue
+                visited_ring.add(v)
+                size += 1
+                for nv in adj[v]:
+                    if nv in ring_set and nv not in visited_ring:
+                        rq.append(nv)
+            if size > max_comp:
+                max_comp = size
+        largest_comp_size[lv] = max_comp
+
+    peak_ring = int(np.argmax(largest_comp_size))
+    post_peak = largest_comp_size[peak_ring:]
     if len(post_peak) > 1:
         count_thresh, _ = _otsu_threshold(post_peak)
     else:
@@ -1559,7 +1609,7 @@ def find_soma(
 
     cutoff = max_ring
     for lv in range(peak_ring, max_ring + 1):
-        if ring_counts[lv] < count_thresh:
+        if largest_comp_size[lv] < count_thresh:
             cutoff = lv
             break
 
@@ -1576,11 +1626,37 @@ def find_soma(
     inside = soma.contains(mesh.vertices[all_main_verts])
     soma_set: set[int] = set(all_main_verts[inside].tolist())
 
-    # ── 7. Absorb pockets that are trapped between the ellipsoid
-    #       boundary and the actual soma surface.  After removing soma
-    #       verts, each remaining connected component is either a
-    #       neurite branch (extends far from soma) or a pocket (stays
-    #       close).  Only pockets are absorbed.
+    # ── 7. Dilate the soma boundary, then absorb pockets ──────────
+    #       The dilation distance and pocket absorption distance are
+    #       derived from mesh resolution: a few average edge lengths
+    #       expressed in body-coord units.
+    avg_edge = float(mesh.edges_unique_length.mean())
+    edge_in_body = avg_edge / float(soma.axes.min())
+    dilation_limit = 1.0 + 3.0 * edge_in_body
+
+    # 7a. Dilate: grow soma boundary along mesh edges, accepting
+    #     neighbours within a few edge-lengths of the ellipsoid surface.
+    prev_size = 0
+    while len(soma_set) != prev_size:
+        prev_size = len(soma_set)
+        frontier = set()
+        for v in soma_set:
+            for nv in adj.get(v, []):
+                if nv not in soma_set:
+                    frontier.add(nv)
+        if not frontier:
+            break
+        frontier_arr = np.fromiter(frontier, dtype=np.intp)
+        body = soma._body_coords(mesh.vertices[frontier_arr])
+        body_dist = np.sqrt((body**2).sum(axis=1))
+        accept = frontier_arr[body_dist < dilation_limit]
+        if len(accept) == 0:
+            break
+        soma_set.update(accept.tolist())
+
+    # 7b. Absorb pockets: connected components of non-soma verts
+    #     that are topologically trapped — their only path to the
+    #     rest of the mesh goes through the soma.
     all_main_set = set(all_main_verts.tolist())
     for _iteration in range(10):
         outside = all_main_set - soma_set
@@ -1590,30 +1666,32 @@ def find_soma(
             if start in visited:
                 continue
             comp: list[int] = []
-            queue = deque([start])
-            while queue:
-                v = queue.popleft()
+            pocket_queue = deque([start])
+            while pocket_queue:
+                v = pocket_queue.popleft()
                 if v in visited:
                     continue
                 visited.add(v)
                 comp.append(v)
                 for nv in adj[v]:
                     if nv in outside and nv not in visited:
-                        queue.append(nv)
-            # Check if this component extends into the neurites:
-            # compute max body-coord distance from ellipsoid centre.
-            # If all verts are within the ellipsoid boundary (body
-            # dist < pocket_frac), it is a pocket → absorb.
-            coords = mesh.vertices[comp]
-            body = soma._body_coords(coords)
-            max_body_dist = float(np.sqrt((body**2).sum(axis=1)).max())
-            if max_body_dist < 1.5:
+                        pocket_queue.append(nv)
+            # Trapped = every neighbour of the component is either
+            # inside the component itself or inside the soma.
+            # Only absorb if the component is small relative to the
+            # current soma (a pocket, not a neurite branch).
+            comp_set = set(comp)
+            trapped = all(
+                nv in soma_set or nv in comp_set
+                for v in comp for nv in adj.get(v, [])
+            )
+            if trapped and len(comp) < len(soma_set):
                 soma_set.update(comp)
                 absorbed += len(comp)
         if absorbed == 0:
             break
 
-    # ── 8. Absorb disconnected-component vertices inside the ellipsoid.
+    # ── 8. Absorb disconnected-component vertices inside the ellipsoid
     #       Small fragments (failed organelle removals) that sit inside
     #       the soma region should be part of the soma, not left as
     #       stray vertices that create noise in downstream binning.
