@@ -1245,8 +1245,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return JSONResponse({
             "ok": True,
             "facesBefore": n_before,
-            "facesAfter": n_after,
-            "facesRemoved": n_before - n_after,
+            "facesRemoved": n_degen,
         })
 
     async def do_fill_holes(request):

@@ -26,6 +26,32 @@ __all__ = [
 ]
 
 
+def _non_degenerate(faces: np.ndarray) -> np.ndarray:
+    """Boolean mask of faces with 3 distinct vertices."""
+    return (
+        (faces[:, 0] != faces[:, 1])
+        & (faces[:, 1] != faces[:, 2])
+        & (faces[:, 0] != faces[:, 2])
+    )
+
+
+def _edge_to_faces(mesh: trimesh.Trimesh) -> dict[tuple[int, int], list[int]]:
+    """Build edge→face adjacency, skipping degenerate faces."""
+    result: dict[tuple[int, int], list[int]] = defaultdict(list)
+    good = _non_degenerate(mesh.faces)
+    for fi in range(len(mesh.faces)):
+        if not good[fi]:
+            continue
+        face = mesh.faces[fi]
+        for i in range(3):
+            e = (
+                min(int(face[i]), int(face[(i + 1) % 3])),
+                max(int(face[i]), int(face[(i + 1) % 3])),
+            )
+            result[e].append(fi)
+    return result
+
+
 def _face_edge_components(mesh: trimesh.Trimesh) -> tuple[np.ndarray, int]:
     """Connected components of faces using edge adjacency.
 
@@ -39,8 +65,17 @@ def _face_edge_components(mesh: trimesh.Trimesh) -> tuple[np.ndarray, int]:
     main : int
         Component id of the largest component.
     """
+    faces = mesh.faces
+    n = len(faces)
+
+    # Mark degenerate faces (duplicate vertices) so they are skipped
+    degen = ~_non_degenerate(faces)
+
     edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, face in enumerate(mesh.faces):
+    for fi in range(n):
+        if degen[fi]:
+            continue
+        face = faces[fi]
         for i in range(3):
             e = (
                 min(int(face[i]), int(face[(i + 1) % 3])),
@@ -48,13 +83,14 @@ def _face_edge_components(mesh: trimesh.Trimesh) -> tuple[np.ndarray, int]:
             )
             edge_to_faces[e].append(fi)
 
-    n = len(mesh.faces)
+    # -1 = unlabeled, -2 = degenerate (permanently skipped)
     labels = np.full(n, -1, dtype=np.intp)
+    labels[degen] = -2
     comp_id = 0
     best_id, best_size = 0, 0
 
     for seed in range(n):
-        if labels[seed] >= 0:
+        if labels[seed] >= 0 or labels[seed] == -2:
             continue
         queue = [seed]
         labels[seed] = comp_id
@@ -107,14 +143,7 @@ def find_holes(
     face_comp, main_comp = _face_edge_components(mesh)
 
     # Build edge → face mapping and identify boundary edges
-    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, face in enumerate(mesh.faces):
-        for i in range(3):
-            e = (
-                min(int(face[i]), int(face[(i + 1) % 3])),
-                max(int(face[i]), int(face[(i + 1) % 3])),
-            )
-            edge_to_faces[e].append(fi)
+    edge_to_faces = _edge_to_faces(mesh)
 
     # Boundary edges whose face is in the main component
     boundary_edges = []
@@ -434,10 +463,11 @@ def _fill_single_hole(
                 break
     else:
         loop_set = set(loop)
+        _good = _non_degenerate(mesh.faces)
         adj_fi = [
             fi
             for fi, face in enumerate(mesh.faces)
-            if set(int(v) for v in face) & loop_set
+            if _good[fi] and set(int(v) for v in face) & loop_set
         ]
     if adj_fi:
         ref_n = mesh.face_normals[adj_fi].mean(axis=0)
@@ -742,11 +772,13 @@ def fill_holes(
             )
         )
 
-    # Pre-build vert_to_faces for orientation
+    # Pre-build vert_to_faces for orientation (skip degenerate faces)
+    _good = _non_degenerate(mesh.faces)
     vert_to_faces: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
     for fi, face in enumerate(mesh.faces):
-        for v in face:
-            vert_to_faces[int(v)].append(fi)
+        if _good[fi]:
+            for v in face:
+                vert_to_faces[int(v)].append(fi)
 
     # Filter loops by perimeter
     valid_loops: list[list[int]] = []
@@ -1106,8 +1138,9 @@ def _stitch_and_rebuild(
     """Remove *sel* faces, stitch each loop pair, rebuild mesh once."""
     # Vert-to-face for orientation (non-removed faces only)
     vert_to_faces: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
+    non_degen = _non_degenerate(mesh.faces)
     for fi, face in enumerate(mesh.faces):
-        if fi not in sel:
+        if fi not in sel and non_degen[fi]:
             for v in face:
                 vert_to_faces[int(v)].append(fi)
 
@@ -1184,14 +1217,7 @@ def merge_selected_faces(
         return mesh
 
     # Edge-to-face map
-    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, face in enumerate(mesh.faces):
-        for i in range(3):
-            e = (
-                min(int(face[i]), int(face[(i + 1) % 3])),
-                max(int(face[i]), int(face[(i + 1) % 3])),
-            )
-            edge_to_faces[e].append(fi)
+    edge_to_faces = _edge_to_faces(mesh)
 
     if verbose:
         print(f"[skeliner.pre] Merge: removing {len(sel)} faces")
@@ -1250,6 +1276,7 @@ def _find_island_faces(
 
     Islands are edge-connected components with fewer than *min_faces*.
     """
+    active = active & _non_degenerate(faces)
     active_idx = np.where(active)[0]
     af = faces[active_idx]
     n_active = len(af)
@@ -1305,7 +1332,7 @@ def _find_fin_faces(
     active: np.ndarray,
 ) -> np.ndarray:
     """Return mask of fin faces among *active* faces (iterates until stable)."""
-    work = active.copy()
+    work = active.copy() & _non_degenerate(faces)
     max_v = int(faces.max()) + 1
     total_mask = np.zeros(len(faces), dtype=bool)
 
@@ -1878,11 +1905,11 @@ def find_disconnected(
     main_normals = mesh.face_normals[main_face_idx]
     main_tree = KDTree(main_centroids)
 
-    # Collect non-main components
+    # Collect non-main components (skip degenerate faces with label -2)
     comp_faces: dict[int, list[int]] = {}
     for fi in range(n_faces):
         cid = int(labels[fi])
-        if cid == main:
+        if cid == main or cid < 0:
             continue
         comp_faces.setdefault(cid, []).append(fi)
 
@@ -2054,8 +2081,12 @@ def find_gaps(
         print("[skeliner.pre] Gaps: building face adjacency...")
     from collections import deque as _deque
 
+    non_degen = _non_degenerate(mesh.faces)
     edge_to_faces_gap: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, face in enumerate(mesh.faces):
+    for fi in range(len(mesh.faces)):
+        if not non_degen[fi]:
+            continue
+        face = mesh.faces[fi]
         for i in range(3):
             e = (
                 min(int(face[i]), int(face[(i + 1) % 3])),
@@ -2224,14 +2255,7 @@ def remove_gaps(
         return mesh
 
     # Build edge map once
-    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, face in enumerate(mesh.faces):
-        for i in range(3):
-            e = (
-                min(int(face[i]), int(face[(i + 1) % 3])),
-                max(int(face[i]), int(face[(i + 1) % 3])),
-            )
-            edge_to_faces[e].append(fi)
+    edge_to_faces = _edge_to_faces(mesh)
 
     if verbose:
         print(f"[skeliner.pre] Bridging {len(gaps)} gaps")
@@ -2817,11 +2841,7 @@ def find_rims(
     adj = _face_adjacency(mesh)
 
     # Build edge-to-face map
-    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, f in enumerate(mesh.faces):
-        for i in range(3):
-            a, b = int(f[i]), int(f[(i + 1) % 3])
-            edge_to_face[(min(a, b), max(a, b))].append(fi)
+    edge_to_face = _edge_to_faces(mesh)
 
     # Connected components of negative-dot faces on main component
     neg_idx = set(np.where((outward_dots < 0) & main_face_mask)[0].tolist())
@@ -2900,13 +2920,7 @@ def find_rims(
 
 def _face_adjacency(mesh: trimesh.Trimesh) -> dict[int, set[int]]:
     """Build face adjacency map (edge-connected neighbors)."""
-    from collections import defaultdict
-
-    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, f in enumerate(mesh.faces):
-        for i in range(3):
-            a, b = int(f[i]), int(f[(i + 1) % 3])
-            edge_to_face[(min(a, b), max(a, b))].append(fi)
+    edge_to_face = _edge_to_faces(mesh)
 
     adj: dict[int, set[int]] = defaultdict(set)
     for faces in edge_to_face.values():
@@ -3030,11 +3044,7 @@ def find_pocket_organelles(
         rim_edge_set.update(rim)
 
     # Build edge-to-face map
-    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, f in enumerate(mesh.faces):
-        for i in range(3):
-            a, b = int(f[i]), int(f[(i + 1) % 3])
-            edge_to_face[(min(a, b), max(a, b))].append(fi)
+    edge_to_face = _edge_to_faces(mesh)
 
     # Seeds: negative-dot faces touching rim edges
     seeds: set[int] = set()
@@ -3469,14 +3479,8 @@ def find_fusions(
     areas = mesh.area_faces
     zero_faces = set(np.where(areas < 1e-6)[0].tolist())
 
-    # Build edge-to-face map, excluding zero-area faces
-    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, f in enumerate(mesh.faces):
-        if fi in zero_faces:
-            continue
-        for i in range(3):
-            a, b = int(f[i]), int(f[(i + 1) % 3])
-            edge_to_face[(min(a, b), max(a, b))].append(fi)
+    # Build edge-to-face map, excluding degenerate faces
+    edge_to_face = _edge_to_faces(mesh)
 
     def _get_neighbors(fi: int) -> set[int]:
         f = mesh.faces[fi]
@@ -3537,9 +3541,10 @@ def find_fusions(
 
     # Signal 3: fan vertices — vertices whose face fan splits into
     # multiple edge-connected components (vertex-only fusion)
+    _good = _non_degenerate(mesh.faces)
     vert_to_face: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
     for fi, f in enumerate(mesh.faces):
-        if fi in zero_faces:
+        if not _good[fi] or fi in zero_faces:
             continue
         for v in f:
             vert_to_face[int(v)].append(fi)
@@ -3773,16 +3778,14 @@ def _split_fan_vertices(
     """
     from collections import deque
 
+    _good = _non_degenerate(mesh.faces)
     vert_to_face: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
     for fi, f in enumerate(mesh.faces):
-        for v in f:
-            vert_to_face[int(v)].append(fi)
+        if _good[fi]:
+            for v in f:
+                vert_to_face[int(v)].append(fi)
 
-    edge_to_face: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi, f in enumerate(mesh.faces):
-        for i in range(3):
-            a, b = int(f[i]), int(f[(i + 1) % 3])
-            edge_to_face[(min(a, b), max(a, b))].append(fi)
+    edge_to_face = _edge_to_faces(mesh)
 
     verts = mesh.vertices.copy()
     faces = mesh.faces.copy()
@@ -4112,8 +4115,9 @@ def remove_nucleus(
     normals = mesh.face_normals
     n_faces = len(mesh.faces)
 
-    # Step 1: faces inside soma ellipsoid
-    inside = soma.contains(centroids, inside_frac=soma_inside_frac)
+    # Step 1: faces inside soma ellipsoid (skip degenerate faces)
+    good = _non_degenerate(mesh.faces)
+    inside = soma.contains(centroids, inside_frac=soma_inside_frac) & good
     inside_idx = np.where(inside)[0]
 
     if len(inside_idx) == 0:
