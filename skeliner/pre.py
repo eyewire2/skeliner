@@ -4301,6 +4301,49 @@ def remove_nucleus(
 # ── Offset detection and correction ─────────────────────────────────
 
 
+def _detect_tile_size(vertices: np.ndarray) -> int:
+    """Auto-detect XY tile size from vertex coordinate clustering.
+
+    EM volume tiles create vertex clusters at tile boundaries.
+    Tests powers of 2 and picks the size with the strongest
+    boundary clustering (highest ratio of observed to expected
+    boundary vertices).
+    """
+    # At tile boundaries, many vertices share the exact same
+    # X or Y coordinate.  Find these peak coordinates and
+    # measure the most common spacing between them.
+    # Find coordinates with high vertex counts (Otsu), then
+    # measure spacing between the TOP peaks per axis.  Use the
+    # largest consistent spacing as the tile size.
+    best_spacing = 0
+    for axis in [0, 1]:
+        coords = np.round(vertices[:, axis]).astype(np.int64)
+        unique, counts = np.unique(coords, return_counts=True)
+        thresh, _ = _otsu_threshold(counts.astype(float))
+        # Take the top peaks above threshold, sorted by count
+        above = counts > thresh
+        if above.sum() < 3:
+            continue
+        peak_coords = unique[above]
+        peak_counts = counts[above]
+        # Use only the top peaks (sorted by count descending)
+        order = np.argsort(-peak_counts)
+        top_peaks = np.sort(peak_coords[order[:max(3, len(order) // 5)]])
+        if len(top_peaks) >= 2:
+            diffs = np.diff(top_peaks)
+            diffs = diffs[diffs > 100]
+            if len(diffs) > 0:
+                spacing = float(np.median(diffs))
+                if spacing > best_spacing:
+                    best_spacing = spacing
+
+    if best_spacing > 100:
+        return int(2 ** round(np.log2(best_spacing)))
+
+    extent = vertices.max(axis=0) - vertices.min(axis=0)
+    return int(max(extent[:2]) / 4)
+
+
 def _detect_z_resolution(vertices: np.ndarray) -> float:
     """Auto-detect Z section spacing from vertex coordinates."""
     z_unique = np.unique(np.round(vertices[:, 2], 1))
@@ -4724,7 +4767,22 @@ def remove_offsets(
     # its ceiling. Centroid is restored at the end.
     sorted_offsets = sorted(offsets, key=lambda r: r["z_ceil"])
 
-    tile_size = 32768
+    comp_labels, main_comp = _face_edge_components(mesh)
+    tile_size = _detect_tile_size(mesh.vertices)
+    # Validate: each tile must fully contain the cap contour
+    # extent of every offset.  If not, double until it does.
+    for rec in offsets:
+        cap_vi = np.unique(mesh.faces[rec["cap_faces"]].ravel())
+        if len(cap_vi) < 2:
+            continue
+        cap_extent = max(
+            mesh.vertices[cap_vi, 0].max() - mesh.vertices[cap_vi, 0].min(),
+            mesh.vertices[cap_vi, 1].max() - mesh.vertices[cap_vi, 1].min(),
+        )
+        while tile_size < cap_extent * 2:
+            tile_size *= 2
+    if verbose:
+        print(f"[skeliner.pre] Offsets: tile size = {tile_size}")
     vert_tx = (mesh.vertices[:, 0] // tile_size).astype(int)
     vert_ty = (mesh.vertices[:, 1] // tile_size).astype(int)
 
@@ -4733,36 +4791,56 @@ def remove_offsets(
         z_floor = rec["z_floor"]
         z_ceil = rec["z_ceil"]
 
-        # Start with the gap's tile
+        # Start with both floor and ceiling tiles
         floor_xy = rec["floor_center"][:2]
+        ceil_xy = rec["ceil_center"][:2]
         gap_tx = int(floor_xy[0] // tile_size)
         gap_ty = int(floor_xy[1] // tile_size)
-        corrected_tiles = {(gap_tx, gap_ty)}
+        ceil_tx = int(ceil_xy[0] // tile_size)
+        ceil_ty = int(ceil_xy[1] // tile_size)
+        corrected_tiles = {(gap_tx, gap_ty), (ceil_tx, ceil_ty)}
 
         in_tile = (vert_tx == gap_tx) & (vert_ty == gap_ty)
         below_mask = in_tile & (new_verts[:, 2] < z_ceil - z_res * 0.5)
 
-        # Expand: faces spanning tile boundary → add their tiles
+        # Expand: for faces spanning tile boundary, add just the
+        # boundary vertices (not the whole adjacent tile)
         face_any = below_mask[mesh.faces].any(axis=1)
         face_all = below_mask[mesh.faces].all(axis=1)
         mixed = face_any & ~face_all
         if mixed.any():
             for fi in np.where(mixed)[0]:
-                f = mesh.faces[fi]
-                for vi in f:
+                for vi in mesh.faces[fi]:
                     if not below_mask[vi] and new_verts[vi, 2] < z_ceil - z_res * 0.5:
-                        t = (int(vert_tx[vi]), int(vert_ty[vi]))
-                        if t not in corrected_tiles:
-                            corrected_tiles.add(t)
-            # Rebuild mask with expanded tiles
-            in_tiles = np.zeros(len(mesh.vertices), dtype=bool)
-            for tx, ty in corrected_tiles:
-                in_tiles |= (vert_tx == tx) & (vert_ty == ty)
-            below_mask = in_tiles & (new_verts[:, 2] < z_ceil - z_res * 0.5)
+                        below_mask[vi] = True
 
         n_moved = int(below_mask.sum())
         if n_moved == 0:
             continue
+
+        # Also include isolated non-main components below z_ceil
+        # that are near the corrected region
+        moved_center = mesh.vertices[below_mask, :2].mean(axis=0)
+        moved_extent = max(
+            mesh.vertices[below_mask, 0].max()
+            - mesh.vertices[below_mask, 0].min(),
+            mesh.vertices[below_mask, 1].max()
+            - mesh.vertices[below_mask, 1].min(),
+        )
+        for c in range(int(comp_labels.max()) + 1):
+            if c == main_comp:
+                continue
+            c_mask = comp_labels == c
+            if not c_mask.any():
+                continue
+            c_verts = np.unique(mesh.faces[c_mask].ravel())
+            c_z = mesh.vertices[c_verts, 2]
+            if c_z.max() > z_ceil or c_z.min() > z_ceil:
+                continue
+            c_center = mesh.vertices[c_verts, :2].mean(axis=0)
+            dist = np.linalg.norm(c_center - moved_center)
+            if dist < moved_extent:
+                below_mask[c_verts] = True
 
         dz = z_ceil - z_floor
         new_verts[below_mask, 0] += offset_xy[0]
