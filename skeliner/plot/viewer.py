@@ -131,6 +131,15 @@ def _is_organelle_data(path: Path) -> bool:
         return False
 
 
+def _is_soma_data(path: Path) -> bool:
+    """Check if an npz file contains standalone soma data."""
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            return "center" in data and "axes" in data and "R" in data
+    except Exception:
+        return False
+
+
 def _is_l2_graph(path: Path) -> bool:
     """Check if an npz file is an L2 graph (not a skeliner skeleton)."""
     with np.load(path, allow_pickle=False) as data:
@@ -472,6 +481,22 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 return JSONResponse({
                     "ok": True, "type": "organelles", "name": filename,
                     "loaded": loaded,
+                })
+
+            elif suffix == ".npz" and _is_soma_data(tmp_path):
+                from skeliner.io import load_soma_npz
+
+                soma = load_soma_npz(tmp_path)
+                mesh_state["soma"] = soma
+                n_verts = len(soma.verts) if soma.verts is not None else 0
+                print(
+                    f"Loaded soma: center=[{soma.center[0]:.0f}, "
+                    f"{soma.center[1]:.0f}, {soma.center[2]:.0f}], "
+                    f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
+                    f"{soma.axes[2]:.0f}], {n_verts:,} verts"
+                )
+                return JSONResponse({
+                    "ok": True, "type": "soma", "name": filename,
                 })
 
             elif suffix == ".npz" and _is_l2_graph(tmp_path):
