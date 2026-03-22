@@ -4735,9 +4735,8 @@ def remove_offsets(
     z_res = _detect_z_resolution(mesh.vertices)
     new_verts = mesh.vertices.copy()
 
-    # Process bottom to top. For each gap, move EVERYTHING
-    # below the ceiling. Vertices below multiple ceilings get
-    # moved multiple times (cumulative).
+    # Process bottom to top. Each gap moves everything below
+    # its ceiling. Centroid is restored at the end.
     sorted_offsets = sorted(offsets, key=lambda r: r["z_ceil"])
 
     for rec in sorted_offsets:
@@ -4783,6 +4782,11 @@ def remove_offsets(
     new_faces = mesh.faces.copy()
     new_faces[~keep] = 0
 
+    # Restore global position: move centroid back to original
+    orig_centroid = mesh.vertices.mean(axis=0)
+    new_centroid = new_verts.mean(axis=0)
+    new_verts += orig_centroid - new_centroid
+
     result = trimesh.Trimesh(
         vertices=new_verts,
         faces=new_faces,
@@ -4790,9 +4794,11 @@ def remove_offsets(
     )
 
     if verbose:
+        drift = np.linalg.norm(new_centroid - orig_centroid)
         print(
             f"[skeliner.pre] Offsets: corrected {len(offsets)} offsets, "
-            f"removed {n_removed:,} faces"
+            f"removed {n_removed:,} faces, "
+            f"centroid drift {drift:.0f} nm (restored)"
         )
 
     return result
