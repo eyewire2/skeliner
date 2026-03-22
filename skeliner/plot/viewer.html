@@ -430,12 +430,15 @@
                     NPZ
                 </button>
             </div>
+            <div style="color: #888; margin-bottom: 6px">Mesh Stats</div>
+            <div style="margin-bottom: 12px">
+                <button id="saveMeshStats" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
+                    NPZ
+                </button>
+            </div>
             <div style="color: #888; margin-bottom: 6px">Organelles</div>
             <div style="margin-bottom: 12px">
-                <button id="saveOrgPrecompute" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
-                    Precompute
-                </button>
-                <button id="saveOrgMasks" style="font-size: 12px; cursor: pointer; padding: 6px 20px; margin-left: 8px">
+                <button id="saveOrgMasks" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
                     Masks
                 </button>
             </div>
@@ -685,7 +688,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveSkelSwc").addEventListener("click", () => doSave("swc"));
                 document.getElementById("saveSkelNpz").addEventListener("click", () => doSave("npz"));
                 document.getElementById("saveSomaNpz").addEventListener("click", () => doSave("soma"));
-                document.getElementById("saveOrgPrecompute").addEventListener("click", () => doSave("org_precompute"));
+                document.getElementById("saveMeshStats").addEventListener("click", () => doSave("mesh_stats"));
                 document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
@@ -1737,9 +1740,9 @@ let meshCentroid = [0, 0, 0];
                             if (mode !== "all") throw e;
                         }
                     }
-                    if (mode === "org_precompute" || mode === "all") {
+                    if (mode === "mesh_stats" || mode === "all") {
                         try {
-                            saved.push(await downloadFile(`/export_organelle_precompute?prefix=${pfx}`));
+                            saved.push(await downloadFile(`/export_mesh_stats?prefix=${pfx}`));
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }

@@ -203,7 +203,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "buffers": None,        # JSON-serialisable mesh data
         "path": None,           # source file path
         "centroid": np.zeros(3, dtype=np.float32),
-        "organelle_mask": None, # cached from detect_organelles
+        "mesh_stats": None, # cached from compute_mesh_stats
+        "organelles": None, # cached from detect_organelles
         "fusion_clusters": None, # cached from detect_fusions
         "soma": None, # cached from detect_soma
         "disconnected": None, # cached from detect_disconnected
@@ -391,8 +392,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 # Reset skeletons and annotations
                 skeleton_states.clear()
                 mesh_state["soma"] = None
-                mesh_state["organelle_mask"] = None
-                mesh_state["_organelle_precomputed"] = None
+                mesh_state["organelles"] = None
+                mesh_state["mesh_stats"] = None
                 annotations_path.write_text("{}", encoding="utf-8")
                 await broadcast({"type": "all_skeletons_removed"})
 
@@ -436,11 +437,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 data = np.load(str(tmp_path), allow_pickle=False)
                 loaded = []
 
-                # Masks → organelle_mask
+                # Masks → organelles
                 if "pocket" in data and "isolated" in data:
                     pocket = data["pocket"]
                     isolated = data["isolated"]
-                    mesh_state["organelle_mask"] = pocket | isolated
+                    mesh_state["organelles"] = pocket | isolated
                     loaded.append(f"pocket={int(pocket.sum()):,}")
                     loaded.append(f"isolated={int(isolated.sum()):,}")
 
@@ -464,14 +465,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                         })
                     annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
-                # Precomputed → _organelle_precomputed
+                # Precomputed → mesh_stats
                 if "outward_dots" in data and "face_comp" in data:
                     outward_dots = data["outward_dots"]
                     face_comp = data["face_comp"]
                     main_ci = int(data["main_ci"]) if "main_ci" in data else int(
                         np.argmax(np.bincount(face_comp))
                     )
-                    mesh_state["_organelle_precomputed"] = (
+                    mesh_state["mesh_stats"] = (
                         outward_dots, face_comp, main_ci, face_comp == main_ci
                     )
                     loaded.append("precomputed")
@@ -687,29 +688,29 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         highlights = []
         # Start from cached mask if available, else empty
-        cached = mesh_state.get("organelle_mask")
+        cached = mesh_state.get("organelles")
         if cached is not None and len(cached) == len(mesh.faces):
             combined = cached.copy()
         else:
             combined = np.zeros(len(mesh.faces), dtype=bool)
 
         from skeliner.pre import (
-            _organelle_precompute, find_pocket_organelles,
+            compute_mesh_stats, find_pocket_organelles,
             find_isolated_organelles, find_organelles,
         )
 
         # Precompute once, reuse for all detection types
-        precomputed = mesh_state.get("_organelle_precomputed")
+        precomputed = mesh_state.get("mesh_stats")
         if precomputed is None or len(precomputed[0]) != len(mesh.faces):
             precomputed = await _run_with_log(
-                _organelle_precompute, mesh, None, 5.0, True
+                compute_mesh_stats, mesh, None, 5.0, True
             )
-            mesh_state["_organelle_precomputed"] = precomputed
+            mesh_state["mesh_stats"] = precomputed
 
         if det_type in ("pocket", "surface"):
             mask = await _run_with_log(
                 find_pocket_organelles, mesh, verbose=True,
-                _precomputed=precomputed,
+                mesh_stats=precomputed,
             )
             combined |= mask
             faces = [int(fi) for fi in np.where(mask)[0]]
@@ -722,7 +723,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         elif det_type == "isolated":
             mask = await _run_with_log(
                 find_isolated_organelles, mesh, verbose=True,
-                _precomputed=precomputed,
+                mesh_stats=precomputed,
             )
             combined |= mask
             faces = [int(fi) for fi in np.where(mask)[0]]
@@ -735,7 +736,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         else:
             surface, iso_mask = await _run_with_log(
                 find_organelles, mesh, verbose=True,
-                _precomputed=precomputed,
+                mesh_stats=precomputed,
             )
             combined = surface | iso_mask
             sf = [int(fi) for fi in np.where(surface)[0]]
@@ -753,7 +754,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "label": f"organelle:isolated ({len(iso):,})",
                 })
 
-        mesh_state["organelle_mask"] = combined
+        mesh_state["organelles"] = combined
 
         ann = {}
         if annotations_path.exists():
@@ -810,16 +811,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(
                 find_soma, mesh,
-                organelle_mask=mesh_state.get("organelle_mask"),
-                _precomputed=mesh_state.get("_organelle_precomputed"),
+                organelles=mesh_state.get("organelles"),
+                mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
             )
             mesh_state["soma"] = soma
         await _log("[skeliner.pre] Detecting disconnected components...")
         components = await _run_with_log(
-            find_disconnected, mesh, verbose=True, _precomputed_soma=soma,
-            organelle_mask=mesh_state.get("organelle_mask"),
-            _precomputed=mesh_state.get("_organelle_precomputed"),
+            find_disconnected, mesh, verbose=True, soma=soma,
+            organelles=mesh_state.get("organelles"),
+            mesh_stats=mesh_state.get("mesh_stats"),
         )
         mesh_state["disconnected"] = components
 
@@ -859,8 +860,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh = mesh_state["mesh"]
         soma = await _run_with_log(
             find_soma, mesh,
-            organelle_mask=mesh_state.get("organelle_mask"),
-            _precomputed=mesh_state.get("_organelle_precomputed"),
+            organelles=mesh_state.get("organelles"),
+            mesh_stats=mesh_state.get("mesh_stats"),
             verbose=True,
         )
         if soma is None:
@@ -923,8 +924,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(
                 find_soma, mesh,
-                organelle_mask=mesh_state.get("organelle_mask"),
-                _precomputed=mesh_state.get("_organelle_precomputed"),
+                organelles=mesh_state.get("organelles"),
+                mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
             )
             mesh_state["soma"] = soma
@@ -933,7 +934,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         await _log("[skeliner.pre] Detecting gaps...")
         gaps = await _run_with_log(
             find_gaps, mesh, verbose=True,
-            _precomputed_soma=soma,
+            soma=soma,
             _precomputed_disconnected=cached_disc,
         )
         mesh_state["gap_clusters"] = gaps
@@ -979,7 +980,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         new_mesh = await _run_with_log(
             remove_gaps, mesh, verbose=True,
-            _precomputed_soma=soma,
+            soma=soma,
             _precomputed_gaps=cached_gaps,
         )
         n_after = len(new_mesh.faces)
@@ -1145,19 +1146,19 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import find_rims, _organelle_precompute
+        from skeliner.pre import find_rims, compute_mesh_stats
 
         mesh = mesh_state["mesh"]
         centroid = mesh_state["centroid"]
 
         # Reuse cached precomputed data
-        precomputed = mesh_state.get("_organelle_precomputed")
+        precomputed = mesh_state.get("mesh_stats")
         if precomputed is None or len(precomputed[0]) != len(mesh.faces):
-            precomputed = _organelle_precompute(mesh, None, 5.0, True)
-            mesh_state["_organelle_precomputed"] = precomputed
+            precomputed = compute_mesh_stats(mesh, None, 5.0, True)
+            mesh_state["mesh_stats"] = precomputed
 
         def _run():
-            rims = find_rims(mesh, verbose=True, _precomputed=precomputed)
+            rims = find_rims(mesh, verbose=True, mesh_stats=precomputed)
             verts = np.asarray(mesh.vertices, dtype=np.float32)
             colors = [
                 [0.2, 1.0, 0.6], [0.1, 0.8, 0.9], [0.9, 1.0, 0.2],
@@ -1272,7 +1273,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-        cached = mesh_state.get("organelle_mask")
+        cached = mesh_state.get("organelles")
 
         from skeliner.pre import _rebuild_mesh
 
@@ -1342,7 +1343,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         def _do_remove():
             if cached is not None and len(cached) == len(mesh.faces) and cached.any():
                 print(f"[skeliner.pre] Using cached fragment mask ({int(cached.sum()):,} faces)")
-                return _remove_fragments(mesh, _precomputed=cached, verbose=True)
+                return _remove_fragments(mesh, fragments=cached, verbose=True)
             else:
                 return _remove_fragments(mesh, verbose=True)
 
@@ -1492,12 +1493,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             headers={"Content-Disposition": f'attachment; filename="{prefix}mesh_cleaned.{fmt}"'},
         )
 
-    async def export_organelle_precompute(request):
+    async def export_mesh_stats(request):
         """Save organelle precomputed data (outward_dots, face_comp, main_ci)."""
         from starlette.responses import Response
         import tempfile
 
-        precomputed = mesh_state.get("_organelle_precomputed")
+        precomputed = mesh_state.get("mesh_stats")
         if precomputed is None:
             return JSONResponse(
                 {"ok": False, "error": "No organelle precompute data"}, status_code=400
@@ -1518,15 +1519,15 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}organelle_precompute.npz"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}mesh_stats.npz"'},
         )
 
-    async def export_organelle_masks(request):
+    async def export_organelless(request):
         """Save organelle masks (pocket, isolated) + precomputed data."""
         from starlette.responses import Response
         import tempfile
 
-        cached_mask = mesh_state.get("organelle_mask")
+        cached_mask = mesh_state.get("organelles")
         if cached_mask is None:
             return JSONResponse(
                 {"ok": False, "error": "No organelle masks"}, status_code=400
@@ -1547,7 +1548,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         save_data = {"pocket": pocket, "isolated": isolated}
 
         # Include precomputed data if available
-        precomputed = mesh_state.get("_organelle_precomputed")
+        precomputed = mesh_state.get("mesh_stats")
         if precomputed is not None:
             outward_dots, face_comp, main_ci, _ = precomputed
             save_data["outward_dots"] = outward_dots
@@ -1562,7 +1563,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}organelle_masks.npz"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}organelless.npz"'},
         )
 
     async def export_soma(request):
@@ -2055,8 +2056,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
-            Route("/export_organelle_precompute", export_organelle_precompute, methods=["GET"]),
-            Route("/export_organelle_masks", export_organelle_masks, methods=["GET"]),
+            Route("/export_mesh_stats", export_mesh_stats, methods=["GET"]),
+            Route("/export_organelless", export_organelless, methods=["GET"]),
             Route("/export_soma", export_soma, methods=["GET"]),
             Route("/export_annotations", export_annotations, methods=["GET"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),

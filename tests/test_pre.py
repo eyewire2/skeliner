@@ -265,7 +265,7 @@ class TestRemoveFragments:
     def test_precomputed_mask(self):
         mesh = _mesh_with_island(n_island_faces=2)
         mask = pre.find_fragments(mesh, min_faces=3)
-        clean = pre.remove_fragments(mesh, _precomputed=mask)
+        clean = pre.remove_fragments(mesh, fragments=mask)
         assert _live_faces(clean) == _live_faces(mesh) - 2
 
 
@@ -410,7 +410,7 @@ class TestRemoveGaps:
     def test_precomputed_gaps(self):
         mesh = _two_cylinders(separation=1500.0)
         gaps = pre.find_gaps(mesh)
-        result = pre.remove_gaps(mesh, _precomputed_gaps=gaps)
+        result = pre.remove_gaps(mesh, gaps=gaps)
         labels, _ = pre._face_edge_components(result)
         n_comps = len(set(labels) - {-2})
         # Should still work with precomputed gaps
