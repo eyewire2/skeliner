@@ -987,6 +987,23 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             gaps=cached_gaps,
         )
         n_after = len(new_mesh.faces)
+        n_added = n_after - n_before
+
+        # Stitch faces were appended — extend cached masks so indices stay valid
+        if n_added > 0:
+            pad = np.zeros(n_added, dtype=bool)
+            if mesh_state.get("organelles") is not None:
+                mesh_state["organelles"] = np.concatenate([mesh_state["organelles"], pad])
+            cached_stats = mesh_state.get("mesh_stats")
+            if cached_stats is not None:
+                od, fc, mc, mm = cached_stats
+                # New stitch faces: assign to main component, outward_dot=1 (external)
+                mesh_state["mesh_stats"] = (
+                    np.concatenate([od, np.ones(n_added, dtype=od.dtype)]),
+                    np.concatenate([fc, np.full(n_added, mc, dtype=fc.dtype)]),
+                    mc,
+                    np.concatenate([mm, np.ones(n_added, dtype=mm.dtype)]),
+                )
 
         _clear_annotations("gap ", "disconnected ")
         await _apply_new_mesh(new_mesh)
@@ -1285,6 +1302,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 print(f"[skeliner.pre] Using cached organelle mask ({int(cached.sum()):,} faces)")
                 return _rebuild_mesh(mesh, ~cached)
             else:
+                reason = (
+                    "no cached mask" if cached is None
+                    else f"length mismatch ({len(cached)} vs {len(mesh.faces)})" if len(cached) != len(mesh.faces)
+                    else "mask is empty"
+                )
+                print(f"[skeliner.pre] No cached organelle mask ({reason}), running detection")
                 from skeliner.pre import remove_organelles as _remove_organelles
                 return _remove_organelles(mesh, verbose=True)
 
