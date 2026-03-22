@@ -17,6 +17,8 @@ __all__ = [
     "find_gaps",
     "find_holes",
     "find_soma",
+    "preprocess",
+    "PreprocessResult",
     "remove_fins",
     "remove_fragments",
     "remove_fusions",
@@ -4361,3 +4363,94 @@ def compact_mesh(
             )
 
     return clean, vert_map, remapped_soma
+
+
+# -----------------------------------------------------------------------------
+# High-level preprocessing pipeline
+# -----------------------------------------------------------------------------
+from dataclasses import dataclass, field
+
+
+@dataclass
+class PreprocessResult:
+    """Result of :func:`preprocess` — all detection artifacts + cleaned mesh."""
+
+    mesh: trimesh.Trimesh
+    soma: Soma | None
+    organelles: np.ndarray  # bool mask on original mesh
+    fragments: np.ndarray  # bool mask on original mesh
+    disconnected: list[list[int]]
+    gaps: list
+    mesh_stats: tuple
+    vert_map: np.ndarray
+
+
+def preprocess(
+    mesh: trimesh.Trimesh,
+    *,
+    verbose: bool = False,
+) -> PreprocessResult:
+    """Run the full preprocessing pipeline in one call.
+
+    Runs detection and removal in the correct order, sharing
+    precomputed data throughout.  Returns a :class:`PreprocessResult`
+    with the cleaned mesh and all intermediate artifacts.
+
+    Pipeline order:
+      1. compute_mesh_stats
+      2. find_organelles
+      3. find_soma
+      4. find_disconnected
+      5. find_gaps
+      6. find_fragments
+      7. remove_fragments
+      8. remove_organelles
+      9. remove_gaps
+      10. compact_mesh
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    verbose : bool, default False
+        Print progress.
+
+    Returns
+    -------
+    PreprocessResult
+        Cleaned mesh and all detection artifacts.
+    """
+    # ── Detection (all on original mesh, sharing stats) ───────────
+    stats = compute_mesh_stats(mesh, verbose=verbose)
+
+    pocket, isolated = find_organelles(mesh, mesh_stats=stats, verbose=verbose)
+    organelles_mask = pocket | isolated
+
+    soma = find_soma(mesh, organelles=organelles_mask, mesh_stats=stats, verbose=verbose)
+
+    disconnected = find_disconnected(
+        mesh, soma=soma, organelles=organelles_mask, mesh_stats=stats, verbose=verbose,
+    )
+
+    gaps = find_gaps(
+        mesh, soma=soma, disconnected=disconnected, mesh_stats=stats, verbose=verbose,
+    )
+
+    fragments_mask = find_fragments(mesh, verbose=verbose)
+
+    # ── Removal (order: fragments → organelles → gaps → compact) ──
+    mesh = remove_fragments(mesh, fragments=fragments_mask, verbose=verbose)
+    mesh = remove_organelles(mesh, organelles=organelles_mask, verbose=verbose)
+    mesh = remove_gaps(mesh, gaps=gaps, verbose=verbose)
+    mesh, vert_map, soma = compact_mesh(mesh, soma=soma, verbose=verbose)
+
+    return PreprocessResult(
+        mesh=mesh,
+        soma=soma,
+        organelles=organelles_mask,
+        fragments=fragments_mask,
+        disconnected=disconnected,
+        gaps=gaps,
+        mesh_stats=stats,
+        vert_map=vert_map,
+    )

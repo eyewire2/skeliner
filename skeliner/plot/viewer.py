@@ -935,7 +935,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         gaps = await _run_with_log(
             find_gaps, mesh, verbose=True,
             soma=soma,
-            _precomputed_disconnected=cached_disc,
+            disconnected=cached_disc,
+            mesh_stats=mesh_state.get("mesh_stats"),
         )
         mesh_state["gap_clusters"] = gaps
 
@@ -981,7 +982,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         new_mesh = await _run_with_log(
             remove_gaps, mesh, verbose=True,
             soma=soma,
-            _precomputed_gaps=cached_gaps,
+            gaps=cached_gaps,
         )
         n_after = len(new_mesh.faces)
 
