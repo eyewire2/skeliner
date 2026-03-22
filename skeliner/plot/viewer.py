@@ -1201,9 +1201,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 _undo_stack.pop(0)
 
         mesh_state["mesh"] = new_mesh
-        mesh_state["organelle_mask"] = None  # invalidate caches
-        mesh_state["_organelle_precomputed"] = None
-        # Soma survives — vertex indices are preserved across face removals
+        # Organelle mask/precompute and soma survive — _rebuild_mesh
+        # preserves all face/vertex indices (degenerate faces only).
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None
         mesh_state["hole_loops"] = None
