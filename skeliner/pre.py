@@ -16,6 +16,7 @@ __all__ = [
     "find_disconnected",
     "find_gaps",
     "find_holes",
+    "find_offsets",
     "find_soma",
     "preprocess",
     "PreprocessResult",
@@ -23,6 +24,7 @@ __all__ = [
     "remove_fragments",
     "remove_fusions",
     "remove_islands",
+    "remove_offsets",
     "remove_organelles",
 ]
 
@@ -4294,6 +4296,513 @@ def remove_nucleus(
         )
 
     return clean
+
+
+# ── Offset detection and correction ─────────────────────────────────
+
+
+def _detect_z_resolution(vertices: np.ndarray) -> float:
+    """Auto-detect Z section spacing from vertex coordinates."""
+    z_unique = np.unique(np.round(vertices[:, 2], 1))
+    if len(z_unique) < 2:
+        return 1.0
+    diffs = np.diff(z_unique)
+    return float(np.median(diffs[diffs > 0.5]))
+
+
+def _cluster_xy(points: np.ndarray, radius: float) -> list[np.ndarray]:
+    """Cluster 2-D points by proximity (connected components)."""
+    if len(points) < 2:
+        return [points] if len(points) else []
+    tree = KDTree(points)
+    visited = np.zeros(len(points), dtype=bool)
+    clusters: list[np.ndarray] = []
+    for seed in range(len(points)):
+        if visited[seed]:
+            continue
+        queue = [seed]
+        visited[seed] = True
+        members = [seed]
+        while queue:
+            node = queue.pop()
+            for nb in tree.query_ball_point(points[node], r=radius):
+                if not visited[nb]:
+                    visited[nb] = True
+                    queue.append(nb)
+                    members.append(nb)
+        clusters.append(points[members])
+    return clusters
+
+
+def _match_contour_offset(
+    target: np.ndarray,
+    source: np.ndarray,
+    voxel: float,
+    search_radius: int = 10,
+) -> tuple[np.ndarray, float]:
+    """Find the XY translation that best aligns *source* onto *target*.
+
+    Searches a grid of ``±search_radius`` voxels around multiple
+    starting points (centroid difference and zero) to avoid missing
+    the true offset when centroids are skewed by outlier vertices.
+    Returns ``(offset_xy, mean_nn_distance)``.
+    """
+    init = target.mean(axis=0) - source.mean(axis=0)
+    tree = KDTree(target)
+    best_offset = init
+    best_dist = float("inf")
+
+    # Search around both the centroid difference AND zero offset
+    # to handle cases where one contour has extra vertices
+    seeds = [init, np.zeros(2)]
+    for seed in seeds:
+        for dx in np.arange(-search_radius, search_radius + 1) * voxel:
+            for dy in np.arange(-search_radius, search_radius + 1) * voxel:
+                offset = seed + np.array([dx, dy])
+                dists, _ = tree.query(source + offset)
+                mean_d = float(np.median(dists))
+                if mean_d < best_dist:
+                    best_dist = mean_d
+                    best_offset = offset
+    return best_offset, best_dist
+
+
+def find_offsets(
+    mesh: trimesh.Trimesh,
+    *,
+    verbose: bool = False,
+) -> list[dict]:
+    """Detect Z-plane alignment offsets from EM volume registration errors.
+
+    Scans the mesh for flat Z-facing cap faces that close off the tube
+    at broken Z-boundaries.  Pairs FLOOR (cap pointing up) and CEIL
+    (cap pointing down) planes into gaps, clusters cap contours by XY
+    proximity, and measures the XY offset via contour matching.
+
+    Should be run **before** any other preprocessing step.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    verbose : bool, default False
+        Print progress.
+
+    Returns
+    -------
+    list[dict]
+        Each entry describes one gap with keys:
+
+        - ``z_floor`` : float — Z of the FLOOR cap plane
+        - ``z_ceil`` : float — Z of the CEIL cap plane
+        - ``offset`` : ndarray shape ``(2,)`` — XY translation from
+          shifted side to correct side
+        - ``match_error`` : float — mean nearest-neighbour distance
+          after alignment (nm)
+        - ``shifted_verts`` : ndarray — vertex indices on the shifted
+          side (the smaller piece)
+        - ``cap_faces`` : ndarray — face indices of the flat caps at
+          both FLOOR and CEIL planes
+    """
+    normals = mesh.face_normals
+    nz = normals[:, 2]
+    centroids = mesh.triangles_center
+    n_faces = len(mesh.faces)
+
+    # ── 1. Detect Z resolution ──
+    z_res = _detect_z_resolution(mesh.vertices)
+    if verbose:
+        print(f"[skeliner.pre] Offsets: Z resolution = {z_res:.1f} nm")
+
+    # ── 2. Identify flat Z-facing faces ──
+    # Use Otsu on |nz| to find the threshold separating cap faces
+    abs_nz = np.abs(nz)
+    nz_thresh, nz_sep = _otsu_threshold(abs_nz)
+    # Cap faces must have |nz| very close to 1; enforce a minimum of 0.95
+    nz_thresh = max(nz_thresh, 0.95)
+    flat_mask = abs_nz > nz_thresh
+    if verbose:
+        print(
+            f"[skeliner.pre] Offsets: |nz| threshold = {nz_thresh:.3f} "
+            f"(Otsu sep = {nz_sep:.2f}), {flat_mask.sum():,} flat faces"
+        )
+
+    # ── 3. Bin faces by Z-plane, compute flat fraction ──
+    face_z = np.round(centroids[:, 2] / z_res) * z_res
+    total_per_z: dict[float, int] = defaultdict(int)
+    flat_per_z: dict[float, int] = defaultdict(int)
+    for fi in range(n_faces):
+        z = float(face_z[fi])
+        total_per_z[z] += 1
+        if flat_mask[fi]:
+            flat_per_z[z] += 1
+
+    # Flat fraction per Z-plane (only planes with >= 3 faces)
+    z_planes = []
+    fracs = []
+    for z in sorted(total_per_z):
+        t = total_per_z[z]
+        if t < 3:
+            continue
+        f = flat_per_z.get(z, 0) / t
+        z_planes.append(z)
+        fracs.append(f)
+    fracs_arr = np.array(fracs)
+
+    # ── 4. Find offset boundary planes using Otsu on flat fraction ──
+    frac_thresh, frac_sep = _otsu_threshold(fracs_arr)
+    # Enforce a minimum of 0.3 — below this is unlikely to be a real cap
+    frac_thresh = max(frac_thresh, 0.3)
+    if verbose:
+        print(
+            f"[skeliner.pre] Offsets: flat-fraction threshold = "
+            f"{frac_thresh:.2f} (Otsu sep = {frac_sep:.2f})"
+        )
+
+    boundary_planes: list[tuple[float, str]] = []  # (z, "FLOOR" or "CEIL")
+    for z, frac in zip(z_planes, fracs):
+        if frac <= frac_thresh:
+            continue
+        # Determine direction: count up-facing vs down-facing flat faces
+        up = 0
+        down = 0
+        for fi in range(n_faces):
+            if face_z[fi] == z and flat_mask[fi]:
+                if nz[fi] > 0:
+                    up += 1
+                else:
+                    down += 1
+        cap_type = "FLOOR" if up > down else "CEIL"
+        boundary_planes.append((z, cap_type))
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Offsets: {len(boundary_planes)} "
+            f"boundary planes"
+        )
+        for z, ct in boundary_planes:
+            t = total_per_z[z]
+            f = flat_per_z.get(z, 0)
+            print(
+                f"[skeliner.pre]   z={z:.0f} {ct} "
+                f"({f}/{t} = {f / t:.0%})"
+            )
+
+    # ── 5. Pair FLOOR → CEIL into gaps ──
+    gaps: list[tuple[float, float]] = []
+    i = 0
+    while i < len(boundary_planes):
+        z_i, type_i = boundary_planes[i]
+        if type_i == "FLOOR":
+            # Look for the next CEIL within a reasonable Z distance
+            for j in range(i + 1, len(boundary_planes)):
+                z_j, type_j = boundary_planes[j]
+                if type_j == "CEIL" and z_j - z_i < z_res * 50:
+                    gaps.append((z_i, z_j))
+                    i = j + 1
+                    break
+            else:
+                i += 1
+        else:
+            i += 1
+
+    if verbose:
+        print(f"[skeliner.pre] Offsets: {len(gaps)} FLOOR→CEIL gap pairs")
+
+    # ── 6. For each gap: cluster caps, match contours ──
+    vert_z = np.round(mesh.vertices[:, 2] / z_res) * z_res
+    cluster_radius = float(np.median(mesh.edges_unique_length)) * 20
+
+    # Precompute face connected components for same-component check
+    comp_labels, _ = _face_edge_components(mesh)
+
+    results: list[dict] = []
+    for z_floor, z_ceil in gaps:
+        # Collect cap face indices at both planes
+        cap_fi_floor = [
+            fi
+            for fi in range(n_faces)
+            if face_z[fi] == z_floor and flat_mask[fi]
+        ]
+        cap_fi_ceil = [
+            fi
+            for fi in range(n_faces)
+            if face_z[fi] == z_ceil and flat_mask[fi]
+        ]
+
+        # Get cap vertices at each Z
+        floor_vi = np.unique(mesh.faces[cap_fi_floor].ravel())
+        floor_vi = floor_vi[vert_z[floor_vi] == z_floor]
+        ceil_vi = np.unique(mesh.faces[cap_fi_ceil].ravel())
+        ceil_vi = ceil_vi[vert_z[ceil_vi] == z_ceil]
+
+        if len(floor_vi) < 3 or len(ceil_vi) < 3:
+            continue
+
+        floor_xy = mesh.vertices[floor_vi, :2]
+        ceil_xy = mesh.vertices[ceil_vi, :2]
+
+        # Cluster by XY proximity
+        floor_clusters = _cluster_xy(floor_xy, cluster_radius)
+        ceil_clusters = _cluster_xy(ceil_xy, cluster_radius)
+
+        # Match ceil → floor (so unmatched floor clusters drop)
+        used_floor: set[int] = set()
+        for cc in ceil_clusters:
+            if len(cc) < 3:
+                continue
+            cc_center = cc.mean(axis=0)
+            best_fi = -1
+            best_d = float("inf")
+            for fi_idx, fc in enumerate(floor_clusters):
+                if fi_idx in used_floor or len(fc) < 3:
+                    continue
+                d = float(np.linalg.norm(fc.mean(axis=0) - cc_center))
+                if d < best_d:
+                    best_d = d
+                    best_fi = fi_idx
+            if best_fi < 0:
+                continue
+            used_floor.add(best_fi)
+            fc = floor_clusters[best_fi]
+
+            # If the floor cluster has vertices far from the ceiling,
+            # keep only those within the ceiling's own extent
+            ceil_extent = np.linalg.norm(cc - cc_center, axis=1).max()
+            fc_dists_to_ceil = np.linalg.norm(fc - cc_center, axis=1)
+            near_mask = fc_dists_to_ceil < ceil_extent * 3
+            if near_mask.sum() >= 3:
+                fc = fc[near_mask]
+            fc_center = fc.mean(axis=0)
+
+            # Measure offset via shape matching
+            offset, err = _match_contour_offset(cc, fc, z_res)
+
+            # Skip if floor and ceil caps share a mesh component
+            floor_cap_in_branch = [
+                fi for fi in cap_fi_floor
+                if np.linalg.norm(centroids[fi, :2] - fc_center)
+                < cluster_radius
+            ]
+            ceil_cap_in_branch = [
+                fi for fi in cap_fi_ceil
+                if np.linalg.norm(centroids[fi, :2] - cc_center)
+                < cluster_radius
+            ]
+            if floor_cap_in_branch and ceil_cap_in_branch:
+                floor_comps = set(
+                    int(comp_labels[fi]) for fi in floor_cap_in_branch
+                    if comp_labels[fi] >= 0
+                )
+                ceil_comps = set(
+                    int(comp_labels[fi]) for fi in ceil_cap_in_branch
+                    if comp_labels[fi] >= 0
+                )
+                if floor_comps & ceil_comps:
+                    if verbose:
+                        print(
+                            f"[skeliner.pre]   Gap z={z_floor:.0f}"
+                            f"→{z_ceil:.0f}: skipped "
+                            f"(same component {floor_comps & ceil_comps})"
+                        )
+                    continue
+
+            # Skip if floor and ceil differ too much in size
+            size_ratio = len(fc) / len(cc) if len(cc) > 0 else 0
+            if size_ratio > 5 or size_ratio < 0.2:
+                if verbose:
+                    print(
+                        f"[skeliner.pre]   Gap z={z_floor:.0f}"
+                        f"→{z_ceil:.0f}: skipped "
+                        f"(size mismatch {len(fc)}v vs {len(cc)}v)"
+                    )
+                continue
+
+            # The floor and ceil caps are in different components.
+            # The smaller component is the shifted piece — move all
+            # its vertices.
+            cc_center = cc.mean(axis=0)
+            floor_cap_comps = set(
+                int(comp_labels[fi]) for fi in floor_cap_in_branch
+                if comp_labels[fi] >= 0
+            )
+            ceil_cap_comps = set(
+                int(comp_labels[fi]) for fi in ceil_cap_in_branch
+                if comp_labels[fi] >= 0
+            )
+
+            # Count faces in each side's component(s)
+            floor_comp_size = sum(
+                int((comp_labels == c).sum()) for c in floor_cap_comps
+            )
+            ceil_comp_size = sum(
+                int((comp_labels == c).sum()) for c in ceil_cap_comps
+            )
+
+            if floor_comp_size <= ceil_comp_size:
+                shifted_side = "below"
+                shifted_comps = floor_cap_comps
+            else:
+                shifted_side = "above"
+                shifted_comps = ceil_cap_comps
+
+            # All vertices in the shifted component(s)
+            shifted_face_mask = np.zeros(n_faces, dtype=bool)
+            for c in shifted_comps:
+                shifted_face_mask |= (comp_labels == c)
+            shifted_vi = np.unique(
+                mesh.faces[shifted_face_mask].ravel()
+            )
+
+            # Cap faces within this branch
+            branch_cap_fi = (
+                floor_cap_in_branch + ceil_cap_in_branch
+            )
+            cap_faces = np.array(branch_cap_fi, dtype=np.intp)
+
+            # Arrow: from floor position to corrected position
+            # (floor_center + offset = where it should move to)
+            floor_pos = np.array(
+                [fc_center[0], fc_center[1], z_floor]
+            )
+            corrected_pos = np.array(
+                [fc_center[0] + offset[0],
+                 fc_center[1] + offset[1], z_ceil]
+            )
+
+            results.append(
+                {
+                    "z_floor": z_floor,
+                    "z_ceil": z_ceil,
+                    "offset": offset,
+                    "match_error": err,
+                    "shifted_verts": shifted_vi,
+                    "shifted_side": shifted_side,
+                    "cap_faces": cap_faces,
+                    "floor_center": floor_pos,
+                    "ceil_center": corrected_pos,
+                }
+            )
+
+            if verbose:
+                print(
+                    f"[skeliner.pre]   Gap z={z_floor:.0f}→{z_ceil:.0f}: "
+                    f"offset=({offset[0]:.0f}, {offset[1]:.0f}), "
+                    f"error={err:.0f}, shifted={shifted_side} "
+                    f"({len(shifted_vi):,} verts)"
+                )
+
+    if verbose:
+        print(f"[skeliner.pre] Offsets: {len(results)} offsets detected")
+
+    return results
+
+
+def remove_offsets(
+    mesh: trimesh.Trimesh,
+    *,
+    offsets: list[dict] | None = None,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Correct vertex positions for detected Z-plane alignment offsets.
+
+    Translates vertices on the shifted side of each gap by the inverse
+    offset vector, then removes the flat cap faces at the gap boundaries.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    offsets : list[dict] or None
+        Pre-computed offsets from :func:`find_offsets`.  If None,
+        ``find_offsets`` is called automatically.
+    verbose : bool, default False
+        Print progress.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with offset vertices realigned and cap faces removed.
+    """
+    if offsets is None:
+        offsets = find_offsets(mesh, verbose=verbose)
+
+    if not offsets:
+        if verbose:
+            print("[skeliner.pre] No offsets to correct")
+        return mesh
+
+    new_verts = mesh.vertices.copy()
+    caps_to_remove: set[int] = set()
+
+    # Sort offsets by Z so we process from the outermost gap inward.
+    # "below" offsets: process from lowest z_floor first (outermost)
+    # "above" offsets: process from highest z_ceil first (outermost)
+    # Each correction is cumulative — once a layer is corrected,
+    # all layers beyond it must also shift by the same amount.
+    below_offsets = sorted(
+        [r for r in offsets if r.get("shifted_side") == "below"],
+        key=lambda r: r["z_floor"],
+    )
+    above_offsets = sorted(
+        [r for r in offsets if r.get("shifted_side") == "above"],
+        key=lambda r: -r["z_ceil"],
+    )
+
+    # Track cumulative correction per vertex
+    # Process "below" offsets: floor side is shifted, move by +offset
+    for rec in below_offsets:
+        offset = rec["offset"]
+        shifted = rec["shifted_verts"]
+        new_verts[shifted, 0] += offset[0]
+        new_verts[shifted, 1] += offset[1]
+        caps_to_remove.update(rec["cap_faces"].tolist())
+
+        if verbose:
+            print(
+                f"[skeliner.pre]   Corrected z={rec['z_floor']:.0f}"
+                f"→{rec['z_ceil']:.0f} (below): "
+                f"moved {len(shifted):,} verts by "
+                f"({offset[0]:.0f}, {offset[1]:.0f})"
+            )
+
+    # Process "above" offsets: ceil side is shifted, move by -offset
+    for rec in above_offsets:
+        offset = rec["offset"]
+        shifted = rec["shifted_verts"]
+        new_verts[shifted, 0] -= offset[0]
+        new_verts[shifted, 1] -= offset[1]
+        caps_to_remove.update(rec["cap_faces"].tolist())
+
+        if verbose:
+            print(
+                f"[skeliner.pre]   Corrected z={rec['z_floor']:.0f}"
+                f"→{rec['z_ceil']:.0f} (above): "
+                f"moved {len(shifted):,} verts by "
+                f"({-offset[0]:.0f}, {-offset[1]:.0f})"
+            )
+
+    # Remove cap faces
+    keep = np.ones(len(mesh.faces), dtype=bool)
+    for fi in caps_to_remove:
+        keep[fi] = False
+
+    new_faces = mesh.faces.copy()
+    new_faces[~keep] = 0
+
+    result = trimesh.Trimesh(
+        vertices=new_verts,
+        faces=new_faces,
+        process=False,
+    )
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Offsets: corrected {len(offsets)} offsets, "
+            f"removed {len(caps_to_remove):,} cap faces"
+        )
+
+    return result
 
 
 def compact_mesh(

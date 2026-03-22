@@ -203,6 +203,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "buffers": None,        # JSON-serialisable mesh data
         "path": None,           # source file path
         "centroid": np.zeros(3, dtype=np.float32),
+        "offsets": None, # cached from detect_offsets
         "mesh_stats": None, # cached from compute_mesh_stats
         "organelles": None, # cached from detect_organelles
         "fusion_clusters": None, # cached from detect_fusions
@@ -676,6 +677,105 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             current = json.loads(state_path.read_text(encoding="utf-8"))
         current["selection"] = body
         state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+        return JSONResponse({"ok": True})
+
+    async def detect_offsets(request):
+        """Run offset detection and write results to annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import find_offsets
+
+        mesh = mesh_state["mesh"]
+        await _log("[skeliner.pre] Detecting offsets...")
+        offsets = await _run_with_log(find_offsets, mesh, verbose=True)
+        mesh_state["offsets"] = offsets
+
+        if not offsets:
+            await _log("[skeliner.pre] No offsets found")
+            return JSONResponse({"ok": True, "nOffsets": 0})
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+        if "edge_groups" not in ann:
+            ann["edge_groups"] = []
+
+        # Clear previous offset annotations
+        ann["highlights"] = [
+            h for h in ann["highlights"]
+            if not h.get("label", "").startswith("offset ")
+        ]
+        ann["edge_groups"] = [
+            eg for eg in ann["edge_groups"]
+            if not eg.get("label", "").startswith("offset ")
+        ]
+
+        colors = [
+            [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
+            [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
+        ]
+
+        for i, o in enumerate(offsets):
+            dx, dy = o["offset"]
+            color = colors[i % len(colors)]
+            ann["highlights"].append({
+                "faces": o["cap_faces"].tolist(),
+                "color": color,
+                "label": (
+                    f"offset {i}: z={o['z_floor']:.0f}→{o['z_ceil']:.0f} "
+                    f"d=({dx:.0f},{dy:.0f}) "
+                    f"err={o['match_error']:.0f} "
+                    f"{len(o['shifted_verts']):,}v"
+                ),
+            })
+
+            # Add a direction vector: red (floor) → green (ceil)
+            # Coordinates must be centroid-relative for the viewer
+            centroid = mesh_state["centroid"]
+            start = (o["floor_center"] - centroid).tolist()
+            end = (o["ceil_center"] - centroid).tolist()
+            midpt = [(s + e) / 2 for s, e in zip(start, end)]
+            ann["edge_groups"].append({
+                "segments": [[start, midpt]],
+                "color": [1.0, 0.2, 0.2],
+                "label": f"offset {i} from",
+            })
+            ann["edge_groups"].append({
+                "segments": [[midpt, end]],
+                "color": [0.2, 1.0, 0.2],
+                "label": f"offset {i} to",
+            })
+
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        return JSONResponse({"ok": True, "nOffsets": len(offsets)})
+
+    async def do_remove_offsets(request):
+        """Remove detected offsets from the mesh."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import remove_offsets
+
+        mesh = mesh_state["mesh"]
+        cached = mesh_state.get("offsets")
+
+        def _do_remove():
+            return remove_offsets(mesh, offsets=cached, verbose=True)
+
+        new_mesh = await _run_with_log(_do_remove)
+        await _apply_new_mesh(new_mesh)
+
+        # Clear cached offsets
+        mesh_state["offsets"] = None
+        mesh_state["mesh_stats"] = None
+
         return JSONResponse({"ok": True})
 
     async def detect_organelles(request):
@@ -2170,6 +2270,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove", remove_item, methods=["POST"]),
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),
+            Route("/detect_offsets", detect_offsets, methods=["POST"]),
+            Route("/remove_offsets", do_remove_offsets, methods=["POST"]),
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
             Route("/check_fusion", check_fusion, methods=["POST"]),
             Route("/detect_fusions", detect_fusions, methods=["POST"]),
