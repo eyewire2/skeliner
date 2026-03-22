@@ -278,7 +278,7 @@
                 <button id="detectFragmentsBtn" style="margin-left: 4px">Fragments</button>
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
                 <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
-                <button id="detectRimsBtn" style="margin-left: 4px">Rims</button>
+
                 <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
@@ -662,7 +662,6 @@ let meshCentroid = [0, 0, 0];
                         else runDetectOrganellesType(type);
                     })
                 );
-                document.getElementById("detectRimsBtn").addEventListener("click", runDetectRims);
                 document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
                 document.getElementById("detectFragmentsBtn").addEventListener("click", runDetectFragments);
@@ -2423,7 +2422,7 @@ let meshCentroid = [0, 0, 0];
                         edgeGroupMeshes.push(line);
                     }
                 }
-                // Ellipsoids (wireframe)
+                // Ellipsoids (wireframe) — attach to the highlight with matching label
                 if (annotations.ellipsoids) {
                     for (const ell of annotations.ellipsoids) {
                         const c = ell.center || [0, 0, 0];
@@ -2439,7 +2438,6 @@ let meshCentroid = [0, 0, 0];
                             depthTest: true,
                         });
                         const m = new THREE.Mesh(geo, mat);
-                        // Apply scale (axes) then rotation (R columns are principal axes)
                         const mtx = new THREE.Matrix4();
                         mtx.set(
                             R[0][0]*axes[0], R[0][1]*axes[1], R[0][2]*axes[2], c[0],
@@ -2449,6 +2447,13 @@ let meshCentroid = [0, 0, 0];
                         );
                         m.applyMatrix4(mtx);
                         scene.add(m);
+                        // Link to matching highlight by color so toggle/delete applies to both
+                        const hlIdx = (annotations.highlights || []).findIndex(
+                            h => h.color && h.color[0] === color[0] && h.color[1] === color[1] && h.color[2] === color[2]
+                        );
+                        if (hlIdx >= 0 && annotationMeshes[hlIdx]) {
+                            annotationMeshes[hlIdx]._linkedEllipsoid = m;
+                        }
                         markerMeshes.push(m);
                     }
                 }
@@ -2617,8 +2622,12 @@ let meshCentroid = [0, 0, 0];
                         toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
                         toggleBtn.addEventListener("click", () => {
                             if (!annotationMeshes[idx]) return;
-                            annotationMeshes[idx].visible = !annotationMeshes[idx].visible;
-                            toggleBtn.textContent = annotationMeshes[idx].visible ? "hide" : "show";
+                            const vis = !annotationMeshes[idx].visible;
+                            annotationMeshes[idx].visible = vis;
+                            if (annotationMeshes[idx]._linkedEllipsoid) {
+                                annotationMeshes[idx]._linkedEllipsoid.visible = vis;
+                            }
+                            toggleBtn.textContent = vis ? "hide" : "show";
                             _saveAnnVisibility();
                         });
                         div.appendChild(toggleBtn);
@@ -2760,9 +2769,25 @@ let meshCentroid = [0, 0, 0];
 
             function removeAnnotationGroup(idx) {
                 if (!currentAnnotations || !currentAnnotations.highlights) return;
+                const removed = currentAnnotations.highlights[idx];
                 currentAnnotations.highlights.splice(idx, 1);
-                // Remove from scene
+                // Remove linked ellipsoid from annotations if color matches
+                if (removed && removed.color && currentAnnotations.ellipsoids) {
+                    const rc = removed.color;
+                    currentAnnotations.ellipsoids = currentAnnotations.ellipsoids.filter(
+                        e => !(e.color && e.color[0] === rc[0] && e.color[1] === rc[1] && e.color[2] === rc[2])
+                    );
+                }
+                // Remove from scene (including linked ellipsoid)
                 if (annotationMeshes[idx]) {
+                    const linked = annotationMeshes[idx]._linkedEllipsoid;
+                    if (linked) {
+                        scene.remove(linked);
+                        linked.geometry.dispose();
+                        linked.material.dispose();
+                        const mi = markerMeshes.indexOf(linked);
+                        if (mi >= 0) markerMeshes.splice(mi, 1);
+                    }
                     scene.remove(annotationMeshes[idx]);
                     annotationMeshes[idx].geometry.dispose();
                     annotationMeshes[idx].material.dispose();

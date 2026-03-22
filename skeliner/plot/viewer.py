@@ -1518,14 +1518,21 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         face_map = np.full(n_faces_before, -1, dtype=np.int64)
         face_map[good] = np.arange(int(good.sum()), dtype=np.int64)
 
+        # Compute new centroid and the delta from old
+        old_centroid = mesh_state["centroid"].copy()
+        buffers = _mesh_to_buffers(clean)
+        new_centroid = np.asarray(buffers["centroid"], dtype=np.float32)
+        delta = (old_centroid - new_centroid).tolist()
+
         # Remap annotations
         if annotations_path.exists():
             ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+
+            # Remap face-indexed highlights
             if "highlights" in ann:
                 new_highlights = []
                 for h in ann["highlights"]:
                     old_faces = np.array(h.get("faces", []), dtype=np.int64)
-                    # Filter to valid range and remap
                     valid = old_faces < n_faces_before
                     mapped = face_map[old_faces[valid]]
                     new_faces = mapped[mapped >= 0].tolist()
@@ -1534,6 +1541,20 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                         h["faces"] = new_faces
                         new_highlights.append(h)
                 ann["highlights"] = new_highlights
+
+            # Shift ellipsoid centers by centroid delta
+            for ell in ann.get("ellipsoids", []):
+                c = ell["center"]
+                ell["center"] = [c[0] + delta[0], c[1] + delta[1], c[2] + delta[2]]
+
+            # Shift edge group segments by centroid delta
+            for eg in ann.get("edge_groups", []):
+                for seg in eg.get("segments", []):
+                    for pt in seg:
+                        pt[0] += delta[0]
+                        pt[1] += delta[1]
+                        pt[2] += delta[2]
+
             annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
         # Update state — compact is destructive, clear all cached face-indexed data
@@ -1546,9 +1567,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh_state["gap_clusters"] = None
         mesh_state["hole_loops"] = None
 
-        buffers = _mesh_to_buffers(clean)
         mesh_state["buffers"] = buffers
-        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+        mesh_state["centroid"] = new_centroid
         buffers["keepCamera"] = True
         await broadcast({"type": "mesh_loaded", "payload": buffers})
         await broadcast({"type": "annotations_updated"})
