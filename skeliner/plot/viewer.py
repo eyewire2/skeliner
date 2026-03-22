@@ -1494,6 +1494,92 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "undoRemaining": len(_undo_stack),
         })
 
+    async def do_compact_mesh(request):
+        """Compact mesh: remove degenerate faces, reindex vertices, remap annotations."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import compact_mesh
+
+        mesh = mesh_state["mesh"]
+        soma = mesh_state.get("soma")
+        n_faces_before = len(mesh.faces)
+        n_verts_before = len(mesh.vertices)
+
+        def _run():
+            return compact_mesh(mesh, soma=soma, verbose=True)
+
+        clean, vert_map, remapped_soma = await _run_with_log(_run)
+
+        # Build face map: old face index → new face index (or -1)
+        good = ~np.all(mesh.faces == mesh.faces[:, :1], axis=1)
+        face_map = np.full(n_faces_before, -1, dtype=np.int64)
+        face_map[good] = np.arange(int(good.sum()), dtype=np.int64)
+
+        # Remap annotations
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+            if "highlights" in ann:
+                new_highlights = []
+                for h in ann["highlights"]:
+                    old_faces = np.array(h.get("faces", []), dtype=np.int64)
+                    # Filter to valid range and remap
+                    valid = old_faces < n_faces_before
+                    mapped = face_map[old_faces[valid]]
+                    new_faces = mapped[mapped >= 0].tolist()
+                    if new_faces:
+                        h = dict(h)
+                        h["faces"] = new_faces
+                        new_highlights.append(h)
+                ann["highlights"] = new_highlights
+            annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+
+        # Update state — compact is destructive, clear all cached face-indexed data
+        mesh_state["mesh"] = clean
+        mesh_state["soma"] = remapped_soma
+        mesh_state["organelles"] = None
+        mesh_state["mesh_stats"] = None
+        mesh_state["fusion_clusters"] = None
+        mesh_state["disconnected"] = None
+        mesh_state["gap_clusters"] = None
+        mesh_state["hole_loops"] = None
+
+        buffers = _mesh_to_buffers(clean)
+        mesh_state["buffers"] = buffers
+        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+        buffers["keepCamera"] = True
+        await broadcast({"type": "mesh_loaded", "payload": buffers})
+        await broadcast({"type": "annotations_updated"})
+
+        # Re-send skeletons
+        for sname, sstate in skeleton_states.items():
+            if sstate.get("l2_graph"):
+                sstate["buffers"] = _l2_graph_to_buffers(
+                    Path(sstate["path"]), mesh_state["centroid"]
+                )
+            else:
+                sstate["buffers"] = _skeleton_to_buffers(
+                    sstate["skeleton"], mesh_state["centroid"]
+                )
+            sstate["buffers"]["color"] = sstate["color"]
+            await broadcast({"type": "skeleton_loaded", "payload": {
+                "name": sname, **sstate["buffers"]
+            }})
+
+        print(
+            f"Compact: {n_verts_before:,} → {len(clean.vertices):,} verts, "
+            f"{n_faces_before:,} → {len(clean.faces):,} faces"
+        )
+        return JSONResponse({
+            "ok": True,
+            "vertsBefore": n_verts_before,
+            "vertsAfter": len(clean.vertices),
+            "facesBefore": n_faces_before,
+            "facesAfter": len(clean.faces),
+        })
+
     async def export_mesh(request):
         """Export the current mesh as a downloadable OBJ file."""
         from starlette.responses import Response
@@ -2080,6 +2166,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
+            Route("/compact_mesh", do_compact_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
             Route("/export_mesh_stats", export_mesh_stats, methods=["GET"]),
