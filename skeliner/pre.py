@@ -4476,17 +4476,11 @@ def find_offsets(
         boundary_planes.append((z, cap_type))
 
     if verbose:
-        print(
-            f"[skeliner.pre] Offsets: {len(boundary_planes)} "
-            f"boundary planes"
-        )
+        print(f"[skeliner.pre] Offsets: {len(boundary_planes)} boundary planes")
         for z, ct in boundary_planes:
             t = total_per_z[z]
             f = flat_per_z.get(z, 0)
-            print(
-                f"[skeliner.pre]   z={z:.0f} {ct} "
-                f"({f}/{t} = {f / t:.0%})"
-            )
+            print(f"[skeliner.pre]   z={z:.0f} {ct} ({f}/{t} = {f / t:.0%})")
 
     # ── 5. Pair FLOOR → CEIL into gaps ──
     gaps: list[tuple[float, float]] = []
@@ -4520,14 +4514,10 @@ def find_offsets(
     for z_floor, z_ceil in gaps:
         # Collect cap face indices at both planes
         cap_fi_floor = [
-            fi
-            for fi in range(n_faces)
-            if face_z[fi] == z_floor and flat_mask[fi]
+            fi for fi in range(n_faces) if face_z[fi] == z_floor and flat_mask[fi]
         ]
         cap_fi_ceil = [
-            fi
-            for fi in range(n_faces)
-            if face_z[fi] == z_ceil and flat_mask[fi]
+            fi for fi in range(n_faces) if face_z[fi] == z_ceil and flat_mask[fi]
         ]
 
         # Get cap vertices at each Z
@@ -4580,22 +4570,24 @@ def find_offsets(
 
             # Skip if floor and ceil caps share a mesh component
             floor_cap_in_branch = [
-                fi for fi in cap_fi_floor
-                if np.linalg.norm(centroids[fi, :2] - fc_center)
-                < cluster_radius
+                fi
+                for fi in cap_fi_floor
+                if np.linalg.norm(centroids[fi, :2] - fc_center) < cluster_radius
             ]
             ceil_cap_in_branch = [
-                fi for fi in cap_fi_ceil
-                if np.linalg.norm(centroids[fi, :2] - cc_center)
-                < cluster_radius
+                fi
+                for fi in cap_fi_ceil
+                if np.linalg.norm(centroids[fi, :2] - cc_center) < cluster_radius
             ]
             if floor_cap_in_branch and ceil_cap_in_branch:
                 floor_comps = set(
-                    int(comp_labels[fi]) for fi in floor_cap_in_branch
+                    int(comp_labels[fi])
+                    for fi in floor_cap_in_branch
                     if comp_labels[fi] >= 0
                 )
                 ceil_comps = set(
-                    int(comp_labels[fi]) for fi in ceil_cap_in_branch
+                    int(comp_labels[fi])
+                    for fi in ceil_cap_in_branch
                     if comp_labels[fi] >= 0
                 )
                 if floor_comps & ceil_comps:
@@ -4623,11 +4615,13 @@ def find_offsets(
             # its vertices.
             cc_center = cc.mean(axis=0)
             floor_cap_comps = set(
-                int(comp_labels[fi]) for fi in floor_cap_in_branch
+                int(comp_labels[fi])
+                for fi in floor_cap_in_branch
                 if comp_labels[fi] >= 0
             )
             ceil_cap_comps = set(
-                int(comp_labels[fi]) for fi in ceil_cap_in_branch
+                int(comp_labels[fi])
+                for fi in ceil_cap_in_branch
                 if comp_labels[fi] >= 0
             )
 
@@ -4635,9 +4629,7 @@ def find_offsets(
             floor_comp_size = sum(
                 int((comp_labels == c).sum()) for c in floor_cap_comps
             )
-            ceil_comp_size = sum(
-                int((comp_labels == c).sum()) for c in ceil_cap_comps
-            )
+            ceil_comp_size = sum(int((comp_labels == c).sum()) for c in ceil_cap_comps)
 
             if floor_comp_size <= ceil_comp_size:
                 shifted_side = "below"
@@ -4649,25 +4641,18 @@ def find_offsets(
             # All vertices in the shifted component(s)
             shifted_face_mask = np.zeros(n_faces, dtype=bool)
             for c in shifted_comps:
-                shifted_face_mask |= (comp_labels == c)
-            shifted_vi = np.unique(
-                mesh.faces[shifted_face_mask].ravel()
-            )
+                shifted_face_mask |= comp_labels == c
+            shifted_vi = np.unique(mesh.faces[shifted_face_mask].ravel())
 
             # Cap faces within this branch
-            branch_cap_fi = (
-                floor_cap_in_branch + ceil_cap_in_branch
-            )
+            branch_cap_fi = floor_cap_in_branch + ceil_cap_in_branch
             cap_faces = np.array(branch_cap_fi, dtype=np.intp)
 
             # Arrow: from floor position to corrected position
             # (floor_center + offset = where it should move to)
-            floor_pos = np.array(
-                [fc_center[0], fc_center[1], z_floor]
-            )
+            floor_pos = np.array([fc_center[0], fc_center[1], z_floor])
             corrected_pos = np.array(
-                [fc_center[0] + offset[0],
-                 fc_center[1] + offset[1], z_ceil]
+                [fc_center[0] + offset[0], fc_center[1] + offset[1], z_ceil]
             )
 
             results.append(
@@ -4739,12 +4724,42 @@ def remove_offsets(
     # its ceiling. Centroid is restored at the end.
     sorted_offsets = sorted(offsets, key=lambda r: r["z_ceil"])
 
+    tile_size = 32768
+    vert_tx = (mesh.vertices[:, 0] // tile_size).astype(int)
+    vert_ty = (mesh.vertices[:, 1] // tile_size).astype(int)
+
     for rec in sorted_offsets:
         offset_xy = rec["offset"]
         z_floor = rec["z_floor"]
         z_ceil = rec["z_ceil"]
 
-        below_mask = new_verts[:, 2] < z_ceil - z_res * 0.5
+        # Start with the gap's tile
+        floor_xy = rec["floor_center"][:2]
+        gap_tx = int(floor_xy[0] // tile_size)
+        gap_ty = int(floor_xy[1] // tile_size)
+        corrected_tiles = {(gap_tx, gap_ty)}
+
+        in_tile = (vert_tx == gap_tx) & (vert_ty == gap_ty)
+        below_mask = in_tile & (new_verts[:, 2] < z_ceil - z_res * 0.5)
+
+        # Expand: faces spanning tile boundary → add their tiles
+        face_any = below_mask[mesh.faces].any(axis=1)
+        face_all = below_mask[mesh.faces].all(axis=1)
+        mixed = face_any & ~face_all
+        if mixed.any():
+            for fi in np.where(mixed)[0]:
+                f = mesh.faces[fi]
+                for vi in f:
+                    if not below_mask[vi] and new_verts[vi, 2] < z_ceil - z_res * 0.5:
+                        t = (int(vert_tx[vi]), int(vert_ty[vi]))
+                        if t not in corrected_tiles:
+                            corrected_tiles.add(t)
+            # Rebuild mask with expanded tiles
+            in_tiles = np.zeros(len(mesh.vertices), dtype=bool)
+            for tx, ty in corrected_tiles:
+                in_tiles |= (vert_tx == tx) & (vert_ty == ty)
+            below_mask = in_tiles & (new_verts[:, 2] < z_ceil - z_res * 0.5)
+
         n_moved = int(below_mask.sum())
         if n_moved == 0:
             continue
@@ -4782,7 +4797,7 @@ def remove_offsets(
     new_faces = mesh.faces.copy()
     new_faces[~keep] = 0
 
-    # Restore global position: move centroid back to original
+    # Restore global position
     orig_centroid = mesh.vertices.mean(axis=0)
     new_centroid = new_verts.mean(axis=0)
     new_verts += orig_centroid - new_centroid
@@ -4943,14 +4958,24 @@ def preprocess(
     pocket, isolated = find_organelles(mesh, mesh_stats=stats, verbose=verbose)
     organelles_mask = pocket | isolated
 
-    soma = find_soma(mesh, organelles=organelles_mask, mesh_stats=stats, verbose=verbose)
+    soma = find_soma(
+        mesh, organelles=organelles_mask, mesh_stats=stats, verbose=verbose
+    )
 
     disconnected = find_disconnected(
-        mesh, soma=soma, organelles=organelles_mask, mesh_stats=stats, verbose=verbose,
+        mesh,
+        soma=soma,
+        organelles=organelles_mask,
+        mesh_stats=stats,
+        verbose=verbose,
     )
 
     gaps = find_gaps(
-        mesh, soma=soma, disconnected=disconnected, mesh_stats=stats, verbose=verbose,
+        mesh,
+        soma=soma,
+        disconnected=disconnected,
+        mesh_stats=stats,
+        verbose=verbose,
     )
 
     fragments_mask = find_fragments(mesh, verbose=verbose)
