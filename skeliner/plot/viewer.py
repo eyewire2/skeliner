@@ -1654,7 +1654,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             headers={"Content-Disposition": f'attachment; filename="{prefix}mesh_stats.npz"'},
         )
 
-    async def export_organelless(request):
+    async def export_organelles(request):
         """Save organelle masks (pocket, isolated) + precomputed data."""
         from starlette.responses import Response
         import tempfile
@@ -1695,7 +1695,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}organelless.npz"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}organelles.npz"'},
         )
 
     async def export_soma(request):
@@ -2190,7 +2190,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
             Route("/export_mesh_stats", export_mesh_stats, methods=["GET"]),
-            Route("/export_organelless", export_organelless, methods=["GET"]),
+            Route("/export_organelles", export_organelles, methods=["GET"]),
             Route("/export_soma", export_soma, methods=["GET"]),
             Route("/export_annotations", export_annotations, methods=["GET"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),

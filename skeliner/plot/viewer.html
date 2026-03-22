@@ -1779,7 +1779,7 @@ let meshCentroid = [0, 0, 0];
                     }
                     if (mode === "org_masks" || mode === "all") {
                         try {
-                            saved.push(await downloadFile(`/export_organelle_masks?prefix=${pfx}`));
+                            saved.push(await downloadFile(`/export_organelles?prefix=${pfx}`));
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }
