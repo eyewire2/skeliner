@@ -4734,77 +4734,54 @@ def remove_offsets(
 
     z_res = _detect_z_resolution(mesh.vertices)
     new_verts = mesh.vertices.copy()
-    caps_to_remove: set[int] = set()
 
-    # The ceiling is the anchor (correct). Everything below it moves.
-    # Process from highest z_ceil to lowest (top to bottom) so that
-    # corrections accumulate: each gap shifts everything below,
-    # including layers already corrected by higher gaps.
-    sorted_offsets = sorted(offsets, key=lambda r: -r["z_ceil"])
+    # Process bottom to top. For each gap, move EVERYTHING
+    # below the ceiling. Vertices below multiple ceilings get
+    # moved multiple times (cumulative).
+    sorted_offsets = sorted(offsets, key=lambda r: r["z_ceil"])
 
     for rec in sorted_offsets:
         offset_xy = rec["offset"]
         z_floor = rec["z_floor"]
         z_ceil = rec["z_ceil"]
 
-        # 3D correction: XY from contour matching, Z to close the gap.
-        # Compute dz from current positions (after previous corrections)
-        # so that Z corrections don't over-accumulate.
-        below_ceil = new_verts[:, 2] < z_ceil - z_res * 0.5
-        tile_size = 32768
-        floor_xy = rec["floor_center"][:2]
-        tile_x = int(np.floor(floor_xy[0] / tile_size))
-        tile_y = int(np.floor(floor_xy[1] / tile_size))
-        # Include the cap tile and all adjacent tiles (3x3)
-        vert_tx = (new_verts[:, 0] // tile_size).astype(int)
-        vert_ty = (new_verts[:, 1] // tile_size).astype(int)
-        in_tiles = np.zeros(len(new_verts), dtype=bool)
-        for dtx in (-1, 0, 1):
-            for dty in (-1, 0, 1):
-                in_tiles |= (
-                    (vert_tx == tile_x + dtx)
-                    & (vert_ty == tile_y + dty)
-                )
-        candidates = in_tiles & below_ceil
-        if candidates.any():
-            current_floor_z = new_verts[candidates, 2].max()
-            dz = z_ceil - current_floor_z - z_res
-            if dz < 0:
-                dz = 0.0
-        else:
-            dz = 0.0
-        correction = np.array([offset_xy[0], offset_xy[1], dz])
-
-        # Reuse the already-computed tile + Z mask
-        below = candidates
-        n_moved = int(below.sum())
-
+        below_mask = new_verts[:, 2] < z_ceil - z_res * 0.5
+        n_moved = int(below_mask.sum())
         if n_moved == 0:
             continue
 
-        new_verts[below] += correction
-        caps_to_remove.update(rec["cap_faces"].tolist())
-
-        # Remove faces that bridge the boundary (vertices on both
-        # sides) — these get distorted by the shift
-        face_below = below[mesh.faces]  # (nFaces, 3) bool
-        bridging = face_below.any(axis=1) & ~face_below.all(axis=1)
-        caps_to_remove.update(np.where(bridging)[0].tolist())
+        dz = z_ceil - z_floor - z_res
+        if dz < 0:
+            dz = 0.0
+        new_verts[below_mask, 0] += offset_xy[0]
+        new_verts[below_mask, 1] += offset_xy[1]
+        new_verts[below_mask, 2] += dz
 
         if verbose:
             print(
                 f"[skeliner.pre]   Corrected z={z_floor:.0f}"
                 f"→{z_ceil:.0f}: "
                 f"moved {n_moved:,} verts by "
-                f"({correction[0]:.0f}, {correction[1]:.0f}, "
-                f"{correction[2]:.0f})"
+                f"({offset_xy[0]:.0f}, {offset_xy[1]:.0f}, "
+                f"{dz:.0f})"
             )
 
-    # Remove cap faces
+    # Remove flat cap faces at all gap Z-planes
+    nz_abs = np.abs(mesh.face_normals[:, 2])
+    face_z = np.round(mesh.triangles_center[:, 2] / z_res) * z_res
     keep = np.ones(len(mesh.faces), dtype=bool)
-    for fi in caps_to_remove:
-        keep[fi] = False
+    for rec in offsets:
+        for z in [rec["z_floor"], rec["z_ceil"]]:
+            keep[(face_z == z) & (nz_abs > 0.95)] = False
 
+    # Remove distorted faces (vertices moved by different amounts)
+    total_diff = new_verts - mesh.vertices
+    fd = total_diff[mesh.faces]
+    same_01 = np.all(np.abs(fd[:, 0] - fd[:, 1]) < 0.1, axis=1)
+    same_12 = np.all(np.abs(fd[:, 1] - fd[:, 2]) < 0.1, axis=1)
+    keep[~(same_01 & same_12)] = False
+
+    n_removed = int((~keep).sum())
     new_faces = mesh.faces.copy()
     new_faces[~keep] = 0
 
@@ -4817,7 +4794,7 @@ def remove_offsets(
     if verbose:
         print(
             f"[skeliner.pre] Offsets: corrected {len(offsets)} offsets, "
-            f"removed {len(caps_to_remove):,} cap faces"
+            f"removed {n_removed:,} faces"
         )
 
     return result
