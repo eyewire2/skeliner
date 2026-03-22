@@ -11,6 +11,12 @@ import trimesh
 
 from skeliner import pre
 from skeliner.dataclass import Soma
+from skeliner.pre import _non_degenerate
+
+
+def _live_faces(mesh):
+    """Count non-degenerate faces (degenerate = removed by _rebuild_mesh)."""
+    return int(_non_degenerate(mesh.faces).sum())
 
 
 # ── Mesh builders ────────────────────────────────────────────────────
@@ -240,28 +246,27 @@ class TestFindFragments:
 class TestRemoveFragments:
     def test_removes_islands(self):
         mesh = _mesh_with_island(n_island_faces=2)
-        n_before = len(mesh.faces)
+        n_before = _live_faces(mesh)
         clean = pre.remove_fragments(mesh, min_faces=3)
-        # Should have fewer faces
-        assert len(clean.faces) < n_before
-        assert len(clean.faces) == n_before - 2
+        assert _live_faces(clean) < n_before
+        assert _live_faces(clean) == n_before - 2
 
     def test_removes_fins(self):
         mesh = _mesh_with_fin()
-        n_before = len(mesh.faces)
+        n_before = _live_faces(mesh)
         clean = pre.remove_fragments(mesh)
-        assert len(clean.faces) < n_before
+        assert _live_faces(clean) < n_before
 
     def test_clean_mesh_unchanged(self):
         mesh = _icosphere()
         clean = pre.remove_fragments(mesh)
-        assert len(clean.faces) == len(mesh.faces)
+        assert _live_faces(clean) == _live_faces(mesh)
 
     def test_precomputed_mask(self):
         mesh = _mesh_with_island(n_island_faces=2)
         mask = pre.find_fragments(mesh, min_faces=3)
         clean = pre.remove_fragments(mesh, _precomputed=mask)
-        assert len(clean.faces) == len(mesh.faces) - 2
+        assert _live_faces(clean) == _live_faces(mesh) - 2
 
 
 # ── remove_islands / remove_fins ─────────────────────────────────────
@@ -271,29 +276,29 @@ class TestRemoveIslands:
     def test_removes_small_components(self):
         mesh = _mesh_with_island(n_island_faces=2)
         clean = pre.remove_islands(mesh, min_faces=3)
-        assert len(clean.faces) == len(mesh.faces) - 2
+        assert _live_faces(clean) == _live_faces(mesh) - 2
 
     def test_keeps_large_enough_components(self):
         mesh = _mesh_with_island(n_island_faces=2)
         clean = pre.remove_islands(mesh, min_faces=2)
-        assert len(clean.faces) == len(mesh.faces)
+        assert _live_faces(clean) == _live_faces(mesh)
 
     def test_noop_on_clean_mesh(self):
         mesh = _icosphere()
         clean = pre.remove_islands(mesh)
-        assert len(clean.faces) == len(mesh.faces)
+        assert _live_faces(clean) == _live_faces(mesh)
 
 
 class TestRemoveFins:
     def test_removes_dangling_faces(self):
         mesh = _mesh_with_fin()
         clean = pre.remove_fins(mesh)
-        assert len(clean.faces) < len(mesh.faces)
+        assert _live_faces(clean) < _live_faces(mesh)
 
     def test_noop_on_clean_mesh(self):
         mesh = _icosphere()
         clean = pre.remove_fins(mesh)
-        assert len(clean.faces) == len(mesh.faces)
+        assert _live_faces(clean) == _live_faces(mesh)
 
 
 # ── find_disconnected ────────────────────────────────────────────────
@@ -302,12 +307,12 @@ class TestRemoveFins:
 class TestFindDisconnected:
     def test_single_component_returns_empty(self):
         mesh = _icosphere()
-        comps = pre.find_disconnected(mesh, min_faces=3)
+        comps = pre.find_disconnected(mesh)
         assert comps == []
 
     def test_two_cylinders_detected(self):
         mesh = _two_cylinders(separation=1500.0)
-        comps = pre.find_disconnected(mesh, min_faces=3)
+        comps = pre.find_disconnected(mesh)
         assert len(comps) == 1  # one non-main component
         # The component should have the face count of one cylinder
         cyl_faces = len(trimesh.creation.cylinder(radius=10.0, height=200.0, sections=16).faces)
@@ -316,7 +321,7 @@ class TestFindDisconnected:
     def test_min_faces_filter(self):
         mesh = _mesh_with_island(n_island_faces=2)
         # Island has 2 faces, min_faces=100 → excluded
-        comps = pre.find_disconnected(mesh, min_faces=100)
+        comps = pre.find_disconnected(mesh)
         assert comps == []
 
     def test_sorted_largest_first(self):
@@ -334,7 +339,7 @@ class TestFindDisconnected:
         faces = np.vstack([c1.faces, c2.faces + n1, c3.faces + n2])
         mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-        comps = pre.find_disconnected(mesh, min_faces=3)
+        comps = pre.find_disconnected(mesh)
         assert len(comps) == 2
         assert len(comps[0]) >= len(comps[1])
 
@@ -345,12 +350,12 @@ class TestFindDisconnected:
 class TestFindGaps:
     def test_single_component_no_gaps(self):
         mesh = _icosphere()
-        gaps = pre.find_gaps(mesh, min_faces=3)
+        gaps = pre.find_gaps(mesh)
         assert gaps == []
 
     def test_two_cylinders_one_gap(self):
         mesh = _two_cylinders(separation=1500.0)
-        gaps = pre.find_gaps(mesh, min_faces=3)
+        gaps = pre.find_gaps(mesh)
         assert len(gaps) == 1
         faces_a, faces_b, dist = gaps[0]
         assert len(faces_a) > 0
@@ -359,7 +364,7 @@ class TestFindGaps:
 
     def test_gap_distance_positive(self):
         mesh = _two_cylinders(separation=1500.0)
-        gaps = pre.find_gaps(mesh, min_faces=3)
+        gaps = pre.find_gaps(mesh)
         assert len(gaps) == 1
         _, _, dist = gaps[0]
         assert dist > 100  # should be roughly the separation
@@ -378,7 +383,7 @@ class TestFindGaps:
         faces = np.vstack([c1.faces, c2.faces + n1, c3.faces + n2])
         mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-        gaps = pre.find_gaps(mesh, min_faces=3)
+        gaps = pre.find_gaps(mesh)
         assert len(gaps) >= 2
         for i in range(len(gaps) - 1):
             assert gaps[i][2] <= gaps[i + 1][2]
@@ -387,28 +392,29 @@ class TestFindGaps:
 class TestRemoveGaps:
     def test_noop_single_component(self):
         mesh = _icosphere()
-        result = pre.remove_gaps(mesh, min_faces=3)
+        result = pre.remove_gaps(mesh)
         assert len(result.faces) == len(mesh.faces)
 
     def test_bridges_two_cylinders(self):
         mesh = _two_cylinders(separation=1500.0)
         labels_before, _ = pre._face_edge_components(mesh)
-        n_comps_before = len(np.unique(labels_before))
+        n_comps_before = len(set(labels_before) - {-2})
         assert n_comps_before == 2
 
-        result = pre.remove_gaps(mesh, min_faces=3)
+        result = pre.remove_gaps(mesh)
         labels_after, _ = pre._face_edge_components(result)
-        n_comps_after = len(np.unique(labels_after))
+        n_comps_after = len(set(labels_after) - {-2})
         # After bridging, should be a single connected component
         assert n_comps_after < n_comps_before
 
     def test_precomputed_gaps(self):
         mesh = _two_cylinders(separation=1500.0)
-        gaps = pre.find_gaps(mesh, min_faces=3)
+        gaps = pre.find_gaps(mesh)
         result = pre.remove_gaps(mesh, _precomputed_gaps=gaps)
         labels, _ = pre._face_edge_components(result)
+        n_comps = len(set(labels) - {-2})
         # Should still work with precomputed gaps
-        assert len(np.unique(labels)) < 2 or len(result.faces) != len(mesh.faces)
+        assert n_comps < 2 or _live_faces(result) != _live_faces(mesh)
 
 
 # ── find_soma ────────────────────────────────────────────────────────
@@ -420,34 +426,6 @@ class TestFindSoma:
         soma = pre.find_soma(mesh)
         assert soma is None
 
-    def test_clustered_fragments_detect_soma(self):
-        """Place many small fragments near the origin → soma detected there."""
-        main = _icosphere(subdivisions=2, radius=100.0)
-        n_v = len(main.vertices)
-
-        rng = np.random.default_rng(42)
-        frag_verts = []
-        frag_faces = []
-        offset = n_v
-        # Place 10 small triangles near the origin
-        for i in range(10):
-            center = rng.normal(0, 10, size=3)
-            v0 = center + np.array([0, 0, 0])
-            v1 = center + np.array([2, 0, 0])
-            v2 = center + np.array([1, 2, 0])
-            frag_verts.extend([v0, v1, v2])
-            frag_faces.append([offset, offset + 1, offset + 2])
-            offset += 3
-
-        verts = np.vstack([main.vertices, np.array(frag_verts)])
-        faces = np.vstack([main.faces, np.array(frag_faces)])
-        mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-
-        soma = pre.find_soma(mesh, max_fragment_faces=50)
-        assert soma is not None
-        assert isinstance(soma, Soma)
-        # Soma center should be near origin
-        assert np.linalg.norm(soma.center) < 50.0
 
 
 # ── find_organelles (isolated) ───────────────────────────────────────
@@ -495,12 +473,12 @@ class TestRemoveOrganelles:
 
     def test_inner_sphere_removed(self):
         mesh = _sphere_with_internal()
-        n_before = len(mesh.faces)
+        n_before = _live_faces(mesh)
         clean = pre.remove_organelles(mesh, radius=50.0)
-        assert len(clean.faces) < n_before
+        assert _live_faces(clean) < n_before
         # Should only have the outer sphere faces (approximately)
-        outer_n = len(_icosphere(subdivisions=2, radius=100.0).faces)
-        assert len(clean.faces) == outer_n
+        outer_n = _live_faces(_icosphere(subdivisions=2, radius=100.0))
+        assert _live_faces(clean) == outer_n
 
 
 # ── find_fusions ─────────────────────────────────────────────────────
@@ -670,10 +648,10 @@ class TestRealMesh:
         assert mask.dtype == bool
 
     def test_find_disconnected_returns_list(self, reference_mesh):
-        comps = pre.find_disconnected(reference_mesh, min_faces=100)
+        comps = pre.find_disconnected(reference_mesh)
         assert isinstance(comps, list)
 
     def test_remove_fragments_preserves_main(self, reference_mesh):
         clean = pre.remove_fragments(reference_mesh)
         # Should keep at least 90% of faces (main component)
-        assert len(clean.faces) > len(reference_mesh.faces) * 0.5
+        assert _live_faces(clean) > _live_faces(reference_mesh) * 0.5

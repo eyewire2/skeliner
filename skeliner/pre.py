@@ -2244,7 +2244,6 @@ def remove_gaps(
     else:
         gaps = find_gaps(
             mesh,
-            min_faces=min_faces,
             verbose=verbose,
             _precomputed_soma=_precomputed_soma,
         )
