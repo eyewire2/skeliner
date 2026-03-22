@@ -502,8 +502,11 @@
             <div id="fusionResult" style="margin-top: 4px; font-size: 11px; color: #adf; display: none"></div>
             <div id="hlList" style="margin-top: 4px; max-height: 200px; overflow-y: auto"></div>
             <div id="hlClearAllRow" style="display: none; margin-top: 2px">
-                <button id="hlClearAll" style="font-size: 10px; cursor: pointer">
-                    Clear All Annotations
+                <button id="hlHideAll" style="font-size: 10px; cursor: pointer">
+                    Hide All
+                </button>
+                <button id="hlClearAll" style="font-size: 10px; cursor: pointer; margin-left: 6px">
+                    Clear All
                 </button>
             </div>
         </div>
@@ -724,7 +727,10 @@ let meshCentroid = [0, 0, 0];
                         btn.textContent = meshObj.visible ? "hide" : "show";
                     }
                 });
-                document.getElementById("hlClearAll").addEventListener("click", clearAllAnnotations);
+                document.getElementById("hlHideAll").addEventListener("click", hideAllAnnotations);
+                document.getElementById("hlClearAll").addEventListener("click", () => {
+                    if (confirm("Clear all annotations? This cannot be undone.")) clearAllAnnotations();
+                });
 
                 connectWebSocket();
 
@@ -2744,6 +2750,16 @@ let meshCentroid = [0, 0, 0];
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(currentAnnotations),
                 }).catch(() => {});
+            }
+
+            let annotationsHidden = false;
+            function hideAllAnnotations() {
+                annotationsHidden = !annotationsHidden;
+                for (const m of annotationMeshes) m.visible = !annotationsHidden;
+                for (const m of markerMeshes) m.visible = !annotationsHidden;
+                for (const m of edgeGroupMeshes) m.visible = !annotationsHidden;
+                document.getElementById("hlHideAll").textContent =
+                    annotationsHidden ? "Show All" : "Hide All";
             }
 
             function clearAllAnnotations() {
