@@ -514,6 +514,45 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 }})
                 return JSONResponse({"ok": True, "type": "skeleton", "name": filename})
 
+            elif suffix == ".json":
+                # Annotation JSON — merge with deduplication
+                incoming = json.loads(content.decode("utf-8"))
+                current = {}
+                if annotations_path.exists():
+                    current = json.loads(annotations_path.read_text(encoding="utf-8"))
+                if "highlights" not in current:
+                    current["highlights"] = []
+
+                # Deduplicate: skip incoming highlights whose label
+                # already exists with the same face count
+                existing = {
+                    (h.get("label", ""), len(h.get("faces", []))): True
+                    for h in current["highlights"]
+                }
+                added = 0
+                for h in incoming.get("highlights", []):
+                    key = (h.get("label", ""), len(h.get("faces", [])))
+                    if key not in existing:
+                        current["highlights"].append(h)
+                        existing[key] = True
+                        added += 1
+
+                # Copy non-highlight keys (skip duplicates)
+                for k, v in incoming.items():
+                    if k != "highlights" and k not in current:
+                        current[k] = v
+
+                annotations_path.write_text(json.dumps(current), encoding="utf-8")
+                print(
+                    f"Loaded annotations: {added} new highlights "
+                    f"(total {len(current['highlights'])})"
+                )
+                await broadcast({"type": "annotations_updated"})
+                return JSONResponse({
+                    "ok": True, "type": "annotations", "name": filename,
+                    "added": added, "total": len(current["highlights"]),
+                })
+
             else:
                 return JSONResponse({"ok": False, "error": f"Unsupported format: {suffix}"}, status_code=400)
 
@@ -1375,12 +1414,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if isinstance(data, str):
             data = data.encode("utf-8")
 
-        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
-        filename = f"{stem}_cleaned"
+        prefix = request.query_params.get("prefix", "")
         return Response(
             content=data,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{filename}.{fmt}"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}mesh_cleaned.{fmt}"'},
         )
 
     async def export_organelle_precompute(request):
@@ -1401,7 +1439,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "main_ci": np.array(main_ci),
         }
 
-        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        prefix = request.query_params.get("prefix", "")
         tmp = Path(tempfile.mktemp(suffix=".npz"))
         np.savez_compressed(tmp, **save_data)
         content = tmp.read_bytes()
@@ -1409,7 +1447,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{stem}_organelle_precompute.npz"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}organelle_precompute.npz"'},
         )
 
     async def export_organelle_masks(request):
@@ -1445,7 +1483,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             save_data["face_comp"] = face_comp
             save_data["main_ci"] = np.array(main_ci)
 
-        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        prefix = request.query_params.get("prefix", "")
         tmp = Path(tempfile.mktemp(suffix=".npz"))
         np.savez_compressed(tmp, **save_data)
         content = tmp.read_bytes()
@@ -1453,7 +1491,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{stem}_organelle_masks.npz"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}organelle_masks.npz"'},
         )
 
     async def export_soma(request):
@@ -1469,7 +1507,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         from skeliner.io import save_soma_npz
 
-        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        prefix = request.query_params.get("prefix", "")
         tmp = Path(tempfile.mktemp(suffix=".npz"))
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: save_soma_npz(soma, tmp))
@@ -1478,7 +1516,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{stem}_soma.npz"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}soma.npz"'},
         )
 
     async def export_annotations(request):
@@ -1490,35 +1528,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No annotations"}, status_code=400
             )
         content = annotations_path.read_bytes()
-        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        prefix = request.query_params.get("prefix", "")
         return Response(
             content=content,
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{stem}_annotations.json"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}annotations.json"'},
         )
-
-    async def import_annotations(request):
-        """Import annotations from an uploaded JSON file."""
-        body = await request.json()
-        ann = body.get("annotations")
-        if ann is None:
-            return JSONResponse(
-                {"ok": False, "error": "No annotations in payload"}, status_code=400
-            )
-        # Merge with existing: append highlights, preserve other keys
-        current = {}
-        if annotations_path.exists():
-            current = json.loads(annotations_path.read_text(encoding="utf-8"))
-        if "highlights" in ann:
-            if "highlights" not in current:
-                current["highlights"] = []
-            current["highlights"].extend(ann["highlights"])
-        # Copy any other top-level keys
-        for k, v in ann.items():
-            if k != "highlights":
-                current[k] = v
-        annotations_path.write_text(json.dumps(current), encoding="utf-8")
-        return JSONResponse({"ok": True, "n_highlights": len(current.get("highlights", []))})
 
     async def export_skeleton(request):
         """Export a skeleton as a downloadable SWC or NPZ file."""
@@ -1550,11 +1565,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         content = tmp.read_bytes()
         tmp.unlink(missing_ok=True)
 
-        stem = Path(name).stem if name else "skeleton"
+        prefix = request.query_params.get("prefix", "")
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}skeleton.{fmt}"'},
         )
 
     async def detect_holes(request):
@@ -1973,7 +1988,6 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/export_organelle_masks", export_organelle_masks, methods=["GET"]),
             Route("/export_soma", export_soma, methods=["GET"]),
             Route("/export_annotations", export_annotations, methods=["GET"]),
-            Route("/import_annotations", import_annotations, methods=["POST"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),

@@ -399,6 +399,13 @@
                 <span style="color: #adf; font-weight: bold">Save</span>
                 <button id="saveDialogClose" style="cursor: pointer; font-size: 14px">x</button>
             </div>
+            <div style="margin-bottom: 12px">
+                <label style="color: #888; font-size: 11px">Prefix</label>
+                <input id="savePrefix" type="text" placeholder="(none)" style="
+                    font-size: 12px; padding: 4px 8px; width: 140px; margin-left: 6px;
+                    background: #111; color: #eee; border: 1px solid #555; border-radius: 3px;
+                " />
+            </div>
             <div style="color: #888; margin-bottom: 6px">Mesh</div>
             <div style="margin-bottom: 12px">
                 <button id="saveMeshObj" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
@@ -437,10 +444,8 @@
                 <button id="saveAnnotations" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
                     JSON
                 </button>
-                <button id="loadAnnotations" style="font-size: 12px; cursor: pointer; padding: 6px 20px; margin-left: 8px">
-                    Load
-                </button>
             </div>
+            <hr style="border: none; border-top: 1px solid #444; margin: 12px 0" />
             <div>
                 <button id="saveAll" style="font-size: 12px; cursor: pointer; padding: 6px 20px">All</button>
             </div>
@@ -683,7 +688,6 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveOrgPrecompute").addEventListener("click", () => doSave("org_precompute"));
                 document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
-                document.getElementById("loadAnnotations").addEventListener("click", loadAnnotationsFile);
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
                 document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
@@ -1693,21 +1697,27 @@ let meshCentroid = [0, 0, 0];
                 return fname;
             }
 
+            function getSavePrefix() {
+                const v = document.getElementById("savePrefix").value.trim();
+                return v ? v + "_" : "";
+            }
+
             async function doSave(mode) {
                 const statusEl = document.getElementById("saveDialogStatus");
                 statusEl.textContent = "Saving...";
                 statusEl.style.color = "#adf";
+                const pfx = encodeURIComponent(getSavePrefix());
                 try {
                     const saved = [];
                     if (mode === "mesh" || mode === "all") {
-                        saved.push(await downloadFile("/export_mesh"));
+                        saved.push(await downloadFile(`/export_mesh?prefix=${pfx}`));
                     }
                     if (mode === "swc" || mode === "all") {
                         const name = getSkelName();
                         if (!name) throw new Error("No skeleton");
                         saved.push(
                             await downloadFile(
-                                `/export_skeleton?name=${encodeURIComponent(name)}&format=swc`,
+                                `/export_skeleton?name=${encodeURIComponent(name)}&format=swc&prefix=${pfx}`,
                             ),
                         );
                     }
@@ -1716,34 +1726,34 @@ let meshCentroid = [0, 0, 0];
                         if (!name) throw new Error("No skeleton");
                         saved.push(
                             await downloadFile(
-                                `/export_skeleton?name=${encodeURIComponent(name)}&format=npz`,
+                                `/export_skeleton?name=${encodeURIComponent(name)}&format=npz&prefix=${pfx}`,
                             ),
                         );
                     }
                     if (mode === "soma" || mode === "all") {
                         try {
-                            saved.push(await downloadFile("/export_soma"));
+                            saved.push(await downloadFile(`/export_soma?prefix=${pfx}`));
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }
                     }
                     if (mode === "org_precompute" || mode === "all") {
                         try {
-                            saved.push(await downloadFile("/export_organelle_precompute"));
+                            saved.push(await downloadFile(`/export_organelle_precompute?prefix=${pfx}`));
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }
                     }
                     if (mode === "org_masks" || mode === "all") {
                         try {
-                            saved.push(await downloadFile("/export_organelle_masks"));
+                            saved.push(await downloadFile(`/export_organelle_masks?prefix=${pfx}`));
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }
                     }
                     if (mode === "annotations" || mode === "all") {
                         try {
-                            saved.push(await downloadFile("/export_annotations"));
+                            saved.push(await downloadFile(`/export_annotations?prefix=${pfx}`));
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }
@@ -1754,38 +1764,6 @@ let meshCentroid = [0, 0, 0];
                     statusEl.textContent = e.message || "Error";
                     statusEl.style.color = "#f66";
                 }
-            }
-
-            function loadAnnotationsFile() {
-                const input = document.createElement("input");
-                input.type = "file";
-                input.accept = ".json";
-                input.onchange = async () => {
-                    const file = input.files[0];
-                    if (!file) return;
-                    const statusEl = document.getElementById("saveDialogStatus");
-                    statusEl.textContent = "Loading...";
-                    statusEl.style.color = "#adf";
-                    try {
-                        const text = await file.text();
-                        const ann = JSON.parse(text);
-                        const resp = await fetch("/import_annotations", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ annotations: ann }),
-                        });
-                        const result = await resp.json();
-                        if (!result.ok) throw new Error(result.error);
-                        statusEl.textContent = `Loaded ${result.n_highlights} highlights`;
-                        statusEl.style.color = "#6f6";
-                        // Refresh the viewer to show new annotations
-                        location.reload();
-                    } catch (e) {
-                        statusEl.textContent = e.message || "Load failed";
-                        statusEl.style.color = "#f66";
-                    }
-                };
-                input.click();
             }
 
             // ── Skeletonize ───────────────────────────────────────────────────
