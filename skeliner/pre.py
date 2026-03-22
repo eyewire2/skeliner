@@ -4747,31 +4747,36 @@ def remove_offsets(
         z_floor = rec["z_floor"]
         z_ceil = rec["z_ceil"]
 
-        # 3D correction: XY from contour matching, Z to close the gap
-        dz = z_ceil - z_floor - z_res
+        # 3D correction: XY from contour matching, Z to close the gap.
+        # Compute dz from current positions (after previous corrections)
+        # so that Z corrections don't over-accumulate.
+        below_ceil = new_verts[:, 2] < z_ceil - z_res * 0.5
+        tile_size = 32768
+        floor_xy = rec["floor_center"][:2]
+        tile_x = int(np.floor(floor_xy[0] / tile_size))
+        tile_y = int(np.floor(floor_xy[1] / tile_size))
+        # Include the cap tile and all adjacent tiles (3x3)
+        vert_tx = (new_verts[:, 0] // tile_size).astype(int)
+        vert_ty = (new_verts[:, 1] // tile_size).astype(int)
+        in_tiles = np.zeros(len(new_verts), dtype=bool)
+        for dtx in (-1, 0, 1):
+            for dty in (-1, 0, 1):
+                in_tiles |= (
+                    (vert_tx == tile_x + dtx)
+                    & (vert_ty == tile_y + dty)
+                )
+        candidates = in_tiles & below_ceil
+        if candidates.any():
+            current_floor_z = new_verts[candidates, 2].max()
+            dz = z_ceil - current_floor_z - z_res
+            if dz < 0:
+                dz = 0.0
+        else:
+            dz = 0.0
         correction = np.array([offset_xy[0], offset_xy[1], dz])
 
-        # Move vertices below the ceiling that are in the same
-        # spatial region as the offset.  Use the floor cap's
-        # component to determine the XY extent, then select all
-        # vertices in that XY region below the ceiling.
-        floor_xy = rec["floor_center"][:2]
-        ceil_xy = rec["ceil_center"][:2]
-        branch_xy = (floor_xy + ceil_xy) / 2.0
-
-        # XY radius: extent of the cap contours (data-derived)
-        cap_vi = np.unique(mesh.faces[rec["cap_faces"]].ravel())
-        cap_xy = mesh.vertices[cap_vi, :2]
-        cap_extent = np.linalg.norm(cap_xy - branch_xy, axis=1).max()
-        # Generous expansion to catch the full branch
-        xy_radius = max(cap_extent * 5, 5000)
-
-        in_region = (
-            np.linalg.norm(new_verts[:, :2] - branch_xy, axis=1)
-            < xy_radius
-        )
-        below_ceil = new_verts[:, 2] < z_ceil - z_res * 0.5
-        below = in_region & below_ceil
+        # Reuse the already-computed tile + Z mask
+        below = candidates
         n_moved = int(below.sum())
 
         if n_moved == 0:
