@@ -417,6 +417,30 @@
                     NPZ
                 </button>
             </div>
+            <div style="color: #888; margin-bottom: 6px">Soma</div>
+            <div style="margin-bottom: 12px">
+                <button id="saveSomaNpz" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
+                    NPZ
+                </button>
+            </div>
+            <div style="color: #888; margin-bottom: 6px">Organelles</div>
+            <div style="margin-bottom: 12px">
+                <button id="saveOrgPrecompute" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
+                    Precompute
+                </button>
+                <button id="saveOrgMasks" style="font-size: 12px; cursor: pointer; padding: 6px 20px; margin-left: 8px">
+                    Masks
+                </button>
+            </div>
+            <div style="color: #888; margin-bottom: 6px">Annotations</div>
+            <div style="margin-bottom: 12px">
+                <button id="saveAnnotations" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
+                    JSON
+                </button>
+                <button id="loadAnnotations" style="font-size: 12px; cursor: pointer; padding: 6px 20px; margin-left: 8px">
+                    Load
+                </button>
+            </div>
             <div>
                 <button id="saveAll" style="font-size: 12px; cursor: pointer; padding: 6px 20px">All</button>
             </div>
@@ -655,6 +679,11 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveMeshObj").addEventListener("click", () => doSave("mesh"));
                 document.getElementById("saveSkelSwc").addEventListener("click", () => doSave("swc"));
                 document.getElementById("saveSkelNpz").addEventListener("click", () => doSave("npz"));
+                document.getElementById("saveSomaNpz").addEventListener("click", () => doSave("soma"));
+                document.getElementById("saveOrgPrecompute").addEventListener("click", () => doSave("org_precompute"));
+                document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
+                document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
+                document.getElementById("loadAnnotations").addEventListener("click", loadAnnotationsFile);
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
                 document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
@@ -1691,12 +1720,72 @@ let meshCentroid = [0, 0, 0];
                             ),
                         );
                     }
+                    if (mode === "soma" || mode === "all") {
+                        try {
+                            saved.push(await downloadFile("/export_soma"));
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
+                    }
+                    if (mode === "org_precompute" || mode === "all") {
+                        try {
+                            saved.push(await downloadFile("/export_organelle_precompute"));
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
+                    }
+                    if (mode === "org_masks" || mode === "all") {
+                        try {
+                            saved.push(await downloadFile("/export_organelle_masks"));
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
+                    }
+                    if (mode === "annotations" || mode === "all") {
+                        try {
+                            saved.push(await downloadFile("/export_annotations"));
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
+                    }
                     statusEl.textContent = `Downloaded: ${saved.join(", ")}`;
                     statusEl.style.color = "#6f6";
                 } catch (e) {
                     statusEl.textContent = e.message || "Error";
                     statusEl.style.color = "#f66";
                 }
+            }
+
+            function loadAnnotationsFile() {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.accept = ".json";
+                input.onchange = async () => {
+                    const file = input.files[0];
+                    if (!file) return;
+                    const statusEl = document.getElementById("saveDialogStatus");
+                    statusEl.textContent = "Loading...";
+                    statusEl.style.color = "#adf";
+                    try {
+                        const text = await file.text();
+                        const ann = JSON.parse(text);
+                        const resp = await fetch("/import_annotations", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ annotations: ann }),
+                        });
+                        const result = await resp.json();
+                        if (!result.ok) throw new Error(result.error);
+                        statusEl.textContent = `Loaded ${result.n_highlights} highlights`;
+                        statusEl.style.color = "#6f6";
+                        // Refresh the viewer to show new annotations
+                        location.reload();
+                    } catch (e) {
+                        statusEl.textContent = e.message || "Load failed";
+                        statusEl.style.color = "#f66";
+                    }
+                };
+                input.click();
             }
 
             // ── Skeletonize ───────────────────────────────────────────────────

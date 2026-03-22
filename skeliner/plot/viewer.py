@@ -1383,45 +1383,142 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             headers={"Content-Disposition": f'attachment; filename="{filename}.{fmt}"'},
         )
 
-    async def export_organelles(request):
-        """Save organelle masks + precomputed data to an npz file."""
-        body = await request.json()
-        path = body.get("path")
-        if not path:
-            return JSONResponse({"ok": False, "error": "No path provided"}, status_code=400)
+    async def export_organelle_precompute(request):
+        """Save organelle precomputed data (outward_dots, face_comp, main_ci)."""
+        from starlette.responses import Response
+        import tempfile
 
-        save_data = {}
-        cached_mask = mesh_state.get("organelle_mask")
         precomputed = mesh_state.get("_organelle_precomputed")
+        if precomputed is None:
+            return JSONResponse(
+                {"ok": False, "error": "No organelle precompute data"}, status_code=400
+            )
 
-        if cached_mask is not None:
-            # Split combined mask into pocket/isolated from annotations
-            ann = {}
-            if annotations_path.exists():
-                ann = json.loads(annotations_path.read_text(encoding="utf-8"))
-            pocket = np.zeros(len(cached_mask), dtype=bool)
-            isolated = np.zeros(len(cached_mask), dtype=bool)
-            for h in ann.get("highlights", []):
-                label = h.get("label", "").lower()
-                if "pocket" in label and "false" not in label:
-                    pocket[h["faces"]] = True
-                elif "isolated" in label and "false" not in label:
-                    isolated[h["faces"]] = True
-            save_data["pocket"] = pocket
-            save_data["isolated"] = isolated
+        outward_dots, face_comp, main_ci, _ = precomputed
+        save_data = {
+            "outward_dots": outward_dots,
+            "face_comp": face_comp,
+            "main_ci": np.array(main_ci),
+        }
 
+        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        tmp = Path(tempfile.mktemp(suffix=".npz"))
+        np.savez_compressed(tmp, **save_data)
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{stem}_organelle_precompute.npz"'},
+        )
+
+    async def export_organelle_masks(request):
+        """Save organelle masks (pocket, isolated) + precomputed data."""
+        from starlette.responses import Response
+        import tempfile
+
+        cached_mask = mesh_state.get("organelle_mask")
+        if cached_mask is None:
+            return JSONResponse(
+                {"ok": False, "error": "No organelle masks"}, status_code=400
+            )
+
+        # Split combined mask into pocket/isolated from annotations
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        pocket = np.zeros(len(cached_mask), dtype=bool)
+        isolated = np.zeros(len(cached_mask), dtype=bool)
+        for h in ann.get("highlights", []):
+            label = h.get("label", "").lower()
+            if "pocket" in label and "false" not in label:
+                pocket[h["faces"]] = True
+            elif "isolated" in label and "false" not in label:
+                isolated[h["faces"]] = True
+        save_data = {"pocket": pocket, "isolated": isolated}
+
+        # Include precomputed data if available
+        precomputed = mesh_state.get("_organelle_precomputed")
         if precomputed is not None:
             outward_dots, face_comp, main_ci, _ = precomputed
             save_data["outward_dots"] = outward_dots
             save_data["face_comp"] = face_comp
             save_data["main_ci"] = np.array(main_ci)
 
-        if not save_data:
-            return JSONResponse({"ok": False, "error": "No data to save"}, status_code=400)
+        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        tmp = Path(tempfile.mktemp(suffix=".npz"))
+        np.savez_compressed(tmp, **save_data)
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{stem}_organelle_masks.npz"'},
+        )
 
-        np.savez_compressed(path, **save_data)
-        print(f"Saved organelle data to {path} ({', '.join(save_data.keys())})")
-        return JSONResponse({"ok": True, "path": path, "keys": list(save_data.keys())})
+    async def export_soma(request):
+        """Export the cached soma as a downloadable NPZ file."""
+        from starlette.responses import Response
+        import tempfile
+
+        soma = mesh_state.get("soma")
+        if soma is None:
+            return JSONResponse(
+                {"ok": False, "error": "No soma detected"}, status_code=400
+            )
+
+        from skeliner.io import save_soma_npz
+
+        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        tmp = Path(tempfile.mktemp(suffix=".npz"))
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: save_soma_npz(soma, tmp))
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{stem}_soma.npz"'},
+        )
+
+    async def export_annotations(request):
+        """Export annotations as a downloadable JSON file."""
+        from starlette.responses import Response
+
+        if not annotations_path.exists():
+            return JSONResponse(
+                {"ok": False, "error": "No annotations"}, status_code=400
+            )
+        content = annotations_path.read_bytes()
+        stem = Path(mesh_state["path"]).stem if mesh_state["path"] else "mesh"
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{stem}_annotations.json"'},
+        )
+
+    async def import_annotations(request):
+        """Import annotations from an uploaded JSON file."""
+        body = await request.json()
+        ann = body.get("annotations")
+        if ann is None:
+            return JSONResponse(
+                {"ok": False, "error": "No annotations in payload"}, status_code=400
+            )
+        # Merge with existing: append highlights, preserve other keys
+        current = {}
+        if annotations_path.exists():
+            current = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" in ann:
+            if "highlights" not in current:
+                current["highlights"] = []
+            current["highlights"].extend(ann["highlights"])
+        # Copy any other top-level keys
+        for k, v in ann.items():
+            if k != "highlights":
+                current[k] = v
+        annotations_path.write_text(json.dumps(current), encoding="utf-8")
+        return JSONResponse({"ok": True, "n_highlights": len(current.get("highlights", []))})
 
     async def export_skeleton(request):
         """Export a skeleton as a downloadable SWC or NPZ file."""
@@ -1872,7 +1969,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
-            Route("/export_organelles", export_organelles, methods=["POST"]),
+            Route("/export_organelle_precompute", export_organelle_precompute, methods=["GET"]),
+            Route("/export_organelle_masks", export_organelle_masks, methods=["GET"]),
+            Route("/export_soma", export_soma, methods=["GET"]),
+            Route("/export_annotations", export_annotations, methods=["GET"]),
+            Route("/import_annotations", import_annotations, methods=["POST"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
