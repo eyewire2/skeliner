@@ -495,6 +495,37 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
                     f"{soma.axes[2]:.0f}], {n_verts:,} verts"
                 )
+
+                # Annotate soma (faces + ellipsoid wireframe)
+                mesh = mesh_state.get("mesh")
+                if mesh is not None and soma.verts is not None:
+                    soma_vset = set(int(v) for v in soma.verts)
+                    soma_faces = [
+                        int(fi) for fi in range(len(mesh.faces))
+                        if sum(1 for v in mesh.faces[fi] if int(v) in soma_vset) >= 2
+                    ]
+                    ann = {}
+                    if annotations_path.exists():
+                        ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+                    if "highlights" not in ann:
+                        ann["highlights"] = []
+                    ann["highlights"].append({
+                        "faces": soma_faces,
+                        "color": [0.9, 0.5, 0.9],
+                        "label": f"soma ({len(soma_faces):,}f, {n_verts:,}v)",
+                    })
+                    centroid = mesh_state["centroid"]
+                    if "ellipsoids" not in ann:
+                        ann["ellipsoids"] = []
+                    ann["ellipsoids"].append({
+                        "center": (soma.center - centroid).tolist(),
+                        "axes": soma.axes.tolist(),
+                        "R": soma.R.tolist(),
+                        "color": [0.9, 0.5, 0.9],
+                    })
+                    annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+                    await broadcast({"type": "annotations_updated"})
+
                 return JSONResponse({
                     "ok": True, "type": "soma", "name": filename,
                 })
