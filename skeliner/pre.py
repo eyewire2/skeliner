@@ -3515,7 +3515,7 @@ def find_organelles(
     return pocket, isolated
 
 
-def find_fusions(
+def _find_nonmanifold_fusions(
     mesh: trimesh.Trimesh,
     *,
     radius: float | None = None,
@@ -3524,52 +3524,12 @@ def find_fusions(
     min_branch_size: int = 5,
     verbose: bool = False,
 ) -> list[list[int]]:
-    """Detect fusion points where two branches are wrongly connected.
-
-    A fusion is any place where two separated components are wrongly
-    connected via shared edges or shared vertices.
-
-    Algorithm:
-
-    1. Find non-manifold seed faces: negative-outward-dot faces at edges
-       shared by >2 faces, plus duplicate faces with >3 neighbors.
-    2. Cluster seeds by adjacency.
-    3. For each seed cluster, grow a local region outward ring by ring.
-    4. Split the region using **manifold-only** edge connectivity — at
-       a fusion, non-manifold edges connect the two branches, so removing
-       them from the adjacency separates the branches.
-    5. Report the boundary faces between the two largest components as
-       the fusion zone.
-    6. Detect **vertex-only fusions**: vertices whose face fan splits
-       into multiple edge-disconnected components (pinch vertices).
-       Report the fan faces as additional fusion clusters.
-
-    Parameters
-    ----------
-    mesh : trimesh.Trimesh
-        Input neuron mesh (ideally after organelle removal).
-    radius : float or None
-        Radius for outward_dot computation. Auto-computed if None.
-    radius_multiplier : float
-        Multiplier for auto radius.
-    grow_rings : int
-        Maximum rings to grow around each seed cluster.
-    min_branch_size : int
-        Minimum faces in a component to count as a branch.
-    verbose : bool
-
-    Returns
-    -------
-    list[list[int]]
-        Each inner list is one fusion cluster (boundary face indices
-        between the two branches).
-    """
+    """Detect non-manifold fusions (shared edges, duplicate faces, pinch vertices)."""
     from collections import Counter, deque
 
     areas = mesh.area_faces
     zero_faces = set(np.where(areas < 1e-6)[0].tolist())
 
-    # Build edge-to-face map, excluding degenerate faces
     edge_to_face = _edge_to_faces(mesh)
 
     def _get_neighbors(fi: int) -> set[int]:
@@ -3589,7 +3549,6 @@ def find_fusions(
             f"{len(zero_faces)} zero-area, {nm_edges} non-manifold edges"
         )
 
-    # Outward dot for inward-face filtering
     if verbose:
         print("[skeliner.pre] Computing outward dots ...")
     outward_dots = _outward_dot(
@@ -3598,11 +3557,9 @@ def find_fusions(
         if radius is not None
         else radius_multiplier * float(np.median(mesh.edges_unique_length)),
     )
-
     if verbose:
         print("[skeliner.pre] Outward dots computed")
 
-    # ── Seed detection ───────────────────────────────────────────────
     # Signal 1: negative-dot faces at non-manifold edges
     nm_neg_faces: set[int] = set()
     for e, faces in edge_to_face.items():
@@ -3629,8 +3586,7 @@ def find_fusions(
 
     seed_faces = nm_neg_faces | dupe_faces
 
-    # Signal 3: fan vertices — vertices whose face fan splits into
-    # multiple edge-connected components (vertex-only fusion)
+    # Signal 3: fan vertices
     _good = _non_degenerate(mesh.faces)
     vert_to_face: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
     for fi, f in enumerate(mesh.faces):
@@ -3647,7 +3603,6 @@ def find_fusions(
         fan = vert_to_face[vid]
         if len(fan) < 2:
             continue
-
         fan_set = set(fan)
         fan_adj: dict[int, set[int]] = defaultdict(set)
         for fi in fan:
@@ -3658,9 +3613,6 @@ def find_fusions(
                 for nfi in edge_to_face[e]:
                     if nfi in fan_set and nfi != fi:
                         fan_adj[fi].add(nfi)
-
-        # BFS from first face; if not all fan faces reached,
-        # this vertex is a pinch point between disconnected branches.
         vis: set[int] = set()
         q = deque([fan[0]])
         while q:
@@ -3671,11 +3623,9 @@ def find_fusions(
             for nfi in fan_adj.get(curr, set()):
                 if nfi not in vis:
                     q.append(nfi)
-
         if len(vis) < len(fan_set):
             fan_vertex_clusters.append(sorted(fan))
             if verbose:
-                # count components for reporting
                 _vis2: set[int] = set()
                 _comp_sizes: list[int] = []
                 for _fi in fan:
@@ -3707,11 +3657,9 @@ def find_fusions(
         )
 
     if not seed_faces and not fan_vertex_clusters:
-        if verbose:
-            print("[skeliner.pre] No fusions found")
         return []
 
-    # ── Cluster seeds ────────────────────────────────────────────────
+    # Cluster seeds
     seed_adj: dict[int, set[int]] = defaultdict(set)
     for e, faces in edge_to_face.items():
         for i in range(len(faces)):
@@ -3746,11 +3694,8 @@ def find_fusions(
             f"fan_verts={len(fan_vertex_clusters)})"
         )
 
-    # ── Grow region & split per cluster ──────────────────────────────
-    def _manifold_components(
-        region: set[int],
-    ) -> list[set[int]]:
-        """Split region into components using manifold edges only."""
+    # Grow region & split per cluster
+    def _manifold_components(region: set[int]) -> list[set[int]]:
         m_adj: dict[int, set[int]] = defaultdict(set)
         for fi in region:
             f = mesh.faces[fi]
@@ -3786,36 +3731,28 @@ def find_fusions(
 
     for ci, seed_cluster in enumerate(seed_clusters):
         region = set(seed_cluster)
-
         if verbose:
             print(
                 f"[skeliner.pre] Growing seed cluster "
                 f"{ci + 1}/{n_seed_clusters} ({len(seed_cluster)}f) ..."
             )
-
-        # Grow outward until manifold-split gives 2 big components
         found = False
         for ring in range(1, grow_rings + 1):
             boundary: set[int] = set()
             for fi in region:
                 boundary.update(_get_neighbors(fi))
             region = (region | boundary) - zero_faces
-
             if ring < 3:
                 continue
-
             comps = _manifold_components(region)
             big = [c for c in comps if len(c) >= min_branch_size]
-
             if verbose:
                 print(
                     f"[skeliner.pre]   ring {ring}: "
                     f"{len(region)}f, {len(comps)} comps "
                     f"({len(big)} >= {min_branch_size}f)"
                 )
-
             if len(big) >= 2:
-                # Boundary faces between the two largest components
                 branch0 = big[0]
                 branch1 = big[1]
                 fusion_boundary: set[int] = set()
@@ -3834,7 +3771,6 @@ def find_fusions(
                         f"boundary {len(fusion_boundary)}f"
                     )
                 break
-
         if not found and verbose:
             print(
                 f"[skeliner.pre]   Seed cluster ({len(seed_cluster)}f): "
@@ -3843,15 +3779,67 @@ def find_fusions(
             )
 
     result_clusters.extend(fan_vertex_clusters)
-    result_clusters.sort(key=len, reverse=True)
+    return result_clusters
+
+
+def find_fusions(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    grow_rings: int = 20,
+    min_branch_size: int = 5,
+    verbose: bool = False,
+) -> list[list[int]]:
+    """Detect non-manifold fusion points where two branches are wrongly connected.
+
+    Detects non-manifold edges, duplicate faces, and pinch vertices.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh (ideally after organelle removal).
+    radius : float or None
+        Radius for outward_dot computation. Auto-computed if None.
+    radius_multiplier : float
+        Multiplier for auto radius.
+    grow_rings : int
+        Maximum rings to grow around each seed cluster.
+    min_branch_size : int
+        Minimum faces in a component to count as a branch.
+    verbose : bool
+
+    Returns
+    -------
+    list[list[int]]
+        Each inner list is one fusion cluster (face indices at the
+        fusion boundary).
+
+    Notes
+    -----
+    This detects **non-manifold fusions** only (shared edges, duplicate
+    faces, pinch vertices).  **Loop fusions** — manifold cycles where
+    two branches diverge and reconverge — are not detected here.  Loop
+    fusion detection is planned for the skeletonization refactoring
+    (detect cycles in the pre-MST skeleton graph).
+    """
+    clusters = _find_nonmanifold_fusions(
+        mesh,
+        radius=radius,
+        radius_multiplier=radius_multiplier,
+        grow_rings=grow_rings,
+        min_branch_size=min_branch_size,
+        verbose=verbose,
+    )
+    clusters.sort(key=len, reverse=True)
 
     if verbose:
         print(
-            f"[skeliner.pre] Fusions: {len(result_clusters)} regions, "
-            f"{sum(len(c) for c in result_clusters)} boundary faces"
+            f"[skeliner.pre] Fusions: {len(clusters)} regions, "
+            f"{sum(len(c) for c in clusters)} boundary faces"
         )
 
-    return result_clusters
+    return clusters
 
 
 def _split_fan_vertices(

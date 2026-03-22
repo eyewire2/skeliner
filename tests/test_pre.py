@@ -490,6 +490,24 @@ class TestFindFusions:
         clusters = pre.find_fusions(mesh, radius=50.0)
         assert clusters == []
 
+    def test_nonmanifold_pinch_vertex(self):
+        """_find_nonmanifold_fusions detects two tetrahedra sharing a vertex."""
+        from skeliner.pre import _find_nonmanifold_fusions
+
+        v0 = np.array([
+            [0, 0, 0], [1, 0, 0], [0.5, 1, 0], [0.5, 0.5, 1],
+        ], dtype=np.float64)
+        f0 = np.array([[0, 1, 2], [0, 1, 3], [1, 2, 3], [0, 2, 3]])
+        v1 = np.array([[-1, 0, 0], [-0.5, 1, 0], [-0.5, 0.5, 1]], dtype=np.float64)
+        f1 = np.array([[0, 4, 5], [0, 4, 6], [4, 5, 6], [0, 5, 6]])
+        mesh = trimesh.Trimesh(
+            vertices=np.vstack([v0, v1]),
+            faces=np.vstack([f0, f1]),
+            process=False,
+        )
+        clusters = _find_nonmanifold_fusions(mesh, radius=2.0)
+        assert len(clusters) >= 1
+
     def test_pinch_vertex_detected(self):
         """Two tetrahedra sharing a single vertex = fan vertex fusion."""
         # Tetrahedron 1
@@ -512,6 +530,7 @@ class TestFindFusions:
 
         clusters = pre.find_fusions(mesh, radius=2.0)
         assert len(clusters) >= 1
+
 
 
 # ── remove_fusions ───────────────────────────────────────────────────
