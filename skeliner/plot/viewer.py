@@ -808,12 +808,18 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         soma = mesh_state.get("soma")
         if soma is None:
             await _log("[skeliner.pre] Detecting soma first...")
-            soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
+            soma = await _run_with_log(
+                find_soma, mesh,
+                organelle_mask=mesh_state.get("organelle_mask"),
+                _precomputed=mesh_state.get("_organelle_precomputed"),
+                verbose=True,
+            )
             mesh_state["soma"] = soma
         await _log("[skeliner.pre] Detecting disconnected components...")
         components = await _run_with_log(
             find_disconnected, mesh, verbose=True, _precomputed_soma=soma,
             organelle_mask=mesh_state.get("organelle_mask"),
+            _precomputed=mesh_state.get("_organelle_precomputed"),
         )
         mesh_state["disconnected"] = components
 
@@ -851,7 +857,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import find_soma
 
         mesh = mesh_state["mesh"]
-        soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
+        soma = await _run_with_log(
+            find_soma, mesh,
+            organelle_mask=mesh_state.get("organelle_mask"),
+            _precomputed=mesh_state.get("_organelle_precomputed"),
+            verbose=True,
+        )
         if soma is None:
             return JSONResponse({"ok": False, "error": "No soma found"})
 
@@ -910,7 +921,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         soma = mesh_state.get("soma")
         if soma is None:
             await _log("[skeliner.pre] Detecting soma first...")
-            soma = await _run_with_log(find_soma, mesh, organelle_mask=mesh_state.get("organelle_mask"), verbose=True)
+            soma = await _run_with_log(
+                find_soma, mesh,
+                organelle_mask=mesh_state.get("organelle_mask"),
+                _precomputed=mesh_state.get("_organelle_precomputed"),
+                verbose=True,
+            )
             mesh_state["soma"] = soma
 
         cached_disc = mesh_state.get("disconnected")

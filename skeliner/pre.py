@@ -1621,6 +1621,7 @@ def find_soma(
     *,
     organelle_mask: np.ndarray | None = None,
     verbose: bool = False,
+    _precomputed: tuple | None = None,
 ) -> Soma | None:
     """Estimate soma from the spatial clustering of organelles.
 
@@ -1642,6 +1643,10 @@ def find_soma(
         skipped and this mask is used directly.
     verbose : bool, default False
         Print summary.
+    _precomputed : tuple or None
+        ``(outward_dots, face_comp, main_ci, main_mask)`` from
+        :func:`_organelle_precompute`.  Reuses ``face_comp`` and
+        ``main_ci`` to skip redundant component detection.
 
     Returns
     -------
@@ -1650,7 +1655,10 @@ def find_soma(
     """
     from collections import deque
 
-    labels, main = _face_edge_components(mesh)
+    if _precomputed is not None:
+        _, labels, main, _ = _precomputed
+    else:
+        labels, main = _face_edge_components(mesh)
 
     # ── 1. Locate organelle clusters and compute centroids ──────
     if organelle_mask is None:
@@ -1882,6 +1890,7 @@ def find_disconnected(
     verbose: bool = False,
     _precomputed_soma: Soma | None = None,
     organelle_mask: np.ndarray | None = None,
+    _precomputed: tuple | None = None,
 ) -> list[list[int]]:
     """Detect disconnected mesh components from segmentation errors.
 
@@ -1900,6 +1909,10 @@ def find_disconnected(
     organelle_mask : np.ndarray or None
         Boolean mask ``(nFaces,)`` of organelle faces.  Components that
         are entirely organelle are skipped.
+    _precomputed : tuple or None
+        ``(outward_dots, face_comp, main_ci, main_mask)`` from
+        :func:`_organelle_precompute`.  Reuses ``face_comp`` and
+        ``main_ci`` to skip redundant component detection.
 
     Returns
     -------
@@ -1907,7 +1920,10 @@ def find_disconnected(
         Each element is a list of face indices for one disconnected
         component, sorted largest-first.
     """
-    labels, main = _face_edge_components(mesh)
+    if _precomputed is not None:
+        _, labels, main, _ = _precomputed
+    else:
+        labels, main = _face_edge_components(mesh)
     n_faces = len(mesh.faces)
     if verbose:
         n_total_comps = int(labels.max()) + 1 if len(labels) else 0
