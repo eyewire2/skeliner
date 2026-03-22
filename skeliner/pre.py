@@ -4750,9 +4750,7 @@ def remove_offsets(
         if n_moved == 0:
             continue
 
-        dz = z_ceil - z_floor - z_res
-        if dz < 0:
-            dz = 0.0
+        dz = z_ceil - z_floor
         new_verts[below_mask, 0] += offset_xy[0]
         new_verts[below_mask, 1] += offset_xy[1]
         new_verts[below_mask, 2] += dz
