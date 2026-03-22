@@ -1533,18 +1533,17 @@ def _assign_soma_verts(
 
     # Absorb pockets: connected components of non-soma verts that are
     # topologically trapped (only reachable through the soma).
-    # Skip components that are neurite-like (elongated) — only absorb
-    # compact surface patches (soma leftovers from irregular shape).
-    # Shape test: PCA elongation of the component vs the soma's own
-    # aspect ratio.  Neurites are more elongated than the soma.
+    # A neuron can have multiple neurite trees stemming from the soma;
+    # all of them are trapped by definition.  We separate neurites
+    # (large, preserve) from pockets (small surface artifacts, absorb)
+    # using Otsu on trapped component sizes.
     all_main_set = set(all_main_verts.tolist())
-    soma_elongation = soma.axes[0] / max(soma.axes[1], 1e-12)
     n_absorbed_total = 0
     n_skipped_neurite = 0
     for _iteration in range(10):
         outside = all_main_set - soma_set
         visited: set[int] = set()
-        absorbed = 0
+        trapped_comps: list[list[int]] = []
         for start in outside:
             if start in visited:
                 continue
@@ -1564,16 +1563,23 @@ def _assign_soma_verts(
                 nv in soma_set or nv in comp_set for v in comp for nv in adj.get(v, [])
             )
             if trapped and len(comp) < len(soma_set):
-                # Shape check: neurite (elongated) vs pocket (compact)
-                if len(comp) >= 3:
-                    pts = mesh.vertices[comp]
-                    cov = np.cov(pts - pts.mean(axis=0), rowvar=False)
-                    evals = np.sort(np.linalg.eigvalsh(cov))[::-1]
-                    if evals[1] > 1e-12:
-                        comp_elongation = np.sqrt(evals[0] / evals[1])
-                        if comp_elongation > soma_elongation:
-                            n_skipped_neurite += len(comp)
-                            continue  # neurite-like — don't absorb
+                trapped_comps.append(comp)
+
+        if not trapped_comps:
+            break
+
+        # Otsu on component sizes to split neurites from pockets
+        sizes = np.array([len(c) for c in trapped_comps], dtype=np.float64)
+        if len(sizes) >= 2:
+            size_thresh, _ = _otsu_threshold(sizes)
+        else:
+            size_thresh = 0.0  # single component — absorb it
+
+        absorbed = 0
+        for comp in trapped_comps:
+            if len(comp) > size_thresh:
+                n_skipped_neurite += len(comp)
+            else:
                 soma_set.update(comp)
                 absorbed += len(comp)
         n_absorbed_total += absorbed
@@ -1582,7 +1588,7 @@ def _assign_soma_verts(
     if verbose and n_absorbed_total:
         print(f"{_log} +{n_absorbed_total:,} absorbed pockets → {len(soma_set):,}")
     if verbose and n_skipped_neurite:
-        print(f"{_log} {n_skipped_neurite:,} verts in trapped neurites preserved")
+        print(f"{_log} {n_skipped_neurite:,} verts in {sum(1 for c in trapped_comps if len(c) > size_thresh)} neurite branches preserved")
 
     # Absorb disconnected-component vertices inside the ellipsoid.
     all_verts = np.arange(len(mesh.vertices))
