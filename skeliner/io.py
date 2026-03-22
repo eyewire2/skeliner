@@ -17,6 +17,8 @@ __all__ = [
     "to_swc",
     "load_npz",
     "to_npz",
+    "save_soma_npz",
+    "load_soma_npz",
 ]
 
 _META_KV = re.compile(r"#\s*([^:]+)\s*:\s*(.+)")  #  key: value
@@ -445,6 +447,41 @@ def to_npz(
         **meta,
         **tree_payload,
     )
+
+
+# ------------
+# --- Soma ---
+# ------------
+
+
+def save_soma_npz(soma: Soma, path: str | Path, *, compress: bool = True) -> None:
+    """Write a standalone :class:`Soma` to a compressed ``.npz`` archive."""
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+
+    payload = dict(
+        center=soma.center,
+        axes=soma.axes,
+        R=soma.R,
+    )
+    if soma.verts is not None:
+        payload["verts"] = soma.verts.astype(np.int64, copy=False)
+
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_soma_npz(path: str | Path) -> Soma:
+    """Load a :class:`Soma` written by :func:`save_soma_npz`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        return Soma(
+            center=z["center"].astype(np.float64),
+            axes=z["axes"].astype(np.float64),
+            R=z["R"].astype(np.float64),
+            verts=z["verts"].astype(np.int64) if "verts" in z else None,
+        )
 
 
 # --------------------------

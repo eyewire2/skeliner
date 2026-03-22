@@ -272,6 +272,22 @@ class Soma:
         R = np.eye(3, dtype=np.float64)
         return cls(center, axes, R, verts=verts)
 
+    # ---------------------------------------------------------------------
+    # I/O
+    # ---------------------------------------------------------------------
+    def to_npz(self, path: str | Path) -> None:
+        """Write the soma to a compressed NumPy archive."""
+        from . import io
+
+        io.save_soma_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "Soma":
+        """Load a soma from a ``.npz`` archive."""
+        from . import io
+
+        return io.load_soma_npz(path)
+
 
 # -----------------------------------------------------------------------------
 # Skeleton dataclass
@@ -405,6 +421,26 @@ class Skeleton:
         from . import io
 
         io.to_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "Skeleton":
+        """Load a skeleton from a ``.npz`` archive."""
+        from . import io
+
+        return io.load_npz(path)
+
+    @classmethod
+    def from_swc(
+        cls,
+        path: str | Path,
+        *,
+        scale: float = 1.0,
+        keep_types: Iterable[int] | None = None,
+    ) -> "Skeleton":
+        """Load a skeleton from an SWC file."""
+        from . import io
+
+        return io.load_swc(path, scale=scale, keep_types=keep_types)
 
     # ------------------------------------------------------------------
     # radius recommendation

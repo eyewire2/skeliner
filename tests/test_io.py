@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from skeliner import dx, skeletonize
-from skeliner.io import load_mesh, load_npz, load_swc
+from skeliner import Skeleton, Soma, dx, skeletonize
+from skeliner.io import load_mesh, load_npz, load_soma_npz, load_swc, save_soma_npz
 
 SAMPLES_DIR = Path(__file__).parent / "data" 
 
@@ -131,3 +131,86 @@ def test_skeleton_roundtrip(tmp_path, reference_mesh):
     assert np.allclose(skel0.nodes,  skel1.nodes,  rtol=1e-6)
     assert _edges_equal(skel0.edges, skel1.edges)
     assert np.allclose(skel0.r, skel1.r, rtol=1e-6)
+
+
+# ------------------------------------------------------------------------
+#  Soma NPZ round-trips
+# ------------------------------------------------------------------------
+def test_soma_npz_roundtrip_with_verts(tmp_path):
+    """Full ellipsoid soma with verts survives save/load."""
+    R = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]], dtype=np.float64)
+    soma = Soma(center=[10, 20, 30], axes=[5, 4, 3], R=R,
+                verts=np.array([0, 7, 42, 999], dtype=np.int64))
+
+    path = tmp_path / "soma_verts"
+    soma.to_npz(path)
+
+    loaded = Soma.from_npz(path.with_suffix(".npz"))
+    assert np.allclose(loaded.center, soma.center)
+    assert np.allclose(loaded.axes, soma.axes)
+    assert np.allclose(loaded.R, soma.R)
+    assert np.array_equal(loaded.verts, soma.verts)
+
+
+def test_soma_npz_roundtrip_no_verts(tmp_path):
+    """Soma without verts round-trips cleanly (verts stays None)."""
+    soma = Soma(center=[0, 0, 0], axes=[1, 1, 1], R=np.eye(3))
+
+    path = tmp_path / "soma_noverts.npz"
+    soma.to_npz(path)
+
+    loaded = Soma.from_npz(path)
+    assert loaded.verts is None
+    assert np.allclose(loaded.center, soma.center)
+    assert np.allclose(loaded.axes, soma.axes)
+
+
+def test_soma_npz_functional_api(tmp_path):
+    """save_soma_npz / load_soma_npz work directly."""
+    soma = Soma.from_sphere([1, 2, 3], radius=5.0, verts=np.arange(10))
+
+    path = tmp_path / "soma_func"
+    save_soma_npz(soma, path)
+
+    loaded = load_soma_npz(path.with_suffix(".npz"))
+    assert np.isclose(loaded.equiv_radius, soma.equiv_radius)
+    assert np.array_equal(loaded.verts, soma.verts)
+
+
+def test_soma_npz_derived_fields(tmp_path):
+    """Derived field _W is recomputed on load (not stored)."""
+    soma = Soma(center=[1, 2, 3], axes=[6, 4, 2], R=np.eye(3))
+    path = tmp_path / "soma_derived.npz"
+    soma.to_npz(path)
+
+    loaded = Soma.from_npz(path)
+    # _W should be recomputed via __post_init__
+    pt = np.array([[2, 3, 4]], dtype=np.float64)
+    assert np.allclose(soma.contains(pt), loaded.contains(pt))
+
+
+# ------------------------------------------------------------------------
+#  Skeleton classmethod round-trips
+# ------------------------------------------------------------------------
+def test_skeleton_from_swc(tmp_path):
+    """Skeleton.from_swc matches load_swc."""
+    src = SAMPLES_DIR / "60427.swc"
+    skel_func = load_swc(src)
+    skel_cls = Skeleton.from_swc(src)
+
+    assert np.allclose(skel_cls.nodes, skel_func.nodes)
+    assert _edges_equal(skel_cls.edges, skel_func.edges)
+    assert np.array_equal(skel_cls.ntype, skel_func.ntype)
+
+
+def test_skeleton_from_npz(tmp_path, reference_mesh):
+    """Skeleton.from_npz matches load_npz."""
+    skel = skeletonize(reference_mesh, verbose=False)
+    path = tmp_path / "skel_cls.npz"
+    skel.to_npz(path)
+
+    loaded = Skeleton.from_npz(path)
+    assert loaded.nodes.shape == skel.nodes.shape
+    assert loaded.edges.shape == skel.edges.shape
+    assert np.allclose(loaded.soma.center, skel.soma.center)
+    assert np.allclose(loaded.soma.axes, skel.soma.axes)

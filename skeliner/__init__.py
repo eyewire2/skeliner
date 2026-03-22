@@ -1,7 +1,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from . import batch, dx, io, pair, plot, post, pre
-from .dataclass import Skeleton, register_skeleton_methods
+from .dataclass import Skeleton, Soma, register_skeleton_methods
 from .plot.vis2d import projection as plot2d
 from .plot.vis2d import threeviews as plot3v
 from .plot.vis3d import view3d
@@ -17,6 +17,7 @@ register_skeleton_methods(post, getattr(post, "__skeleton__", None))
 
 __all__ = [
     "Skeleton",
+    "Soma",
     "skeletonize",
     "plot2d",
     "plot3v",
