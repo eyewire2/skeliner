@@ -357,7 +357,7 @@ class TestFindGaps:
         mesh = _two_cylinders(separation=1500.0)
         gaps = pre.find_gaps(mesh)
         assert len(gaps) == 1
-        faces_a, faces_b, dist = gaps[0]
+        faces_a, faces_b, dist, *_ = gaps[0]
         assert len(faces_a) > 0
         assert len(faces_b) > 0
         assert dist > 0
@@ -366,7 +366,7 @@ class TestFindGaps:
         mesh = _two_cylinders(separation=1500.0)
         gaps = pre.find_gaps(mesh)
         assert len(gaps) == 1
-        _, _, dist = gaps[0]
+        _, _, dist, *_ = gaps[0]
         assert dist > 100  # should be roughly the separation
 
     def test_sorted_by_distance(self):

@@ -2066,10 +2066,11 @@ def find_gaps(
 
     Returns
     -------
-    list[tuple[list[int], list[int], float]]
-        Each element is ``(faces_a, faces_b, gap_distance)`` where
-        *faces_a* and *faces_b* are face-index lists on each side of
-        the gap, sorted by gap distance (smallest first).
+    list[tuple[list[int], list[int], float, int, int]]
+        Each element is ``(faces_a, faces_b, gap_distance, disc_a, disc_b)``
+        where *faces_a* and *faces_b* are face-index lists on each side of
+        the gap, *disc_a* and *disc_b* are disconnected component indices
+        (``-1`` for main), sorted by gap distance (smallest first).
     """
     if mesh_stats is not None:
         _, labels, main, _ = mesh_stats
@@ -2186,7 +2187,10 @@ def find_gaps(
         fa = _tip_faces_bfs(comp_data[cid_a]["fi"], va)
         fb = _tip_faces_bfs(comp_data[cid_b]["fi"], vb)
         if fa and fb:
-            gaps.append((fa, fb, dist))
+            # Map component IDs to disc indices (-1 for main)
+            disc_idx_a = disc_cids.index(cid_a) if cid_a in disc_cids else -1
+            disc_idx_b = disc_cids.index(cid_b) if cid_b in disc_cids else -1
+            gaps.append((fa, fb, dist, disc_idx_a, disc_idx_b))
 
     # Precompute pairwise distances between all components (main + disc).
     # Then build an MST rooted at main so every disc component has a
@@ -2248,14 +2252,31 @@ def find_gaps(
     # Sort by gap distance
     gaps.sort(key=lambda x: x[2])
 
+    # Filter outlier gaps using Otsu on log distances.
+    # Only filter when there are enough gaps to form distinct groups
+    # and the max distance is at least 5x the median (clear outlier).
+    if len(gaps) >= 3:
+        dists_arr = np.array([g[2] for g in gaps], dtype=np.float64)
+        if dists_arr[-1] > 5.0 * np.median(dists_arr):
+            log_dists = np.log(np.maximum(dists_arr, 1.0))
+            thresh, _ = _otsu_threshold(log_dists)
+            n_before = len(gaps)
+            gaps = [g for g in gaps if np.log(max(g[2], 1.0)) <= thresh]
+            n_dropped = n_before - len(gaps)
+            if verbose and n_dropped:
+                print(
+                    f"[skeliner.pre] Gaps: dropped {n_dropped} outlier gap(s) "
+                    f"(> {np.exp(thresh):.0f}nm)"
+                )
+
     if verbose:
         print(f"[skeliner.pre] Gaps: {len(gaps)} gaps found")
-        for i, (fa, fb, dist) in enumerate(gaps):
-            ca = mesh.vertices[mesh.faces[fa]].mean(axis=(0, 1))
+        for i, (fa, fb, dist, da, db) in enumerate(gaps):
+            label_a = "main" if da == -1 else f"disc {da}"
+            label_b = "main" if db == -1 else f"disc {db}"
             print(
-                f"  gap {i}: {len(fa)}f ↔ {len(fb)}f, "
-                f"dist={dist:.0f}, "
-                f"near [{ca[0]:.0f}, {ca[1]:.0f}, {ca[2]:.0f}]"
+                f"  gap {i}: {label_a} ({len(fa)}f) ↔ {label_b} ({len(fb)}f), "
+                f"dist={dist:.0f}"
             )
 
     return gaps
@@ -2321,7 +2342,7 @@ def remove_gaps(
     # remove for gaps that successfully produce a loop pair.
     faces_to_remove: set[int] = set()
     loop_pairs: list[tuple[list[int], list[int]]] = []
-    for gap_i, (faces_a, faces_b, dist) in enumerate(gaps):
+    for gap_i, (faces_a, faces_b, dist, *_comp_ids) in enumerate(gaps):
         gap_sel = set(faces_a) | set(faces_b)
         loops = _trace_border_loops(mesh, gap_sel, edge_to_faces)
 
