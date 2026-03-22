@@ -778,6 +778,84 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         return JSONResponse({"ok": True})
 
+    async def save_offsets(request):
+        """Save detected offsets to a file."""
+        cached = mesh_state.get("offsets")
+        if not cached:
+            return JSONResponse(
+                {"ok": False, "error": "No offsets detected"}, status_code=400
+            )
+        import pickle
+        save_path = port_dir / "offsets.pkl"
+        with open(save_path, "wb") as f:
+            pickle.dump(cached, f)
+        return JSONResponse({"ok": True, "path": str(save_path), "n": len(cached)})
+
+    async def load_offsets(request):
+        """Load previously saved offsets and apply annotations."""
+        import pickle
+        save_path = port_dir / "offsets.pkl"
+        if not save_path.exists():
+            return JSONResponse(
+                {"ok": False, "error": "No saved offsets found"}, status_code=404
+            )
+        with open(save_path, "rb") as f:
+            offsets = pickle.load(f)
+        mesh_state["offsets"] = offsets
+
+        # Rebuild annotations
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+        if "edge_groups" not in ann:
+            ann["edge_groups"] = []
+        ann["highlights"] = [
+            h for h in ann["highlights"]
+            if not h.get("label", "").startswith("offset ")
+        ]
+        ann["edge_groups"] = [
+            eg for eg in ann["edge_groups"]
+            if not eg.get("label", "").startswith("offset ")
+        ]
+
+        colors = [
+            [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
+            [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
+        ]
+        mesh = mesh_state["mesh"]
+        centroid = mesh_state["centroid"]
+        for i, o in enumerate(offsets):
+            dx, dy = o["offset"]
+            color = colors[i % len(colors)]
+            ann["highlights"].append({
+                "faces": o["cap_faces"].tolist(),
+                "color": color,
+                "label": (
+                    f"offset {i}: z={o['z_floor']:.0f}→{o['z_ceil']:.0f} "
+                    f"d=({dx:.0f},{dy:.0f}) "
+                    f"err={o['match_error']:.0f} "
+                    f"{len(o['shifted_verts']):,}v"
+                ),
+            })
+            start = (o["floor_center"] - centroid).tolist()
+            end = (o["ceil_center"] - centroid).tolist()
+            midpt = [(s + e) / 2 for s, e in zip(start, end)]
+            ann["edge_groups"].append({
+                "segments": [[start, midpt]],
+                "color": [1.0, 0.2, 0.2],
+                "label": f"offset {i} from",
+            })
+            ann["edge_groups"].append({
+                "segments": [[midpt, end]],
+                "color": [0.2, 1.0, 0.2],
+                "label": f"offset {i} to",
+            })
+
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        return JSONResponse({"ok": True, "nOffsets": len(offsets)})
+
     async def detect_organelles(request):
         """Run organelle detection."""
         if mesh_state["mesh"] is None:
@@ -2271,6 +2349,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),
             Route("/detect_offsets", detect_offsets, methods=["POST"]),
+            Route("/save_offsets", save_offsets, methods=["POST"]),
+            Route("/load_offsets", load_offsets, methods=["POST"]),
             Route("/remove_offsets", do_remove_offsets, methods=["POST"]),
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
             Route("/check_fusion", check_fusion, methods=["POST"]),

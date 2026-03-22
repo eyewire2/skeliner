@@ -4732,54 +4732,67 @@ def remove_offsets(
             print("[skeliner.pre] No offsets to correct")
         return mesh
 
+    z_res = _detect_z_resolution(mesh.vertices)
     new_verts = mesh.vertices.copy()
     caps_to_remove: set[int] = set()
 
-    # Sort offsets by Z so we process from the outermost gap inward.
-    # "below" offsets: process from lowest z_floor first (outermost)
-    # "above" offsets: process from highest z_ceil first (outermost)
-    # Each correction is cumulative — once a layer is corrected,
-    # all layers beyond it must also shift by the same amount.
-    below_offsets = sorted(
-        [r for r in offsets if r.get("shifted_side") == "below"],
-        key=lambda r: r["z_floor"],
-    )
-    above_offsets = sorted(
-        [r for r in offsets if r.get("shifted_side") == "above"],
-        key=lambda r: -r["z_ceil"],
-    )
+    # The ceiling is the anchor (correct). Everything below it moves.
+    # Process from highest z_ceil to lowest (top to bottom) so that
+    # corrections accumulate: each gap shifts everything below,
+    # including layers already corrected by higher gaps.
+    sorted_offsets = sorted(offsets, key=lambda r: -r["z_ceil"])
 
-    # Track cumulative correction per vertex
-    # Process "below" offsets: floor side is shifted, move by +offset
-    for rec in below_offsets:
-        offset = rec["offset"]
-        shifted = rec["shifted_verts"]
-        new_verts[shifted, 0] += offset[0]
-        new_verts[shifted, 1] += offset[1]
+    for rec in sorted_offsets:
+        offset_xy = rec["offset"]
+        z_floor = rec["z_floor"]
+        z_ceil = rec["z_ceil"]
+
+        # 3D correction: XY from contour matching, Z to close the gap
+        dz = z_ceil - z_floor - z_res
+        correction = np.array([offset_xy[0], offset_xy[1], dz])
+
+        # Move vertices below the ceiling that are in the same
+        # spatial region as the offset.  Use the floor cap's
+        # component to determine the XY extent, then select all
+        # vertices in that XY region below the ceiling.
+        floor_xy = rec["floor_center"][:2]
+        ceil_xy = rec["ceil_center"][:2]
+        branch_xy = (floor_xy + ceil_xy) / 2.0
+
+        # XY radius: extent of the cap contours (data-derived)
+        cap_vi = np.unique(mesh.faces[rec["cap_faces"]].ravel())
+        cap_xy = mesh.vertices[cap_vi, :2]
+        cap_extent = np.linalg.norm(cap_xy - branch_xy, axis=1).max()
+        # Generous expansion to catch the full branch
+        xy_radius = max(cap_extent * 5, 5000)
+
+        in_region = (
+            np.linalg.norm(new_verts[:, :2] - branch_xy, axis=1)
+            < xy_radius
+        )
+        below_ceil = new_verts[:, 2] < z_ceil - z_res * 0.5
+        below = in_region & below_ceil
+        n_moved = int(below.sum())
+
+        if n_moved == 0:
+            continue
+
+        new_verts[below] += correction
         caps_to_remove.update(rec["cap_faces"].tolist())
+
+        # Remove faces that bridge the boundary (vertices on both
+        # sides) — these get distorted by the shift
+        face_below = below[mesh.faces]  # (nFaces, 3) bool
+        bridging = face_below.any(axis=1) & ~face_below.all(axis=1)
+        caps_to_remove.update(np.where(bridging)[0].tolist())
 
         if verbose:
             print(
-                f"[skeliner.pre]   Corrected z={rec['z_floor']:.0f}"
-                f"→{rec['z_ceil']:.0f} (below): "
-                f"moved {len(shifted):,} verts by "
-                f"({offset[0]:.0f}, {offset[1]:.0f})"
-            )
-
-    # Process "above" offsets: ceil side is shifted, move by -offset
-    for rec in above_offsets:
-        offset = rec["offset"]
-        shifted = rec["shifted_verts"]
-        new_verts[shifted, 0] -= offset[0]
-        new_verts[shifted, 1] -= offset[1]
-        caps_to_remove.update(rec["cap_faces"].tolist())
-
-        if verbose:
-            print(
-                f"[skeliner.pre]   Corrected z={rec['z_floor']:.0f}"
-                f"→{rec['z_ceil']:.0f} (above): "
-                f"moved {len(shifted):,} verts by "
-                f"({-offset[0]:.0f}, {-offset[1]:.0f})"
+                f"[skeliner.pre]   Corrected z={z_floor:.0f}"
+                f"→{z_ceil:.0f}: "
+                f"moved {n_moved:,} verts by "
+                f"({correction[0]:.0f}, {correction[1]:.0f}, "
+                f"{correction[2]:.0f})"
             )
 
     # Remove cap faces
