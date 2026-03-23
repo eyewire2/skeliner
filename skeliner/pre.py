@@ -1755,13 +1755,25 @@ def find_soma(
             adj[a].append(b)
             adj[b].append(a)
 
+    # BFS adjacency: external surface only (exclude organelle faces).
+    # Organelle pockets inside the soma create topological shortcuts
+    # that fragment ring components and cause premature cutoff.
+    adj_bfs: dict[int, list[int]] = defaultdict(list)
+    non_org_main_fi = main_fi[~organelles[main_fi]]
+    for fi in non_org_main_fi:
+        v = mesh.faces[fi]
+        for i in range(3):
+            a, b = int(v[i]), int(v[(i + 1) % 3])
+            adj_bfs[a].append(b)
+            adj_bfs[b].append(a)
+
     # ── 3. BFS from nearest vertex to centre (no hard cap) ───────
     if verbose:
         print("[skeliner.pre] Soma: BFS ring analysis...")
-    main_verts = np.fromiter(adj.keys(), dtype=np.intp)
+    bfs_verts = np.fromiter(adj_bfs.keys(), dtype=np.intp)
     seed = int(
-        main_verts[
-            np.argmin(np.linalg.norm(mesh.vertices[main_verts] - center, axis=1))
+        bfs_verts[
+            np.argmin(np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1))
         ]
     )
 
@@ -1773,7 +1785,7 @@ def find_soma(
     while queue:
         v = queue.popleft()
         lv = ring_level[v]
-        for nv in adj[v]:
+        for nv in adj_bfs[v]:
             if nv not in ring_level:
                 ring_level[nv] = lv + 1
                 queue.append(nv)
@@ -1808,7 +1820,7 @@ def find_soma(
                     continue
                 visited_ring.add(v)
                 size += 1
-                for nv in adj[v]:
+                for nv in adj_bfs[v]:
                     if nv in ring_set and nv not in visited_ring:
                         rq.append(nv)
             if size > max_comp:
@@ -1870,9 +1882,99 @@ def find_soma(
         bfs_set.update(ring_verts[lv])
     bfs_verts_arr = np.fromiter(bfs_set, dtype=np.intp)
 
-    soma = Soma.fit(mesh.vertices[bfs_verts_arr])
+    initial_soma = Soma.fit(mesh.vertices[bfs_verts_arr])
 
-    soma = _assign_soma_verts(mesh, soma, main_fi, adj, verbose=verbose)
+    soma = _assign_soma_verts(mesh, initial_soma, main_fi, adj, verbose=verbose)
+
+    # ── 6. Prune neurite tubes from absorbed soma ─────────────────
+    #       Pocket absorption may swallow neurite stubs.  Find
+    #       connected components of soma vertices outside the initial
+    #       (pre-absorption) ellipsoid.  A component is a neurite
+    #       tube if it has a narrow attachment to the soma body
+    #       (ratio < 0.2) and is elongated (PCA: λ1 >> λ2 ≈ λ3).
+    #       After pruning tubes, drop any fragments that become
+    #       disconnected from the main soma body when the tube
+    #       boundary (soma verts adjacent to pruned verts) is
+    #       temporarily removed — these are axon sections inside
+    #       the ellipsoid connected only through the pruned tube.
+    soma_set = set(soma.verts.tolist())
+    soma_arr = np.fromiter(soma_set, dtype=np.intp)
+
+    if len(soma_arr) >= 4:
+        body_dist = np.sqrt(
+            (initial_soma._body_coords(mesh.vertices[soma_arr]) ** 2)
+            .sum(axis=1)
+        )
+        inside_set: set[int] = set()
+        outside_set: set[int] = set()
+        for i in range(len(soma_arr)):
+            vi = int(soma_arr[i])
+            (inside_set if body_dist[i] <= 1.0 else outside_set).add(vi)
+
+        if outside_set:
+            # ── 6a. Identify tube-shaped protrusions ──────────────
+            neurite_prune: set[int] = set()
+            n_tubes = 0
+            visited_out: set[int] = set()
+
+            for start in outside_set:
+                if start in visited_out:
+                    continue
+                comp: list[int] = []
+                oq = deque([start])
+                while oq:
+                    v = oq.popleft()
+                    if v in visited_out:
+                        continue
+                    visited_out.add(v)
+                    comp.append(v)
+                    for nv in adj.get(v, []):
+                        if nv in outside_set and nv not in visited_out:
+                            oq.append(nv)
+
+                if len(comp) < 20:
+                    continue
+
+                # Attachment ratio: fraction of comp verts touching
+                # inside.  Tubes have low ratio (narrow throat).
+                attachment = sum(
+                    1 for v in comp
+                    if any(nv in inside_set for nv in adj.get(v, []))
+                )
+                ratio = attachment / len(comp)
+                if ratio < 0.2:
+                    # Check how far the component extends beyond
+                    # the ellipsoid.  Neurite trees reach far
+                    # (body_dist >> 1); soma fins barely extend.
+                    comp_body = initial_soma._body_coords(
+                        mesh.vertices[np.array(comp)]
+                    )
+                    max_extent = float(
+                        np.sqrt((comp_body**2).sum(axis=1)).max()
+                    )
+                    if max_extent > 2.0:
+                        neurite_prune.update(comp)
+                        n_tubes += 1
+
+            if neurite_prune:
+                soma_set -= neurite_prune
+                if verbose:
+                    print(
+                        f"[skeliner.pre]   soma prune: "
+                        f"{n_tubes} neurite tube(s), "
+                        f"removed {len(neurite_prune):,} → "
+                        f"{len(soma_set):,} verts"
+                    )
+
+                # Refit ellipsoid
+                sv = np.fromiter(sorted(soma_set), dtype=np.intp)
+                if len(sv) >= 4:
+                    try:
+                        soma = Soma.fit(mesh.vertices[sv], verts=sv)
+                    except ValueError:
+                        soma.verts = sv
+                else:
+                    soma.verts = sv
 
     if verbose:
         print(
