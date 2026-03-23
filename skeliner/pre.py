@@ -1912,47 +1912,103 @@ def find_soma(
             (inside_set if body_dist[i] <= 1.0 else outside_set).add(vi)
 
         if outside_set:
-            # ── 6a. Identify tube-shaped protrusions ──────────────
+            # ── 6a. Prune neurite stubs ──────────────────────────
+            #        A stub connects the soma body to a neurite tree.
+            #        Identify stubs as outside components that border
+            #        a large non-soma connected component (the neurite
+            #        tree).  Fins protrude into extracellular space
+            #        and do NOT border a large non-soma CC.
+            #        "Large" is determined by Otsu on non-soma CC
+            #        sizes — fully data-driven, no hard thresholds.
+
+            # Find non-soma CCs on the main component
+            all_main_set = set(np.unique(mesh.faces[main_fi]).tolist())
+            non_soma = all_main_set - soma_set
+            vis_ns: set[int] = set()
+            neurite_tree: set[int] = set()
+            ns_sizes: list[int] = []
+            ns_ccs: list[list[int]] = []
+            for ns_start in non_soma:
+                if ns_start in vis_ns:
+                    continue
+                cc: list[int] = []
+                nsq = deque([ns_start])
+                while nsq:
+                    v = nsq.popleft()
+                    if v in vis_ns:
+                        continue
+                    vis_ns.add(v)
+                    cc.append(v)
+                    for nv in adj.get(v, []):
+                        if nv in non_soma and nv not in vis_ns:
+                            nsq.append(nv)
+                ns_ccs.append(cc)
+                ns_sizes.append(len(cc))
+
+            if len(ns_sizes) >= 2:
+                ns_thresh, _ = _otsu_threshold(
+                    np.array(ns_sizes, dtype=np.float64)
+                )
+                for cc, sz in zip(ns_ccs, ns_sizes):
+                    if sz > ns_thresh:
+                        neurite_tree.update(cc)
+            elif len(ns_sizes) == 1:
+                neurite_tree.update(ns_ccs[0])
+
+            # Find outside components; collect features
             neurite_prune: set[int] = set()
             n_tubes = 0
-            visited_out: set[int] = set()
-
-            for start in outside_set:
-                if start in visited_out:
-                    continue
-                comp: list[int] = []
-                oq = deque([start])
-                while oq:
-                    v = oq.popleft()
-                    if v in visited_out:
+            outside_comps: list[tuple[list[int], bool, float]] = []
+            if neurite_tree:
+                visited_out: set[int] = set()
+                for start in outside_set:
+                    if start in visited_out:
                         continue
-                    visited_out.add(v)
-                    comp.append(v)
-                    for nv in adj.get(v, []):
-                        if nv in outside_set and nv not in visited_out:
-                            oq.append(nv)
+                    comp: list[int] = []
+                    oq = deque([start])
+                    while oq:
+                        v = oq.popleft()
+                        if v in visited_out:
+                            continue
+                        visited_out.add(v)
+                        comp.append(v)
+                        for nv in adj.get(v, []):
+                            if nv in outside_set and nv not in visited_out:
+                                oq.append(nv)
 
-                if len(comp) < 20:
-                    continue
+                    if len(comp) < 20:
+                        continue
 
-                # Attachment ratio: fraction of comp verts touching
-                # inside.  Tubes have low ratio (narrow throat).
-                attachment = sum(
-                    1 for v in comp
-                    if any(nv in inside_set for nv in adj.get(v, []))
-                )
-                ratio = attachment / len(comp)
-                if ratio < 0.2:
-                    # Check how far the component extends beyond
-                    # the ellipsoid.  Neurite trees reach far
-                    # (body_dist >> 1); soma fins barely extend.
+                    # Does this component border the neurite tree?
+                    borders = any(
+                        nv in neurite_tree
+                        for v in comp
+                        for nv in adj.get(v, [])
+                    )
+                    # How far does it extend in body coords?
                     comp_body = initial_soma._body_coords(
                         mesh.vertices[np.array(comp)]
                     )
-                    max_extent = float(
+                    max_ext = float(
                         np.sqrt((comp_body**2).sum(axis=1)).max()
                     )
-                    if max_extent > 2.0:
+                    outside_comps.append(
+                        (comp, borders, max_ext)
+                    )
+
+                # Prune components extending far beyond the typical
+                # near-surface bump.  Threshold = 2× the 25th
+                # percentile of extents — data-relative, adapts to
+                # ellipsoid fit quality.
+                all_ext = np.array(
+                    [e for _, _, e in outside_comps],
+                    dtype=np.float64,
+                )
+                q1 = float(np.percentile(all_ext, 25))
+                ext_thresh = 2.0 * q1
+
+                for comp, borders, ext in outside_comps:
+                    if ext > ext_thresh:
                         neurite_prune.update(comp)
                         n_tubes += 1
 
@@ -1961,7 +2017,7 @@ def find_soma(
                 if verbose:
                     print(
                         f"[skeliner.pre]   soma prune: "
-                        f"{n_tubes} neurite tube(s), "
+                        f"{n_tubes} neurite stub(s), "
                         f"removed {len(neurite_prune):,} → "
                         f"{len(soma_set):,} verts"
                     )
