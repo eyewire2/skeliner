@@ -1966,15 +1966,55 @@ def find_soma(
                         f"{len(soma_set):,} verts"
                     )
 
-                # Refit ellipsoid
-                sv = np.fromiter(sorted(soma_set), dtype=np.intp)
-                if len(sv) >= 4:
-                    try:
-                        soma = Soma.fit(mesh.vertices[sv], verts=sv)
-                    except ValueError:
-                        soma.verts = sv
-                else:
+        # ── 6b. Drop verts disconnected from soma body ───────────
+        #        A main-component vert that can only reach the main
+        #        soma body by traversing non-soma faces is not truly
+        #        soma (e.g. axon section inside the ellipsoid).
+        #        Non-main-component verts (organelle fragments inside
+        #        the soma) are always kept.
+        main_vert_set = set(adj.keys())
+        main_soma = soma_set & main_vert_set
+        non_main_soma = soma_set - main_vert_set
+
+        visited_cc: set[int] = set()
+        largest_cc: list[int] = []
+        for cc_start in main_soma:
+            if cc_start in visited_cc:
+                continue
+            cc: list[int] = []
+            ccq = deque([cc_start])
+            while ccq:
+                v = ccq.popleft()
+                if v in visited_cc:
+                    continue
+                visited_cc.add(v)
+                cc.append(v)
+                for nv in adj.get(v, []):
+                    if nv in main_soma and nv not in visited_cc:
+                        ccq.append(nv)
+            if len(cc) > len(largest_cc):
+                largest_cc = cc
+
+        n_disconn = len(main_soma) - len(largest_cc)
+        if n_disconn > 0:
+            soma_set = set(largest_cc) | non_main_soma
+            if verbose:
+                print(
+                    f"[skeliner.pre]   soma prune: "
+                    f"dropped {n_disconn:,} disconnected → "
+                    f"{len(soma_set):,} verts"
+                )
+
+        # Refit ellipsoid to final pruned vertex set
+        if len(soma_set) != len(soma.verts):
+            sv = np.fromiter(sorted(soma_set), dtype=np.intp)
+            if len(sv) >= 4:
+                try:
+                    soma = Soma.fit(mesh.vertices[sv], verts=sv)
+                except ValueError:
                     soma.verts = sv
+            else:
+                soma.verts = sv
 
     if verbose:
         print(
