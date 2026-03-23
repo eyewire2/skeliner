@@ -2142,6 +2142,8 @@ let meshCentroid = [0, 0, 0];
                 return target;
             }
 
+            let transformStartAngle = 0; // screen angle at drag start (rotate)
+
             function onTransformPointerDown(e) {
                 if (e.button !== 0 || !transformMode) return;
                 e.preventDefault();
@@ -2150,8 +2152,13 @@ let meshCentroid = [0, 0, 0];
 
                 if (transformMode === "translate") {
                     transformLastWorld = screenToWorldOnPlane(e.clientX, e.clientY);
+                } else if (transformMode === "rotate") {
+                    // Record the angle from pivot to mouse at drag start
+                    transformStartAngle = Math.atan2(
+                        e.clientY - transformPivotScreen.y,
+                        e.clientX - transformPivotScreen.x,
+                    );
                 }
-                // For rotate, we just need the starting angle (computed from pivot screen pos)
             }
 
             function onTransformPointerMove(e) {
@@ -2181,8 +2188,14 @@ let meshCentroid = [0, 0, 0];
                     transformPivot.add(delta);
                     transformLastWorld = screenToWorldOnPlane(e.clientX, e.clientY);
                 } else if (transformMode === "rotate") {
-                    // Angle = mouse movement relative to pivot on screen
-                    const angle = e.movementX * 0.005;
+                    // Compute absolute angle from pivot to current mouse
+                    const currentAngle = Math.atan2(
+                        e.clientY - transformPivotScreen.y,
+                        e.clientX - transformPivotScreen.x,
+                    );
+                    const totalAngle = currentAngle - transformStartAngle;
+
+                    // Rebuild from original snapshot each frame (no drift)
                     let axis;
                     if (transformAxisConstraint) {
                         axis = new THREE.Vector3(
@@ -2194,12 +2207,13 @@ let meshCentroid = [0, 0, 0];
                         axis = new THREE.Vector3();
                         camera.getWorldDirection(axis);
                     }
-                    const q = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+                    const q = new THREE.Quaternion().setFromAxisAngle(axis, -totalAngle);
                     const v = new THREE.Vector3();
                     for (const off of transformVertexSet) {
-                        v.set(arr[off] - transformPivot.x,
-                              arr[off + 1] - transformPivot.y,
-                              arr[off + 2] - transformPivot.z);
+                        // Start from original positions
+                        v.set(transformOrigPositions[off] - transformPivot.x,
+                              transformOrigPositions[off + 1] - transformPivot.y,
+                              transformOrigPositions[off + 2] - transformPivot.z);
                         v.applyQuaternion(q);
                         arr[off] = v.x + transformPivot.x;
                         arr[off + 1] = v.y + transformPivot.y;
