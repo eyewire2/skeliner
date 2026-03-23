@@ -1625,6 +1625,60 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "facesStitched": n_after - n_before + len(face_indices),
         })
 
+    async def edit_vertices(request):
+        """Apply vertex position edits from the transform gizmo."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        body = await request.json()
+        face_edits = body.get("faceEdits", [])
+        if not face_edits:
+            return JSONResponse(
+                {"ok": False, "error": "No edits provided"}, status_code=400
+            )
+
+        mesh = mesh_state["mesh"]
+        verts = np.array(mesh.vertices, dtype=np.float64)  # copy
+        faces = np.asarray(mesh.faces, dtype=np.int32)
+        centroid = mesh_state["centroid"]
+
+        # Push undo before modifying
+        old = mesh_state["mesh"]
+        if old is not None:
+            _undo_stack.append(old)
+            if len(_undo_stack) > _UNDO_LIMIT:
+                _undo_stack.pop(0)
+
+        # Apply edits: each faceEdit has {face: int, verts: [[x,y,z]*3]}
+        # The frontend positions are centroid-subtracted, so add centroid back
+        for edit in face_edits:
+            fi = edit["face"]
+            new_verts = edit["verts"]
+            for vi in range(3):
+                vert_idx = faces[fi, vi]
+                verts[vert_idx] = [
+                    new_verts[vi][0] + centroid[0],
+                    new_verts[vi][1] + centroid[1],
+                    new_verts[vi][2] + centroid[2],
+                ]
+
+        new_mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+        mesh_state["mesh"] = new_mesh
+
+        # Keep the original centroid
+        original_centroid = mesh_state["centroid"]
+        buffers = _mesh_to_buffers(new_mesh, centroid=original_centroid)
+        mesh_state["buffers"] = buffers
+        buffers["keepCamera"] = True
+        await broadcast({"type": "mesh_loaded", "payload": buffers})
+
+        n_faces_edited = len(face_edits)
+        print(f"Edit vertices: {n_faces_edited} faces modified")
+
+        return JSONResponse({"ok": True, "facesEdited": n_faces_edited})
+
     async def undo_mesh(request):
         """Revert to the previous mesh state."""
         if not _undo_stack:
@@ -2388,6 +2442,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
+            Route("/edit_vertices", edit_vertices, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/align_offsets", do_align_offsets, methods=["POST"]),
             Route("/compact_mesh", do_compact_mesh, methods=["POST"]),

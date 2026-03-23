@@ -242,6 +242,8 @@
               <div>Click: select</div>
               <div>Shift+click: highlight</div>
               <div>Shift+drag: lasso</div>
+              <div>G: grab (drag to move)</div>
+              <div>T: rotate (drag to rotate)</div>
               <div>H: toggle UI</div>
               <div>L: lock camera</div>
               <div>R: reset camera</div>
@@ -555,6 +557,17 @@ let meshCentroid = [0, 0, 0];
             let manualHighlightFaces = new Set();
             let manualHighlightMesh = null;
 
+            // ── Transform (edit mesh) state ─────────────────────────────────
+            let transformMode = null;         // 'translate' | 'rotate' | null
+            let transformDragging = false;    // true while mouse is held down
+            let transformOrigPositions = null; // Float32Array snapshot for cancel
+            let transformFaceIndices = null;  // Array of face indices being edited
+            let transformVertexSet = null;    // Set of unique vertex buffer offsets
+            let transformPivot = new THREE.Vector3(); // centroid of selection (original)
+            let transformPivotScreen = new THREE.Vector2(); // pivot projected to screen
+            let transformAxisConstraint = null; // null | 'x' | 'y' | 'z'
+            let transformLastWorld = new THREE.Vector3(); // last world-space mouse pos on plane
+
             // ── Init ─────────────────────────────────────────────────────────────
             async function init() {
                 scene = new THREE.Scene();
@@ -580,6 +593,7 @@ let meshCentroid = [0, 0, 0];
                 let _rotDragging = false, _rotPrevX = 0, _rotPrevY = 0;
                 renderer.domElement.addEventListener("pointerdown", (e) => {
                     if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return;
+                    if (transformMode) return; // don't rotate while editing mesh
                     _rotDragging = true;
                     _rotPrevX = e.clientX;
                     _rotPrevY = e.clientY;
@@ -1009,6 +1023,8 @@ let meshCentroid = [0, 0, 0];
                 scene.add(wireframeObj);
 
                 if (!data.keepCamera) fitCamera();
+                // Rebuild highlights (e.g. after edit_vertices broadcast)
+                if (manualHighlightFaces.size > 0) rebuildManualHighlight();
             }
 
             // ── Build skeleton ───────────────────────────────────────────────────
@@ -1228,6 +1244,7 @@ let meshCentroid = [0, 0, 0];
             const mouse = new THREE.Vector2();
 
             function onClickSelect(event) {
+                if (transformMode || _suppressNextClick) return;
                 mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
                 mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
                 raycaster.setFromCamera(mouse, camera);
@@ -2053,6 +2070,248 @@ let meshCentroid = [0, 0, 0];
                     }).catch(() => {});
             }
 
+            // ── Transform (edit mesh) ─────────────────────────────────────
+            // G: enter grab mode, then click-drag to move faces on camera plane.
+            // T: enter rotate mode, then click-drag to rotate (angle from pivot).
+            // X/Y/Z: constrain to axis. Escape/RMB: cancel. Release drag: confirm.
+
+            function initTransformState() {
+                if (!meshGeometry || manualHighlightFaces.size === 0) return false;
+                const posAttr = meshGeometry.getAttribute("position");
+
+                transformFaceIndices = Array.from(manualHighlightFaces);
+                transformVertexSet = new Set();
+                transformPivot.set(0, 0, 0);
+                let count = 0;
+                for (const fi of transformFaceIndices) {
+                    for (let v = 0; v < 3; v++) {
+                        const off = fi * 9 + v * 3;
+                        transformVertexSet.add(off);
+                        transformPivot.x += posAttr.array[off];
+                        transformPivot.y += posAttr.array[off + 1];
+                        transformPivot.z += posAttr.array[off + 2];
+                        count++;
+                    }
+                }
+                transformPivot.divideScalar(count);
+
+                // Project pivot to screen for rotate angle reference
+                const pv = transformPivot.clone().project(camera);
+                transformPivotScreen.set(
+                    (pv.x * 0.5 + 0.5) * window.innerWidth,
+                    (-pv.y * 0.5 + 0.5) * window.innerHeight,
+                );
+
+                transformOrigPositions = new Float32Array(posAttr.array);
+                transformAxisConstraint = null;
+                return true;
+            }
+
+            function startTransform(mode) {
+                if (transformMode) cleanupTransform();
+                if (!initTransformState()) return;
+
+                transformMode = mode;
+                transformDragging = false;
+
+                // Disable orbit and custom rotation
+                controls.enabled = false;
+
+                showTransformStatus();
+
+                renderer.domElement.addEventListener("pointerdown", onTransformPointerDown);
+                window.addEventListener("pointermove", onTransformPointerMove);
+                window.addEventListener("pointerup", onTransformPointerUp);
+                window.addEventListener("contextmenu", onTransformRightClick);
+            }
+
+            // Unproject screen coords to world point on the camera plane at pivot depth
+            function screenToWorldOnPlane(sx, sy) {
+                const ndc = new THREE.Vector2(
+                    (sx / window.innerWidth) * 2 - 1,
+                    -(sy / window.innerHeight) * 2 + 1,
+                );
+                const raycaster = new THREE.Raycaster();
+                raycaster.setFromCamera(ndc, camera);
+                // Plane through pivot, facing camera
+                const camDir = new THREE.Vector3();
+                camera.getWorldDirection(camDir);
+                const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, transformPivot);
+                const target = new THREE.Vector3();
+                raycaster.ray.intersectPlane(plane, target);
+                return target;
+            }
+
+            function onTransformPointerDown(e) {
+                if (e.button !== 0 || !transformMode) return;
+                e.preventDefault();
+                e.stopPropagation();
+                transformDragging = true;
+
+                if (transformMode === "translate") {
+                    transformLastWorld = screenToWorldOnPlane(e.clientX, e.clientY);
+                }
+                // For rotate, we just need the starting angle (computed from pivot screen pos)
+            }
+
+            function onTransformPointerMove(e) {
+                if (!transformDragging || !transformMode || !meshGeometry) return;
+                const posAttr = meshGeometry.getAttribute("position");
+                const arr = posAttr.array;
+
+                if (transformMode === "translate") {
+                    const worldNow = screenToWorldOnPlane(e.clientX, e.clientY);
+                    let delta = worldNow.clone().sub(transformLastWorld);
+
+                    if (transformAxisConstraint) {
+                        const axis = new THREE.Vector3(
+                            transformAxisConstraint === "x" ? 1 : 0,
+                            transformAxisConstraint === "y" ? 1 : 0,
+                            transformAxisConstraint === "z" ? 1 : 0,
+                        );
+                        delta = axis.multiplyScalar(delta.dot(axis));
+                    }
+
+                    for (const off of transformVertexSet) {
+                        arr[off] += delta.x;
+                        arr[off + 1] += delta.y;
+                        arr[off + 2] += delta.z;
+                    }
+                    // Update pivot so it tracks with the selection
+                    transformPivot.add(delta);
+                    transformLastWorld = screenToWorldOnPlane(e.clientX, e.clientY);
+                } else if (transformMode === "rotate") {
+                    // Angle = mouse movement relative to pivot on screen
+                    const angle = e.movementX * 0.005;
+                    let axis;
+                    if (transformAxisConstraint) {
+                        axis = new THREE.Vector3(
+                            transformAxisConstraint === "x" ? 1 : 0,
+                            transformAxisConstraint === "y" ? 1 : 0,
+                            transformAxisConstraint === "z" ? 1 : 0,
+                        );
+                    } else {
+                        axis = new THREE.Vector3();
+                        camera.getWorldDirection(axis);
+                    }
+                    const q = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+                    const v = new THREE.Vector3();
+                    for (const off of transformVertexSet) {
+                        v.set(arr[off] - transformPivot.x,
+                              arr[off + 1] - transformPivot.y,
+                              arr[off + 2] - transformPivot.z);
+                        v.applyQuaternion(q);
+                        arr[off] = v.x + transformPivot.x;
+                        arr[off + 1] = v.y + transformPivot.y;
+                        arr[off + 2] = v.z + transformPivot.z;
+                    }
+                }
+
+                posAttr.needsUpdate = true;
+                meshGeometry.computeVertexNormals();
+                rebuildManualHighlight();
+            }
+
+            let _suppressNextClick = false;
+            function onTransformPointerUp(e) {
+                if (e.button !== 0 || !transformDragging) return;
+                transformDragging = false;
+                confirmTransform();
+                // Suppress the click event that follows this pointerup
+                _suppressNextClick = true;
+                setTimeout(() => { _suppressNextClick = false; }, 0);
+            }
+
+            function onTransformRightClick(e) {
+                if (!transformMode) return;
+                e.preventDefault();
+                cancelTransform();
+            }
+
+            async function confirmTransform() {
+                if (!transformMode) return;
+                const posAttr = meshGeometry.getAttribute("position");
+
+                // Collect per-face vertex positions to send to backend
+                const faceEdits = [];
+                for (const fi of transformFaceIndices) {
+                    const base = fi * 9;
+                    const verts = [];
+                    for (let v = 0; v < 3; v++) {
+                        verts.push([
+                            posAttr.array[base + v * 3],
+                            posAttr.array[base + v * 3 + 1],
+                            posAttr.array[base + v * 3 + 2],
+                        ]);
+                    }
+                    faceEdits.push({ face: fi, verts });
+                }
+
+                cleanupTransform();
+
+                // Send to backend
+                try {
+                    const resp = await fetch("/edit_vertices", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ faceEdits }),
+                    });
+                    const data = await resp.json();
+                    if (!data.ok) {
+                        showLogStatus("Edit failed: " + (data.error || "unknown"));
+                    }
+                } catch (e) {
+                    showLogStatus("Edit failed: " + e.message);
+                }
+            }
+
+            function cancelTransform() {
+                if (!transformMode) return;
+                const posAttr = meshGeometry.getAttribute("position");
+                posAttr.array.set(transformOrigPositions);
+                posAttr.needsUpdate = true;
+                meshGeometry.computeVertexNormals();
+                rebuildManualHighlight();
+                cleanupTransform();
+            }
+
+            function cleanupTransform() {
+                renderer.domElement.removeEventListener("pointerdown", onTransformPointerDown);
+                window.removeEventListener("pointermove", onTransformPointerMove);
+                window.removeEventListener("pointerup", onTransformPointerUp);
+                window.removeEventListener("contextmenu", onTransformRightClick);
+                transformMode = null;
+                transformDragging = false;
+                transformOrigPositions = null;
+                transformFaceIndices = null;
+                transformVertexSet = null;
+                transformAxisConstraint = null;
+                controls.enabled = true;
+                hideTransformStatus();
+            }
+
+            function showTransformStatus() {
+                let el = document.getElementById("transform-status");
+                if (!el) {
+                    el = document.createElement("div");
+                    el.id = "transform-status";
+                    el.style.cssText = "position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,100,200,0.8);color:#fff;padding:6px 16px;border-radius:4px;font-size:13px;font-family:monospace;z-index:200;";
+                    document.body.appendChild(el);
+                }
+                const labels = { translate: "Grab", rotate: "Rotate" };
+                const modeLabel = labels[transformMode] || transformMode;
+                const axisLabel = transformAxisConstraint
+                    ? ` [${transformAxisConstraint.toUpperCase()} axis]`
+                    : "";
+                el.textContent = `${modeLabel}${axisLabel} — Drag to ${transformMode === "translate" ? "move" : "rotate"}, Esc/RMB: cancel, X/Y/Z: constrain`;
+                el.style.display = "block";
+            }
+
+            function hideTransformStatus() {
+                const el = document.getElementById("transform-status");
+                if (el) el.style.display = "none";
+            }
+
             const SAVE_COLORS = [
                 [0.2, 0.6, 1.0],
                 [0.1, 0.9, 0.4],
@@ -2133,6 +2392,7 @@ let meshCentroid = [0, 0, 0];
 
                 renderer.domElement.addEventListener("pointerdown", (e) => {
                     if (!e.shiftKey || e.button !== 0) return;
+                    if (transformMode) return; // no lasso during transform
                     // Prevent orbit controls from handling shift+drag
                     controls.enabled = false;
                     dragging = true;
@@ -2994,6 +3254,37 @@ let meshCentroid = [0, 0, 0];
             function onKeyDown(e) {
               // Ignore when typing in inputs
               if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+
+              // Transform mode keys
+              if (e.key === 'Escape' && transformMode) { cancelTransform(); return; }
+
+              // Axis constraints during active transform
+              if (transformMode && (e.key === 'x' || e.key === 'X')) {
+                  transformAxisConstraint = transformAxisConstraint === 'x' ? null : 'x';
+                  showTransformStatus(); return;
+              }
+              if (transformMode && (e.key === 'y' || e.key === 'Y')) {
+                  transformAxisConstraint = transformAxisConstraint === 'y' ? null : 'y';
+                  showTransformStatus(); return;
+              }
+              if (transformMode && (e.key === 'z' || e.key === 'Z')) {
+                  transformAxisConstraint = transformAxisConstraint === 'z' ? null : 'z';
+                  showTransformStatus(); return;
+              }
+
+              if (e.key === 'g' || e.key === 'G') {
+                  if (transformMode) cancelTransform();
+                  startTransform('translate');
+                  return;
+              }
+              if ((e.key === 't' || e.key === 'T') && !e.ctrlKey && !e.metaKey) {
+                  if (transformMode) cancelTransform();
+                  startTransform('rotate');
+                  return;
+              }
+
+              if (transformMode) return; // block other keys during transform
+
               if (e.key === 'h' || e.key === 'H') togglePanels();
               if (e.key === 'l' || e.key === 'L') toggleCameraLock();
               if (e.key === 'r' || e.key === 'R') { localStorage.removeItem('skeliner_camera'); fitCamera(); }
