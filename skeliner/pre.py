@@ -4452,116 +4452,141 @@ def find_offsets(
     centroids = mesh.triangles_center
     n_faces = len(mesh.faces)
 
-    # ── 1. Detect Z resolution ──
+    # ── 1. Detect Z resolution and flat faces ──
     z_res = _detect_z_resolution(mesh.vertices)
-    if verbose:
-        print(f"[skeliner.pre] Offsets: Z resolution = {z_res:.1f} nm")
-
-    # ── 2. Identify flat Z-facing faces ──
-    # Use Otsu on |nz| to find the threshold separating cap faces
-    abs_nz = np.abs(nz)
-    nz_thresh, nz_sep = _otsu_threshold(abs_nz)
-    # Cap faces must have |nz| very close to 1; enforce a minimum of 0.95
-    nz_thresh = max(nz_thresh, 0.95)
-    flat_mask = abs_nz > nz_thresh
-    if verbose:
-        print(
-            f"[skeliner.pre] Offsets: |nz| threshold = {nz_thresh:.3f} "
-            f"(Otsu sep = {nz_sep:.2f}), {flat_mask.sum():,} flat faces"
-        )
-
-    # ── 3. Bin faces by Z-plane, compute flat fraction ──
+    flat_mask = np.abs(nz) > 0.99
     face_z = np.round(centroids[:, 2] / z_res) * z_res
-    total_per_z: dict[float, int] = defaultdict(int)
-    flat_per_z: dict[float, int] = defaultdict(int)
-    for fi in range(n_faces):
-        z = float(face_z[fi])
-        total_per_z[z] += 1
-        if flat_mask[fi]:
-            flat_per_z[z] += 1
-
-    # Flat fraction per Z-plane (only planes with >= 3 faces)
-    z_planes = []
-    fracs = []
-    for z in sorted(total_per_z):
-        t = total_per_z[z]
-        if t < 3:
-            continue
-        f = flat_per_z.get(z, 0) / t
-        z_planes.append(z)
-        fracs.append(f)
-    fracs_arr = np.array(fracs)
-
-    # ── 4. Find offset boundary planes using Otsu on flat fraction ──
-    frac_thresh, frac_sep = _otsu_threshold(fracs_arr)
-    # Enforce a minimum of 0.3 — below this is unlikely to be a real cap
-    frac_thresh = max(frac_thresh, 0.3)
+    vert_z = np.round(mesh.vertices[:, 2] / z_res) * z_res
     if verbose:
         print(
-            f"[skeliner.pre] Offsets: flat-fraction threshold = "
-            f"{frac_thresh:.2f} (Otsu sep = {frac_sep:.2f})"
+            f"[skeliner.pre] Offsets: Z resolution = {z_res:.1f} nm, "
+            f"{flat_mask.sum():,} flat faces"
         )
 
-    boundary_planes: list[tuple[float, str]] = []  # (z, "FLOOR" or "CEIL")
-    for z, frac in zip(z_planes, fracs):
-        if frac <= frac_thresh:
-            continue
-        # Determine direction: count up-facing vs down-facing flat faces
-        up = 0
-        down = 0
-        for fi in range(n_faces):
-            if face_z[fi] == z and flat_mask[fi]:
-                if nz[fi] > 0:
-                    up += 1
-                else:
-                    down += 1
-        cap_type = "FLOOR" if up > down else "CEIL"
-        boundary_planes.append((z, cap_type))
-
-    if verbose:
-        print(f"[skeliner.pre] Offsets: {len(boundary_planes)} boundary planes")
-        for z, ct in boundary_planes:
-            t = total_per_z[z]
-            f = flat_per_z.get(z, 0)
-            print(f"[skeliner.pre]   z={z:.0f} {ct} ({f}/{t} = {f / t:.0%})")
-
-    # ── 5. Pair FLOOR → CEIL into gaps ──
-    gaps: list[tuple[float, float]] = []
-    i = 0
-    while i < len(boundary_planes):
-        z_i, type_i = boundary_planes[i]
-        if type_i == "FLOOR":
-            # Look for the next CEIL within a reasonable Z distance
-            for j in range(i + 1, len(boundary_planes)):
-                z_j, type_j = boundary_planes[j]
-                if type_j == "CEIL" and z_j - z_i < z_res * 50:
-                    gaps.append((z_i, z_j))
-                    i = j + 1
-                    break
-            else:
-                i += 1
-        else:
-            i += 1
-
-    if verbose:
-        print(f"[skeliner.pre] Offsets: {len(gaps)} FLOOR→CEIL gap pairs")
-
-    # ── 6. For each gap: cluster caps, match contours ──
-    vert_z = np.round(mesh.vertices[:, 2] / z_res) * z_res
-    cluster_radius = float(np.median(mesh.edges_unique_length)) * 20
-
-    # Precompute face connected components for same-component check
+    # ── 2. Find Z gaps per connected component ──
+    # A gap exists when a component has faces at z=A and z=B
+    # with nothing in between (B - A > 1.5 * z_res).
+    # Also check between nearby components at similar XY.
     comp_labels, _ = _face_edge_components(mesh)
+    n_comps = int(comp_labels.max()) + 1
+
+    # Per-component: find Z-range and gaps
+    gaps: list[tuple[float, float]] = []
+    seen_gaps: set[tuple[float, float]] = set()
+
+    for c in range(n_comps):
+        c_mask = comp_labels == c
+        if not c_mask.any():
+            continue
+        c_z = np.unique(face_z[c_mask])
+        if len(c_z) < 2:
+            continue
+        c_z = np.sort(c_z)
+        diffs = np.diff(c_z)
+        for i, d in enumerate(diffs):
+            if d > z_res * 1.5:
+                gap = (float(c_z[i]), float(c_z[i + 1]))
+                if gap not in seen_gaps:
+                    seen_gaps.add(gap)
+                    gaps.append(gap)
+
+    # Also find gaps BETWEEN nearby significant components
+    comp_z_ranges: list[tuple[int, float, float, np.ndarray]] = []
+    for c in range(n_comps):
+        c_mask = comp_labels == c
+        if not c_mask.any() or c_mask.sum() < 50:
+            continue
+        c_fi = np.where(c_mask)[0]
+        c_z_min = float(face_z[c_fi].min())
+        c_z_max = float(face_z[c_fi].max())
+        c_xy = centroids[c_fi, :2].mean(axis=0)
+        comp_z_ranges.append((c, c_z_min, c_z_max, c_xy))
+
+    # For each component, find NEAREST neighbor above and below
+    for i, (ci, zi_min, zi_max, xyi) in enumerate(comp_z_ranges):
+        best_above = None
+        best_above_gap = float("inf")
+        best_below = None
+        best_below_gap = float("inf")
+        for j, (cj, zj_min, zj_max, xyj) in enumerate(comp_z_ranges):
+            if i == j:
+                continue
+            if float(np.linalg.norm(xyi - xyj)) > 20000:
+                continue
+            # cj is above ci
+            if zj_min > zi_max and zj_min - zi_max < best_above_gap:
+                best_above_gap = zj_min - zi_max
+                best_above = (zi_max, zj_min)
+            # cj is below ci
+            if zi_min > zj_max and zi_min - zj_max < best_below_gap:
+                best_below_gap = zi_min - zj_max
+                best_below = (zj_max, zi_min)
+        for gap in [best_above, best_below]:
+            if gap and gap[1] - gap[0] > z_res * 1.5:
+                if gap not in seen_gaps:
+                    seen_gaps.add(gap)
+                    gaps.append(gap)
+
+    gaps.sort()
+    if verbose:
+        print(f"[skeliner.pre] Offsets: {len(gaps)} Z-gaps found")
+
+    # ── 3. For each gap, check for flat caps at boundaries ──
+    comp_labels, _ = _face_edge_components(mesh)
+    cluster_radius = float(np.median(mesh.edges_unique_length)) * 20
 
     results: list[dict] = []
     for z_floor, z_ceil in gaps:
-        # Collect cap face indices at both planes
-        cap_fi_floor = [
-            fi for fi in range(n_faces) if face_z[fi] == z_floor and flat_mask[fi]
-        ]
-        cap_fi_ceil = [
-            fi for fi in range(n_faces) if face_z[fi] == z_ceil and flat_mask[fi]
-        ]
+        # Flat faces at the gap boundaries
+        cap_fi_floor = np.where(
+            (face_z == z_floor) & flat_mask
+        )[0]
+        cap_fi_ceil = np.where(
+            (face_z == z_ceil) & flat_mask
+        )[0]
+
+        if len(cap_fi_floor) < 3 or len(cap_fi_ceil) < 3:
+            continue
+
+        floor_comp_id = int(comp_labels[cap_fi_floor[0]])
+        ceil_comp_id = int(comp_labels[cap_fi_ceil[0]])
+
+        # The flat caps must cover significant area (closing a tube,
+        # not a tiny organelle surface).  Use Otsu on all flat face
+        # areas to separate real caps from incidental flat faces.
+        floor_cap_area = float(mesh.area_faces[cap_fi_floor].sum())
+        ceil_cap_area = float(mesh.area_faces[cap_fi_ceil].sum())
+        median_face_area = float(np.median(mesh.area_faces))
+        # Cap must be larger than a few typical faces
+        if floor_cap_area < median_face_area * 5:
+            continue
+        if ceil_cap_area < median_face_area * 5:
+            continue
+
+        # Skip if the DOMINANT component at floor and ceil is the
+        # same (minor components like main mesh may appear at both)
+        floor_comp_counts: dict[int, int] = defaultdict(int)
+        for fi in cap_fi_floor:
+            floor_comp_counts[int(comp_labels[fi])] += 1
+        ceil_comp_counts: dict[int, int] = defaultdict(int)
+        for fi in cap_fi_ceil:
+            ceil_comp_counts[int(comp_labels[fi])] += 1
+        floor_dominant = max(floor_comp_counts, key=floor_comp_counts.get)
+        ceil_dominant = max(ceil_comp_counts, key=ceil_comp_counts.get)
+        if floor_dominant == ceil_dominant:
+            continue
+
+        # Verify clean gap: the floor cap's component must have
+        # no faces between z_floor and z_ceil.  Other components
+        # (like the main mesh) may have faces there — that's OK.
+        floor_comp = int(comp_labels[cap_fi_floor[0]])
+        in_floor_comp = comp_labels == floor_comp
+        in_gap_z = (face_z > z_floor + z_res * 0.5) & (
+            face_z < z_ceil - z_res * 0.5
+        )
+        faces_in_gap = (in_floor_comp & in_gap_z).sum()
+        if faces_in_gap > 0:
+            continue
 
         # Get cap vertices at each Z
         floor_vi = np.unique(mesh.faces[cap_fi_floor].ravel())
@@ -4579,7 +4604,7 @@ def find_offsets(
         floor_clusters = _cluster_xy(floor_xy, cluster_radius)
         ceil_clusters = _cluster_xy(ceil_xy, cluster_radius)
 
-        # Match ceil → floor (so unmatched floor clusters drop)
+        # Match ceil → floor
         used_floor: set[int] = set()
         for cc in ceil_clusters:
             if len(cc) < 3:
@@ -4599,103 +4624,69 @@ def find_offsets(
             used_floor.add(best_fi)
             fc = floor_clusters[best_fi]
 
-            # If the floor cluster has vertices far from the ceiling,
-            # keep only those within the ceiling's own extent
-            ceil_extent = np.linalg.norm(cc - cc_center, axis=1).max()
-            fc_dists_to_ceil = np.linalg.norm(fc - cc_center, axis=1)
-            near_mask = fc_dists_to_ceil < ceil_extent * 3
-            if near_mask.sum() >= 3:
-                fc = fc[near_mask]
+            # Filter floor cluster to vertices near ceiling
+            ceil_extent = np.linalg.norm(
+                cc - cc_center, axis=1
+            ).max()
+            fc_dists = np.linalg.norm(fc - cc_center, axis=1)
+            near = fc[fc_dists < ceil_extent * 3]
+            if len(near) >= 3:
+                fc = near
             fc_center = fc.mean(axis=0)
 
             # Measure offset via shape matching
             offset, err = _match_contour_offset(cc, fc, z_res)
 
-            # Skip if floor and ceil caps share a mesh component
-            floor_cap_in_branch = [
-                fi
-                for fi in cap_fi_floor
-                if np.linalg.norm(centroids[fi, :2] - fc_center) < cluster_radius
+            # Determine shifted side
+            floor_cap_local = [
+                fi for fi in cap_fi_floor
+                if np.linalg.norm(centroids[fi, :2] - fc_center)
+                < cluster_radius
             ]
-            ceil_cap_in_branch = [
-                fi
-                for fi in cap_fi_ceil
-                if np.linalg.norm(centroids[fi, :2] - cc_center) < cluster_radius
+            ceil_cap_local = [
+                fi for fi in cap_fi_ceil
+                if np.linalg.norm(centroids[fi, :2] - cc_center)
+                < cluster_radius
             ]
-            if floor_cap_in_branch and ceil_cap_in_branch:
-                floor_comps = set(
-                    int(comp_labels[fi])
-                    for fi in floor_cap_in_branch
-                    if comp_labels[fi] >= 0
-                )
-                ceil_comps = set(
-                    int(comp_labels[fi])
-                    for fi in ceil_cap_in_branch
-                    if comp_labels[fi] >= 0
-                )
-                if floor_comps & ceil_comps:
-                    if verbose:
-                        print(
-                            f"[skeliner.pre]   Gap z={z_floor:.0f}"
-                            f"→{z_ceil:.0f}: skipped "
-                            f"(same component {floor_comps & ceil_comps})"
-                        )
-                    continue
-
-            # Skip if floor and ceil differ too much in size
-            size_ratio = len(fc) / len(cc) if len(cc) > 0 else 0
-            if size_ratio > 5 or size_ratio < 0.2:
-                if verbose:
-                    print(
-                        f"[skeliner.pre]   Gap z={z_floor:.0f}"
-                        f"→{z_ceil:.0f}: skipped "
-                        f"(size mismatch {len(fc)}v vs {len(cc)}v)"
-                    )
+            f_comps = set(
+                int(comp_labels[fi]) for fi in floor_cap_local
+                if comp_labels[fi] >= 0
+            )
+            c_comps = set(
+                int(comp_labels[fi]) for fi in ceil_cap_local
+                if comp_labels[fi] >= 0
+            )
+            # Same component at branch level → skip
+            if f_comps & c_comps:
                 continue
 
-            # The floor and ceil caps are in different components.
-            # The smaller component is the shifted piece — move all
-            # its vertices.
-            cc_center = cc.mean(axis=0)
-            floor_cap_comps = set(
-                int(comp_labels[fi])
-                for fi in floor_cap_in_branch
-                if comp_labels[fi] >= 0
+            f_size = sum(
+                int((comp_labels == c).sum()) for c in f_comps
             )
-            ceil_cap_comps = set(
-                int(comp_labels[fi])
-                for fi in ceil_cap_in_branch
-                if comp_labels[fi] >= 0
+            c_size = sum(
+                int((comp_labels == c).sum()) for c in c_comps
             )
-
-            # Count faces in each side's component(s)
-            floor_comp_size = sum(
-                int((comp_labels == c).sum()) for c in floor_cap_comps
-            )
-            ceil_comp_size = sum(int((comp_labels == c).sum()) for c in ceil_cap_comps)
-
-            if floor_comp_size <= ceil_comp_size:
+            if f_size <= c_size:
                 shifted_side = "below"
-                shifted_comps = floor_cap_comps
+                s_comps = f_comps
             else:
                 shifted_side = "above"
-                shifted_comps = ceil_cap_comps
+                s_comps = c_comps
 
-            # All vertices in the shifted component(s)
-            shifted_face_mask = np.zeros(n_faces, dtype=bool)
-            for c in shifted_comps:
-                shifted_face_mask |= comp_labels == c
-            shifted_vi = np.unique(mesh.faces[shifted_face_mask].ravel())
+            s_mask = np.zeros(n_faces, dtype=bool)
+            for c in s_comps:
+                s_mask |= comp_labels == c
+            shifted_vi = np.unique(mesh.faces[s_mask].ravel())
 
-            # Cap faces within this branch
-            branch_cap_fi = floor_cap_in_branch + ceil_cap_in_branch
-            cap_faces = np.array(branch_cap_fi, dtype=np.intp)
-
-            # Arrow: from floor position to corrected position
-            # (floor_center + offset = where it should move to)
-            floor_pos = np.array([fc_center[0], fc_center[1], z_floor])
+            cap_faces = np.array(
+                floor_cap_local + ceil_cap_local, dtype=np.intp
+            )
+            floor_pos = np.array(
+                [fc_center[0], fc_center[1], z_floor]
+            )
             corrected_pos = np.array(
-                [fc_center[0] + offset[0], fc_center[1] + offset[1], z_ceil]
+                [fc_center[0] + offset[0],
+                 fc_center[1] + offset[1], z_ceil]
             )
 
             results.append(
@@ -4711,10 +4702,10 @@ def find_offsets(
                     "ceil_center": corrected_pos,
                 }
             )
-
             if verbose:
                 print(
-                    f"[skeliner.pre]   Gap z={z_floor:.0f}→{z_ceil:.0f}: "
+                    f"[skeliner.pre]   Gap z={z_floor:.0f}"
+                    f"→{z_ceil:.0f}: "
                     f"offset=({offset[0]:.0f}, {offset[1]:.0f}), "
                     f"error={err:.0f}, shifted={shifted_side} "
                     f"({len(shifted_vi):,} verts)"
