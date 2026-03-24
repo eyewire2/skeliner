@@ -281,7 +281,13 @@
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
                 <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
 
-                <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
+                <span style="position:relative; display:inline-block; margin-left:4px">
+                    <button id="detectSomaBtn">Soma &#9662;</button>
+                    <div id="somaMenu" style="display:none; position:absolute; top:100%; left:0; z-index:100; background:#2a2a2a; border:1px solid #555; border-radius:4px; padding:2px 0; min-width:140px">
+                        <div class="soma-opt" data-method="new" style="padding:4px 10px; cursor:pointer; color:#ddd">Soma (new)</div>
+                        <div class="soma-opt" data-method="deprecated" style="padding:4px 10px; cursor:pointer; color:#ddd">Soma (old)</div>
+                    </div>
+                </span>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
                 <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
@@ -680,7 +686,22 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
                 document.getElementById("detectFragmentsBtn").addEventListener("click", runDetectFragments);
-                document.getElementById("detectSomaBtn").addEventListener("click", runDetectSoma);
+                document.getElementById("detectSomaBtn").addEventListener("click", () => {
+                    const menu = document.getElementById("somaMenu");
+                    menu.style.display = menu.style.display === "none" ? "block" : "none";
+                });
+                document.querySelectorAll(".soma-opt").forEach(opt => {
+                    opt.addEventListener("mouseenter", () => opt.style.background = "#444");
+                    opt.addEventListener("mouseleave", () => opt.style.background = "transparent");
+                    opt.addEventListener("click", () => {
+                        document.getElementById("somaMenu").style.display = "none";
+                        runDetectSoma(opt.dataset.method);
+                    });
+                });
+                document.addEventListener("click", (e) => {
+                    if (!e.target.closest("#detectSomaBtn") && !e.target.closest("#somaMenu"))
+                        document.getElementById("somaMenu").style.display = "none";
+                });
                 document.getElementById("detectDisconnectedBtn").addEventListener("click", runDetectDisconnected);
                 document.getElementById("detectGapsBtn").addEventListener("click", runDetectGaps);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
@@ -1559,18 +1580,27 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
-            async function runDetectSoma() {
+            async function runDetectSoma(method = "new") {
                 const btn = document.getElementById("detectSomaBtn");
-                btn.textContent = "Detecting...";
+                const label = method === "deprecated" ? "old" : "new";
+                btn.textContent = `Detecting (${label})...`;
                 btn.disabled = true;
                 try {
-                    const resp = await fetch("/detect_soma", { method: "POST" });
+                    const resp = await fetch("/detect_soma", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ method }),
+                    });
                     const data = await resp.json();
-                    btn.textContent = data.ok ? `Soma: ${data.nVerts.toLocaleString()}v` : "No soma";
+                    btn.textContent = data.ok
+                        ? `Soma (${data.method}): ${data.nVerts.toLocaleString()}v`
+                        : "No soma";
                 } catch (e) {
                     btn.textContent = "Error";
                 } finally {
                     btn.disabled = false;
+                    // Reset button text after 3s
+                    setTimeout(() => { btn.textContent = "Soma \u25BE"; }, 3000);
                 }
             }
 

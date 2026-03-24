@@ -2231,7 +2231,7 @@ def find_soma(
         organelles = pocket | isolated
     if organelles.sum() == 0:
         if verbose:
-            print("[skeliner.pre] Soma-alt: no organelles found")
+            print("[skeliner.pre] Soma: no organelles found")
         return None
 
     org_fi = np.where(organelles)[0]
@@ -2251,12 +2251,12 @@ def find_soma(
 
     if verbose:
         print(
-            f"[skeliner.pre] Soma-alt: {organelles.sum():,} organelle faces, "
+            f"[skeliner.pre] Soma: {organelles.sum():,} organelle faces, "
             f"{len(centroids)} clusters"
         )
     if len(centroids) < 3:
         if verbose:
-            print("[skeliner.pre] Soma-alt: too few organelle clusters")
+            print("[skeliner.pre] Soma: too few organelle clusters")
         return None
 
     tree = KDTree(centroids)
@@ -2291,13 +2291,13 @@ def find_soma(
     core = centroids[best_comp]
     if len(core) < 3:
         if verbose:
-            print("[skeliner.pre] Soma-alt: no dense fragment cluster found")
+            print("[skeliner.pre] Soma: no dense fragment cluster found")
         return None
 
     center = np.median(core, axis=0)
     if verbose:
         print(
-            f"[skeliner.pre] Soma-alt: dense cluster "
+            f"[skeliner.pre] Soma: dense cluster "
             f"{len(core)}/{len(centroids)} fragments"
         )
 
@@ -2365,6 +2365,30 @@ def find_soma(
 
     peak_ring = int(np.argmax(largest_comp_size))
 
+    # Reject cells with no localised bulge (no soma).
+    # spread_ratio: how concentrated the wide rings are.  For a soma
+    # the wide rings cluster at one spot (ratio < 1/3).  For a
+    # uniform-width cell the wide rings are everywhere (ratio ~ 1).
+    nonzero_mask = largest_comp_size > 0
+    nonzero = largest_comp_size[nonzero_mask]
+    spread_ratio = 1.0
+    if len(nonzero) >= 3:
+        width_thresh, _ = _otsu_threshold(nonzero)
+        above_idx = np.where(
+            nonzero_mask & (largest_comp_size > width_thresh)
+        )[0].astype(float)
+        all_idx = np.where(nonzero_mask)[0].astype(float)
+        if len(above_idx) >= 2 and np.std(all_idx) > 0:
+            spread_ratio = float(np.std(above_idx) / np.std(all_idx))
+
+    if spread_ratio > 1.0 / 3:
+        if verbose:
+            print(
+                f"[skeliner.pre] Soma: no localised bulge "
+                f"(spread_ratio={spread_ratio:.3f})"
+            )
+        return None
+
     # ── 2. Keep rings 0 to 1.5× peak, find tip clusters ─────────
     boundary = peak_ring + peak_ring // 2
     soma_set: set[int] = set()
@@ -2427,7 +2451,7 @@ def find_soma(
 
     if verbose:
         print(
-            f"[skeliner.pre] Soma-alt: peak ring {peak_ring}, "
+            f"[skeliner.pre] Soma: peak ring {peak_ring}, "
             f"boundary ring {boundary}, "
             f"{len(soma_set):,} verts, "
             f"{len(tip_clusters)} tip clusters → "
@@ -2587,14 +2611,14 @@ def find_soma(
 
     if verbose:
         print(
-            f"[skeliner.pre] Soma-alt: excluded {n_excluded:,} neurite verts "
+            f"[skeliner.pre] Soma: excluded {n_excluded:,} neurite verts "
             f"from {len(filtered_tips)} tips, {len(soma_set):,} soma verts remain"
         )
 
     # ── 4. Fit ellipsoid ──────────────────────────────────────────
     if len(soma_set) < 4:
         if verbose:
-            print("[skeliner.pre] Soma-alt: too few verts")
+            print("[skeliner.pre] Soma: too few verts")
         return None
 
     soma_arr = np.fromiter(sorted(soma_set), dtype=np.intp)
@@ -2602,7 +2626,7 @@ def find_soma(
 
     if verbose:
         print(
-            f"[skeliner.pre] Soma-alt: center=["
+            f"[skeliner.pre] Soma: center=["
             f"{soma.center[0]:.0f}, {soma.center[1]:.0f}, "
             f"{soma.center[2]:.0f}], "
             f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "

@@ -1027,17 +1027,37 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return JSONResponse({"ok": True, "nComponents": len(components)})
 
     async def detect_soma(request):
-        """Run soma detection and write result to annotations."""
+        """Run soma detection and write result to annotations.
+
+        Accepts optional JSON body ``{"method": "new"}`` or
+        ``{"method": "deprecated"}``.  Defaults to the new per-tip
+        neurite-exclusion method.
+        """
         if mesh_state["mesh"] is None:
             return JSONResponse(
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import find_soma
+        # Parse method choice from request body (POST with JSON)
+        method = "new"
+        try:
+            body = await request.json()
+            method = body.get("method", "new")
+        except Exception:
+            pass
+
+        if method == "deprecated":
+            from skeliner.pre import find_soma_deprecated as _find
+            label_prefix = "soma (deprecated)"
+            color = [0.9, 0.7, 0.3]
+        else:
+            from skeliner.pre import find_soma as _find
+            label_prefix = "soma"
+            color = [0.9, 0.5, 0.9]
 
         mesh = mesh_state["mesh"]
         soma = await _run_with_log(
-            find_soma, mesh,
+            _find, mesh,
             organelles=mesh_state.get("organelles"),
             mesh_stats=mesh_state.get("mesh_stats"),
             verbose=True,
@@ -1062,8 +1082,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann["highlights"] = []
         ann["highlights"].append({
             "faces": soma_faces,
-            "color": [0.9, 0.5, 0.9],
-            "label": f"soma ({len(soma_faces):,}f, {len(soma.verts):,}v)",
+            "color": color,
+            "label": f"{label_prefix} ({len(soma_faces):,}f, {len(soma.verts):,}v)",
         })
 
         # Wireframe ellipsoid (coordinates shifted by mesh centroid)
@@ -1074,13 +1094,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "center": (soma.center - centroid).tolist(),
             "axes": soma.axes.tolist(),
             "R": soma.R.tolist(),
-            "color": [0.9, 0.5, 0.9],
+            "color": color,
         })
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
         return JSONResponse({
             "ok": True,
+            "method": method,
             "nFaces": len(soma_faces),
             "nVerts": len(soma.verts),
         })
