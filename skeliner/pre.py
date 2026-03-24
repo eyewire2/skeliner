@@ -1621,14 +1621,18 @@ def _assign_soma_verts(
     return soma
 
 
-def find_soma(
+def find_soma_deprecated(
     mesh: trimesh.Trimesh,
     *,
     organelles: np.ndarray | None = None,
     verbose: bool = False,
     mesh_stats: tuple | None = None,
 ) -> Soma | None:
-    """Estimate soma from the spatial clustering of organelles.
+    """**Deprecated** — use :func:`find_soma` instead.
+
+    Original soma detection via BFS + Otsu ring cutoff.  Replaced by
+    the per-tip neurite exclusion approach which handles branching
+    neurites and non-monotonic tube widths.
 
     Organelles (mitochondria, ER, nucleus membrane) are densely packed
     inside the soma.  Their centroids cluster tightly in 3-D, giving a
@@ -2193,20 +2197,25 @@ def find_soma(
     return soma
 
 
-def find_soma_alt(
+def find_soma(
     mesh: trimesh.Trimesh,
     *,
     organelles: np.ndarray | None = None,
     verbose: bool = False,
     mesh_stats: tuple | None = None,
 ) -> Soma | None:
-    """Alternative soma detection.
+    """Estimate soma by per-tip neurite exclusion.
 
     Approach:
       0. Organelle clustering → soma center
       1. BFS on external surface (no organelle faces) from center
-      2. Keep all rings up to ~1.5× peak ring (no Otsu cutoff)
-      3. Find and remove neurite stubs from that set
+      2. Keep all rings up to ~1.5× peak ring, find tip clusters at
+         the outer boundary, filter false tips by equator distance
+      3. Per-tip neurite stub removal: for each tip, BFS inward with
+         perpendicular ring seeding, detect tube→soma transition via
+         sustained positive velocity + acceleration in the ring-size
+         profile, exclude everything on the tip side.  Cumulative
+         exclusion handles shared branches automatically.
       4. Fit ellipsoid to the cleaned set
     """
     from collections import deque
