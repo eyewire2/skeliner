@@ -40,3 +40,5 @@ dev/
 .python-version
 
 *.obj
+
+.claude

@@ -2356,17 +2356,73 @@ def find_soma_alt(
 
     peak_ring = int(np.argmax(largest_comp_size))
 
-    # ── 2. Keep rings 0 to 1.5× peak (no Otsu) ───────────────────
+    # ── 2. Keep rings 0 to 1.5× peak, find tip clusters ─────────
     boundary = peak_ring + peak_ring // 2
     soma_set: set[int] = set()
     for lv in range(min(boundary + 1, max_ring + 1)):
         soma_set.update(ring_verts[lv])
 
+    # Outer edge: soma_set verts adjacent to non-soma_set verts
+    outer_edge: set[int] = set()
+    for v in soma_set:
+        for nv in adj_bfs[v]:
+            if nv not in soma_set:
+                outer_edge.add(v)
+                break
+
+    # Dilated clustering: expand outer_edge by 1 ring for connectivity,
+    # then cluster — keeps only original outer_edge verts per cluster.
+    dilated = set(outer_edge)
+    for v in outer_edge:
+        for nv in adj_bfs[v]:
+            if nv in soma_set:
+                dilated.add(nv)
+
+    visited_tip: set[int] = set()
+    tip_clusters: list[list[int]] = []
+    for start in outer_edge:
+        if start in visited_tip:
+            continue
+        cluster: list[int] = []
+        tq = deque([start])
+        while tq:
+            v = tq.popleft()
+            if v in visited_tip:
+                continue
+            visited_tip.add(v)
+            if v in outer_edge:
+                cluster.append(v)
+            for nv in adj_bfs[v]:
+                if nv in dilated and nv not in visited_tip:
+                    tq.append(nv)
+        if cluster:
+            tip_clusters.append(cluster)
+    tip_clusters.sort(key=len, reverse=True)
+
+    # Filter false tips: remove clusters whose median Euclidean distance
+    # from soma center is below the equator distance (median distance at
+    # peak ring).  These are BFS-inflated verts inside the soma body.
+    equator_dists = [
+        float(np.linalg.norm(mesh.vertices[v] - center))
+        for v in ring_verts.get(peak_ring, [])
+    ]
+    equator_dist = float(np.median(equator_dists)) if equator_dists else 0.0
+
+    filtered_tips: list[list[int]] = []
+    for cluster in tip_clusters:
+        med_dist = float(
+            np.median([np.linalg.norm(mesh.vertices[v] - center) for v in cluster])
+        )
+        if med_dist >= equator_dist:
+            filtered_tips.append(cluster)
+
     if verbose:
         print(
             f"[skeliner.pre] Soma-alt: peak ring {peak_ring}, "
             f"boundary ring {boundary}, "
-            f"{len(soma_set):,} verts"
+            f"{len(soma_set):,} verts, "
+            f"{len(tip_clusters)} tip clusters → "
+            f"{len(filtered_tips)} after equator filter"
         )
 
     # ── 3. Watershed stub removal ───────────────────────────────
