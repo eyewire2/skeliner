@@ -41,17 +41,18 @@ def _non_degenerate(faces: np.ndarray) -> np.ndarray:
 def _edge_to_faces(mesh: trimesh.Trimesh) -> dict[tuple[int, int], list[int]]:
     """Build edge→face adjacency, skipping degenerate faces."""
     result: dict[tuple[int, int], list[int]] = defaultdict(list)
-    good = _non_degenerate(mesh.faces)
-    for fi in range(len(mesh.faces)):
-        if not good[fi]:
-            continue
-        face = mesh.faces[fi]
-        for i in range(3):
-            e = (
-                min(int(face[i]), int(face[(i + 1) % 3])),
-                max(int(face[i]), int(face[(i + 1) % 3])),
-            )
-            result[e].append(fi)
+    faces = np.asarray(mesh.faces)  # snapshot — avoids trimesh caching overhead
+    good = _non_degenerate(faces)
+    # Vectorised edge extraction: 3 edges per face
+    fi_idx = np.where(good)[0]
+    gf = faces[fi_idx]
+    for col_a, col_b in ((0, 1), (1, 2), (0, 2)):
+        va = gf[:, col_a].astype(np.intp)
+        vb = gf[:, col_b].astype(np.intp)
+        lo = np.minimum(va, vb)
+        hi = np.maximum(va, vb)
+        for k in range(len(fi_idx)):
+            result[(int(lo[k]), int(hi[k]))].append(int(fi_idx[k]))
     return result
 
 
@@ -3422,9 +3423,10 @@ def _filter_small_clusters(
         return face_mask
 
     # Build face adjacency restricted to flagged faces
+    faces_arr = np.asarray(mesh.faces)  # snapshot — avoids trimesh caching
     edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
     for fi in flagged:
-        f = mesh.faces[fi]
+        f = faces_arr[fi]
         for i in range(3):
             e = (
                 min(int(f[i]), int(f[(i + 1) % 3])),
@@ -3436,7 +3438,7 @@ def _filter_small_clusters(
     int_remap = {fi: i for i, fi in enumerate(int_list)}
     edges = set()
     for fi in int_list:
-        f = mesh.faces[fi]
+        f = faces_arr[fi]
         for i in range(3):
             e = (
                 min(int(f[i]), int(f[(i + 1) % 3])),
@@ -3641,6 +3643,8 @@ def find_rims(
     min_fold_ratio: float = 3.0,
     verbose: bool = False,
     mesh_stats: tuple | None = None,
+    _adj: dict[int, set[int]] | None = None,
+    _edge_to_face: dict[tuple[int, int], list[int]] | None = None,
 ) -> list[list[tuple[int, int]]]:
     """Find rim edges — boundaries of negative-dot face clusters.
 
@@ -3668,10 +3672,8 @@ def find_rims(
             verbose,
         )
     n_faces = len(mesh.faces)
-    adj = _face_adjacency(mesh)
-
-    # Build edge-to-face map
-    edge_to_face = _edge_to_faces(mesh)
+    edge_to_face = _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
+    adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
 
     # Connected components of negative-dot faces on main component
     neg_idx = set(np.where((outward_dots < 0) & main_face_mask)[0].tolist())
@@ -3696,6 +3698,9 @@ def find_rims(
     # For each cluster, collect boundary edges and count boundary loops.
     # A real pocket has multiple boundary loops (multiple openings).
     # A flat concave patch has exactly one boundary loop — not a pocket.
+    faces_arr = np.asarray(mesh.faces)  # snapshot — avoids trimesh caching
+    area_arr = np.asarray(mesh.area_faces)
+    verts_arr = np.asarray(mesh.vertices)
     rims: list[list[tuple[int, int]]] = []
     for cluster in clusters:
         if len(cluster) < min_pocket_size:
@@ -3704,7 +3709,7 @@ def find_rims(
         boundary_edges: list[tuple[int, int]] = []
         seen_edges: set[tuple[int, int]] = set()
         for fi in cluster:
-            f = mesh.faces[fi]
+            f = faces_arr[fi]
             for i in range(3):
                 e = (
                     min(int(f[i]), int(f[(i + 1) % 3])),
@@ -3728,8 +3733,8 @@ def find_rims(
         # Fold ratio: pocket surface area / rim enclosed planar area.
         # A real pocket folds inward through a small opening (high ratio).
         # A flat patch has ratio near 1.
-        pocket_area = float(mesh.area_faces[cluster].sum())
-        opening_area = _rim_enclosed_area(boundary_edges, mesh.vertices)
+        pocket_area = float(area_arr[cluster].sum())
+        opening_area = _rim_enclosed_area(boundary_edges, verts_arr)
         if opening_area <= 0:
             continue  # no measurable opening = not a pocket entrance
         fold_ratio = pocket_area / opening_area
@@ -3748,9 +3753,13 @@ def find_rims(
     return rims
 
 
-def _face_adjacency(mesh: trimesh.Trimesh) -> dict[int, set[int]]:
+def _face_adjacency(
+    mesh: trimesh.Trimesh,
+    edge_to_face: dict[tuple[int, int], list[int]] | None = None,
+) -> dict[int, set[int]]:
     """Build face adjacency map (edge-connected neighbors)."""
-    edge_to_face = _edge_to_faces(mesh)
+    if edge_to_face is None:
+        edge_to_face = _edge_to_faces(mesh)
 
     adj: dict[int, set[int]] = defaultdict(set)
     for faces in edge_to_face.values():
@@ -3849,7 +3858,9 @@ def find_pocket_organelles(
             verbose,
         )
     n_faces = len(mesh.faces)
-    adj = _face_adjacency(mesh)
+    # Compute shared structures once
+    edge_to_face = _edge_to_faces(mesh)
+    adj = _face_adjacency(mesh, edge_to_face)
 
     # Use find_rims to get rim edges for each pocket
     rims = find_rims(
@@ -3860,6 +3871,8 @@ def find_pocket_organelles(
         min_fold_ratio=min_fold_ratio,
         verbose=verbose,
         mesh_stats=mesh_stats,
+        _adj=adj,
+        _edge_to_face=edge_to_face,
     )
 
     if not rims:
@@ -3872,9 +3885,6 @@ def find_pocket_organelles(
     rim_edge_set: set[tuple[int, int]] = set()
     for rim in rims:
         rim_edge_set.update(rim)
-
-    # Build edge-to-face map
-    edge_to_face = _edge_to_faces(mesh)
 
     # Seeds: negative-dot faces touching rim edges
     seeds: set[int] = set()
