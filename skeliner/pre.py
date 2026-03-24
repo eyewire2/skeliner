@@ -2425,10 +2425,162 @@ def find_soma_alt(
             f"{len(filtered_tips)} after equator filter"
         )
 
-    # ── 3. Watershed stub removal ───────────────────────────────
-    #        TODO: implement recursive watershed from tips.
-    #        See dev/mesh/plans/find_soma.md for the algorithm.
-    pass
+    # ── 3. Per-tip neurite stub removal ─────────────────────────
+    #
+    # For each tip, BFS inward through the domain with perpendicular
+    # ring seeding.  Detect where the ring-size profile transitions
+    # from tube (flat) to soma (sustained climb) using the first
+    # derivative (velocity) and second derivative (acceleration).
+    # Exclude everything on the tip side of the cut.  Cumulative
+    # exclusion handles shared branches automatically.
+
+    _PERP_REF = 10  # rings into tube before computing perpendicular seed
+    _SMOOTH_W = 5   # smoothing window for ring-size profile
+
+    def _perp_seed(tip_verts, domain):
+        """BFS from tip, find perpendicular cross-section at _PERP_REF."""
+        vis: set[int] = set()
+        rngs: list[list[int]] = []
+        cur = [v for v in tip_verts if v in domain]
+        for v in cur:
+            vis.add(v)
+        if cur:
+            rngs.append(cur)
+        while cur:
+            nx = []
+            for v in cur:
+                for nv in adj_bfs[v]:
+                    if nv in domain and nv not in vis:
+                        vis.add(nv)
+                        nx.append(nv)
+            if not nx:
+                break
+            rngs.append(nx)
+            cur = nx
+        ref = _PERP_REF
+        if len(rngs) < ref + 3:
+            return tip_verts  # tube too short, use original
+        ctrs = np.array(
+            [mesh.vertices[[v for v in r]].mean(axis=0) for r in rngs[: ref + 5]]
+        )
+        lo = max(0, ref - 2)
+        hi = min(len(ctrs) - 1, ref + 2)
+        axis = ctrs[hi] - ctrs[lo]
+        nrm = np.linalg.norm(axis)
+        if nrm == 0:
+            return tip_verts
+        axis /= nrm
+        ctr = ctrs[ref]
+        nbr: set[int] = set()
+        for b in range(max(0, ref - 3), min(len(rngs), ref + 4)):
+            nbr.update(rngs[b])
+        el = float(
+            np.median(
+                [
+                    np.linalg.norm(mesh.vertices[v] - mesh.vertices[nv])
+                    for v in list(nbr)[:100]
+                    for nv in adj_bfs[v]
+                    if nv in nbr
+                ]
+            )
+        )
+        half = el * 1.5
+        return [
+            v for v in nbr if abs(float(np.dot(mesh.vertices[v] - ctr, axis))) < half
+        ]
+
+    def _bfs_from(seeds, domain):
+        """BFS from seed verts, return list of rings."""
+        vis: set[int] = set()
+        rngs: list[list[int]] = []
+        cur = [v for v in seeds if v in domain]
+        for v in cur:
+            vis.add(v)
+        if cur:
+            rngs.append(cur)
+        while cur:
+            nx = []
+            for v in cur:
+                for nv in adj_bfs[v]:
+                    if nv in domain and nv not in vis:
+                        vis.add(nv)
+                        nx.append(nv)
+            if not nx:
+                break
+            rngs.append(nx)
+            cur = nx
+        return rngs
+
+    def _find_cut(ring_sizes):
+        """Detect tube→soma transition via d1 > 0 AND d2 > 0 with
+        adaptive sustain derived from tube noise level."""
+        skip = _PERP_REF
+        w = _SMOOTH_W
+        if len(ring_sizes) < skip + 15:
+            return skip
+        smooth = np.convolve(ring_sizes, np.ones(w) / w, mode="valid")
+        d1 = np.diff(smooth)
+        d2 = np.diff(d1)
+        off1 = w // 2 + 1
+        off2 = w // 2 + 2
+        start = max(skip, off2)
+        # Measure tube noise: max consecutive d1>0 AND d2>0 in tube
+        tube_end = min(start + 20, len(ring_sizes))
+        max_con = 0
+        con = 0
+        for b in range(start, tube_end):
+            i1, i2 = b - off1, b - off2
+            if (
+                0 <= i1 < len(d1)
+                and 0 <= i2 < len(d2)
+                and d1[i1] > 0
+                and d2[i2] > 0
+            ):
+                con += 1
+                if con > max_con:
+                    max_con = con
+            else:
+                con = 0
+        sustain = max_con + 1
+        # Forward scan
+        for b in range(start, len(ring_sizes) - sustain):
+            i1, i2 = b - off1, b - off2
+            if i1 + sustain > len(d1) or i2 + sustain > len(d2):
+                break
+            if all(
+                d1[i1 + k] > 0 and d2[i2 + k] > 0 for k in range(sustain)
+            ):
+                return b
+        return skip
+
+    domain = set(soma_set)
+    n_excluded = 0
+    for ti, tip in enumerate(filtered_tips):
+        pseed = _perp_seed(tip, domain)
+        rngs = _bfs_from(pseed, domain)
+        reached: set[int] = set()
+        for r in rngs:
+            reached.update(r)
+        if seed not in reached:
+            # Dead-end: tip is on an already-excluded branch
+            domain -= reached
+            n_excluded += len(reached)
+            continue
+        rsizes = [len(r) for r in rngs]
+        cut = _find_cut(rsizes)
+        to_rm: set[int] = set()
+        for b in range(cut):
+            to_rm.update(rngs[b])
+        domain -= to_rm
+        n_excluded += len(to_rm)
+
+    soma_set = domain
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: excluded {n_excluded:,} neurite verts "
+            f"from {len(filtered_tips)} tips, {len(soma_set):,} soma verts remain"
+        )
 
     # ── 4. Fit ellipsoid ──────────────────────────────────────────
     if len(soma_set) < 4:
