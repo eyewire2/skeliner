@@ -2638,6 +2638,446 @@ def find_soma(
     return soma
 
 
+def find_soma_alt(
+    mesh: trimesh.Trimesh,
+    *,
+    organelles: np.ndarray | None = None,
+    verbose: bool = False,
+    mesh_stats: tuple | None = None,
+) -> Soma | None:
+    """Experimental soma detection — geodesic proximity + mass boundary.
+
+    Work-in-progress replacement for :func:`find_soma`.  Key differences:
+
+      0. Organelle clustering uses **geodesic** (surface) proximity via
+         multi-source BFS instead of Euclidean NN.  This prevents linking
+         organelles across membranes.
+      1. BFS from center on non-organelle surface (same as find_soma).
+      2. Candidate set boundary determined by **neighborhood mass** of
+         soma organelle clusters (Otsu on own_size + neighbor_sizes),
+         converted to a BFS ring boundary.  No fixed multiplier.
+      3. Per-tip neurite exclusion (same as find_soma).
+      4. Fit ellipsoid (same as find_soma).
+    """
+    from collections import deque
+
+    if mesh_stats is not None:
+        _, labels, main, _ = mesh_stats
+    else:
+        labels, main = _face_edge_components(mesh)
+
+    # ── 0. Organelle clustering via geodesic proximity ───────────
+    if organelles is None:
+        pocket, isolated = find_organelles(mesh, verbose=verbose)
+        organelles = pocket | isolated
+    if organelles.sum() == 0:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: no organelles found")
+        return None
+
+    org_fi = np.where(organelles)[0]
+    org_labels, _ = _face_edge_components(
+        trimesh.Trimesh(
+            vertices=mesh.vertices,
+            faces=mesh.faces[org_fi],
+            process=False,
+        )
+    )
+    clusters: list[dict] = []
+    for cid in np.unique(org_labels):
+        local_fi = org_fi[org_labels == cid]
+        verts = set(int(v) for v in np.unique(mesh.faces[local_fi]))
+        clusters.append({
+            "verts": verts,
+            "centroid": mesh.vertices[list(verts)].mean(axis=0),
+            "size": int(len(local_fi)),
+        })
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: {organelles.sum():,} organelle faces, "
+            f"{len(clusters)} clusters"
+        )
+    if len(clusters) < 3:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: too few organelle clusters")
+        return None
+
+    # Build non-organelle surface adjacency
+    main_fi = np.where(labels == main)[0]
+    non_org_main = main_fi[~organelles[main_fi]]
+
+    adj_bfs: dict[int, list[int]] = defaultdict(list)
+    faces_arr = np.asarray(mesh.faces)
+    for fi in non_org_main:
+        v = faces_arr[fi]
+        for i in range(3):
+            a, b = int(v[i]), int(v[(i + 1) % 3])
+            adj_bfs[a].append(b)
+            adj_bfs[b].append(a)
+
+    # Border verts: non-organelle surface verts touching each cluster
+    border_verts: dict[int, set[int]] = {}
+    for ci, cl in enumerate(clusters):
+        borders: set[int] = set()
+        for v in cl["verts"]:
+            if v in adj_bfs:
+                borders.add(v)
+            for nv in adj_bfs.get(v, []):
+                if nv not in cl["verts"]:
+                    borders.add(nv)
+        border_verts[ci] = borders
+
+    # Multi-source BFS: label every non-organelle vert by nearest cluster
+    vert_label: dict[int, int] = {}
+    vert_dist: dict[int, int] = {}
+    queue: deque[int] = deque()
+    for ci, borders in border_verts.items():
+        for v in borders:
+            if v not in vert_dist:
+                vert_dist[v] = 0
+                vert_label[v] = ci
+                queue.append(v)
+    while queue:
+        v = queue.popleft()
+        d = vert_dist[v]
+        for nv in adj_bfs[v]:
+            if nv not in vert_dist:
+                vert_dist[nv] = d + 1
+                vert_label[nv] = vert_label[v]
+                queue.append(nv)
+
+    # Voronoi neighbors: clusters whose territories are adjacent
+    neighbors: dict[int, set[int]] = defaultdict(set)
+    for v in vert_dist:
+        lv = vert_label[v]
+        for nv in adj_bfs[v]:
+            if nv in vert_label:
+                lnv = vert_label[nv]
+                if lv != lnv:
+                    neighbors[lv].add(lnv)
+                    neighbors[lnv].add(lv)
+
+    # Neighborhood mass: own size + sum of neighbor sizes
+    sizes = np.array([cl["size"] for cl in clusters])
+    nbr_mass = np.zeros(len(clusters))
+    for ci in range(len(clusters)):
+        nbr_mass[ci] = sizes[ci] + sum(int(sizes[nj]) for nj in neighbors[ci])
+
+    has_nbr = np.array([len(neighbors[ci]) > 0 for ci in range(len(clusters))])
+    if has_nbr.sum() < 3:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: too few connected clusters")
+        return None
+
+    mass_thresh, _ = _otsu_threshold(nbr_mass[has_nbr])
+    soma_clusters = has_nbr & (nbr_mass > mass_thresh)
+
+    # Soma center = median of soma cluster centroids
+    centroids = np.array([cl["centroid"] for cl in clusters])
+    core = centroids[soma_clusters]
+    if len(core) < 3:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: no dense cluster found")
+        return None
+
+    center = np.median(core, axis=0)
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: {soma_clusters.sum()}/{len(clusters)} "
+            f"soma clusters (mass > {mass_thresh:.0f})"
+        )
+
+    # ── 1. BFS from center ───────────────────────────────────────
+    bfs_verts = np.fromiter(adj_bfs.keys(), dtype=np.intp)
+    seed = int(
+        bfs_verts[
+            np.argmin(np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1))
+        ]
+    )
+
+    ring_level: dict[int, int] = {seed: 0}
+    bfs_q: deque[int] = deque([seed])
+    ring_verts: dict[int, list[int]] = defaultdict(list)
+    ring_verts[0].append(seed)
+    while bfs_q:
+        v = bfs_q.popleft()
+        lv = ring_level[v]
+        for nv in adj_bfs[v]:
+            if nv not in ring_level:
+                ring_level[nv] = lv + 1
+                bfs_q.append(nv)
+                ring_verts[lv + 1].append(nv)
+
+    max_ring = max(ring_verts.keys())
+
+    # Peak ring (largest connected component width)
+    largest_comp_size = np.zeros(max_ring + 1)
+    for lv in range(max_ring + 1):
+        vr = ring_verts.get(lv, [])
+        if not vr:
+            continue
+        ring_set = set(vr)
+        vis_r: set[int] = set()
+        mx = 0
+        for st in vr:
+            if st in vis_r:
+                continue
+            sz = 0
+            rq = deque([st])
+            while rq:
+                u = rq.popleft()
+                if u in vis_r:
+                    continue
+                vis_r.add(u)
+                sz += 1
+                for nu in adj_bfs[u]:
+                    if nu in ring_set and nu not in vis_r:
+                        rq.append(nu)
+            if sz > mx:
+                mx = sz
+        largest_comp_size[lv] = mx
+
+    peak_ring = int(np.argmax(largest_comp_size))
+
+    # ── 2. Boundary from soma cluster extent ─────────────────────
+    # Map soma cluster Voronoi territory to BFS ring levels.
+    # Boundary = max ring reached by any soma cluster territory.
+    soma_territory = {v for v, ci in vert_label.items() if soma_clusters[ci]}
+    soma_ring_vals = [ring_level[v] for v in soma_territory if v in ring_level]
+    boundary = max(soma_ring_vals) if soma_ring_vals else peak_ring
+
+    soma_set: set[int] = set()
+    for lv in range(min(boundary + 1, max_ring + 1)):
+        soma_set.update(ring_verts[lv])
+
+    # Outer edge → tip clusters
+    outer_edge: set[int] = set()
+    for v in soma_set:
+        for nv in adj_bfs[v]:
+            if nv not in soma_set:
+                outer_edge.add(v)
+                break
+
+    dilated = set(outer_edge)
+    for v in outer_edge:
+        for nv in adj_bfs[v]:
+            if nv in soma_set:
+                dilated.add(nv)
+
+    visited_tip: set[int] = set()
+    tip_clusters: list[list[int]] = []
+    for start in outer_edge:
+        if start in visited_tip:
+            continue
+        cluster: list[int] = []
+        tq = deque([start])
+        while tq:
+            v = tq.popleft()
+            if v in visited_tip:
+                continue
+            visited_tip.add(v)
+            if v in outer_edge:
+                cluster.append(v)
+            for nv in adj_bfs[v]:
+                if nv in dilated and nv not in visited_tip:
+                    tq.append(nv)
+        if cluster:
+            tip_clusters.append(cluster)
+    tip_clusters.sort(key=len, reverse=True)
+
+    # Filter false tips by equator distance
+    equator_dists = [
+        float(np.linalg.norm(mesh.vertices[v] - center))
+        for v in ring_verts.get(peak_ring, [])
+    ]
+    equator_dist = float(np.median(equator_dists)) if equator_dists else 0.0
+
+    filtered_tips: list[list[int]] = []
+    for cluster in tip_clusters:
+        med_dist = float(
+            np.median(
+                [np.linalg.norm(mesh.vertices[v] - center) for v in cluster]
+            )
+        )
+        if med_dist >= equator_dist:
+            filtered_tips.append(cluster)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: peak ring {peak_ring}, "
+            f"boundary ring {boundary}, "
+            f"{len(soma_set):,} verts, "
+            f"{len(tip_clusters)} tip clusters → "
+            f"{len(filtered_tips)} after equator filter"
+        )
+
+    # ── 3. Per-tip neurite stub removal ──────────────────────────
+    _PERP_REF = 10
+    _SMOOTH_W = 5
+
+    def _perp_seed(tip_verts, domain):
+        vis: set[int] = set()
+        rngs: list[list[int]] = []
+        cur = [v for v in tip_verts if v in domain]
+        for v in cur:
+            vis.add(v)
+        if cur:
+            rngs.append(cur)
+        while cur:
+            nx = []
+            for v in cur:
+                for nv in adj_bfs[v]:
+                    if nv in domain and nv not in vis:
+                        vis.add(nv)
+                        nx.append(nv)
+            if not nx:
+                break
+            rngs.append(nx)
+            cur = nx
+        ref = _PERP_REF
+        if len(rngs) < ref + 3:
+            return tip_verts
+        ctrs = np.array(
+            [mesh.vertices[[v for v in r]].mean(axis=0) for r in rngs[: ref + 5]]
+        )
+        lo = max(0, ref - 2)
+        hi = min(len(ctrs) - 1, ref + 2)
+        axis = ctrs[hi] - ctrs[lo]
+        nrm = np.linalg.norm(axis)
+        if nrm == 0:
+            return tip_verts
+        axis /= nrm
+        ctr = ctrs[ref]
+        nbr: set[int] = set()
+        for b in range(max(0, ref - 3), min(len(rngs), ref + 4)):
+            nbr.update(rngs[b])
+        el = float(
+            np.median(
+                [
+                    np.linalg.norm(mesh.vertices[v] - mesh.vertices[nv])
+                    for v in list(nbr)[:100]
+                    for nv in adj_bfs[v]
+                    if nv in nbr
+                ]
+            )
+        )
+        half = el * 1.5
+        return [
+            v
+            for v in nbr
+            if abs(float(np.dot(mesh.vertices[v] - ctr, axis))) < half
+        ]
+
+    def _bfs_from(seeds, domain):
+        vis: set[int] = set()
+        rngs: list[list[int]] = []
+        cur = [v for v in seeds if v in domain]
+        for v in cur:
+            vis.add(v)
+        if cur:
+            rngs.append(cur)
+        while cur:
+            nx = []
+            for v in cur:
+                for nv in adj_bfs[v]:
+                    if nv in domain and nv not in vis:
+                        vis.add(nv)
+                        nx.append(nv)
+            if not nx:
+                break
+            rngs.append(nx)
+            cur = nx
+        return rngs
+
+    def _find_cut(ring_sizes):
+        skip = _PERP_REF
+        w = _SMOOTH_W
+        if len(ring_sizes) < skip + 15:
+            return skip
+        smooth = np.convolve(ring_sizes, np.ones(w) / w, mode="valid")
+        d1 = np.diff(smooth)
+        d2 = np.diff(d1)
+        off1 = w // 2 + 1
+        off2 = w // 2 + 2
+        start = max(skip, off2)
+        tube_end = min(start + 20, len(ring_sizes))
+        max_con = 0
+        con = 0
+        for b in range(start, tube_end):
+            i1, i2 = b - off1, b - off2
+            if (
+                0 <= i1 < len(d1)
+                and 0 <= i2 < len(d2)
+                and d1[i1] > 0
+                and d2[i2] > 0
+            ):
+                con += 1
+                if con > max_con:
+                    max_con = con
+            else:
+                con = 0
+        sustain = max_con + 1
+        for b in range(start, len(ring_sizes) - sustain):
+            i1, i2 = b - off1, b - off2
+            if i1 + sustain > len(d1) or i2 + sustain > len(d2):
+                break
+            if all(
+                d1[i1 + k] > 0 and d2[i2 + k] > 0 for k in range(sustain)
+            ):
+                return b
+        return skip
+
+    domain = set(soma_set)
+    n_excluded = 0
+    for ti, tip in enumerate(filtered_tips):
+        pseed = _perp_seed(tip, domain)
+        rngs = _bfs_from(pseed, domain)
+        reached: set[int] = set()
+        for r in rngs:
+            reached.update(r)
+        if seed not in reached:
+            domain -= reached
+            n_excluded += len(reached)
+            continue
+        rsizes = [len(r) for r in rngs]
+        cut = _find_cut(rsizes)
+        to_rm: set[int] = set()
+        for b in range(cut):
+            to_rm.update(rngs[b])
+        domain -= to_rm
+        n_excluded += len(to_rm)
+
+    soma_set = domain
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: excluded {n_excluded:,} neurite verts "
+            f"from {len(filtered_tips)} tips, {len(soma_set):,} soma verts remain"
+        )
+
+    # ── 4. Fit ellipsoid ─────────────────────────────────────────
+    if len(soma_set) < 4:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: too few verts")
+        return None
+
+    soma_arr = np.fromiter(sorted(soma_set), dtype=np.intp)
+    soma = Soma.fit(mesh.vertices[soma_arr], verts=soma_arr)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: center=["
+            f"{soma.center[0]:.0f}, {soma.center[1]:.0f}, "
+            f"{soma.center[2]:.0f}], "
+            f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
+            f"{soma.axes[2]:.0f}], "
+            f"{len(soma.verts):,} surface verts"
+        )
+
+    return soma
+
+
 def find_disconnected(
     mesh: trimesh.Trimesh,
     *,

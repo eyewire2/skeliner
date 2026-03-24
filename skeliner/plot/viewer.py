@@ -1050,6 +1050,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             from skeliner.pre import find_soma_deprecated as _find
             label_prefix = "soma (deprecated)"
             color = [0.9, 0.7, 0.3]
+        elif method == "alt":
+            from skeliner.pre import find_soma_alt as _find
+            label_prefix = "soma (alt)"
+            color = [0.3, 0.9, 0.7]
         else:
             from skeliner.pre import find_soma as _find
             label_prefix = "soma"
