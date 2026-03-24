@@ -1911,6 +1911,7 @@ def find_soma(
             vi = int(soma_arr[i])
             (inside_set if body_dist[i] <= 1.0 else outside_set).add(vi)
 
+        neurite_prune: set[int] = set()
         if outside_set:
             # ── 6a. Prune neurite stubs ──────────────────────────
             #        A stub connects the soma body to a neurite tree.
@@ -1956,7 +1957,6 @@ def find_soma(
                 neurite_tree.update(ns_ccs[0])
 
             # Find outside components; collect features
-            neurite_prune: set[int] = set()
             n_tubes = 0
             outside_comps: list[tuple[list[int], bool, float]] = []
             if neurite_tree:
@@ -2022,42 +2022,148 @@ def find_soma(
                         f"{len(soma_set):,} verts"
                     )
 
-        # ── 6b. Drop verts disconnected from soma body ───────────
-        #        A main-component vert that can only reach the main
-        #        soma body by traversing non-soma faces is not truly
-        #        soma (e.g. axon section inside the ellipsoid).
-        #        Non-main-component verts (organelle fragments inside
-        #        the soma) are always kept.
+        # ── 6b. Per-exit stub erosion ─────────────────────────────
+        #        For each neurite exit (cluster of boundary verts),
+        #        BFS inward into the soma independently.  Ring widths
+        #        start narrow (tube); stop when the ring widens into
+        #        the soma body (Otsu).  Erode each exit separately so
+        #        narrow tubes get deep erosion, wide junctions don't.
         main_vert_set = set(adj.keys())
-        main_soma = soma_set & main_vert_set
         non_main_soma = soma_set - main_vert_set
+        all_main_set = set(np.unique(mesh.faces[main_fi]).tolist())
+        non_soma = all_main_set - soma_set
 
-        visited_cc: set[int] = set()
-        largest_cc: list[int] = []
-        for cc_start in main_soma:
-            if cc_start in visited_cc:
+        # Find soma boundary verts adjacent to non-soma.
+        # Only erode when step 6a pruned neurite chains.
+        exit_verts: set[int] = set()
+        if neurite_prune and non_soma:
+            for v in soma_set & main_vert_set:
+                for nv in adj.get(v, []):
+                    if nv in non_soma:
+                        exit_verts.add(v)
+                        break
+
+        if exit_verts:
+            soma_main = soma_set & main_vert_set
+
+            # Group exit verts into per-exit clusters
+            vis_ex: set[int] = set()
+            exit_clusters: list[set[int]] = []
+            for ex_start in exit_verts:
+                if ex_start in vis_ex:
+                    continue
+                cl: list[int] = []
+                exq = deque([ex_start])
+                while exq:
+                    v = exq.popleft()
+                    if v in vis_ex:
+                        continue
+                    vis_ex.add(v)
+                    cl.append(v)
+                    for nv in adj.get(v, []):
+                        if nv in exit_verts and nv not in vis_ex:
+                            exq.append(nv)
+                exit_clusters.append(set(cl))
+
+            # Erode each exit independently
+            all_stub: set[int] = set()
+            n_exits_eroded = 0
+            global_visited: set[int] = set()
+
+            for cluster in exit_clusters:
+                visited_er = set(cluster)
+                stub_verts = set(cluster)
+                current_ring = cluster
+                ring_sizes: list[int] = [len(current_ring)]
+
+                for _depth in range(200):
+                    next_ring: set[int] = set()
+                    for v in current_ring:
+                        for nv in adj.get(v, []):
+                            if (nv in soma_main
+                                    and nv not in visited_er
+                                    and nv not in global_visited):
+                                next_ring.add(nv)
+                                visited_er.add(nv)
+                    if not next_ring:
+                        break
+
+                    # Stop at real branch (2+ CCs each ≥ 25%)
+                    # or when ring doubles from entry (soma body).
+                    if len(next_ring) > 2 * ring_sizes[0]:
+                        break
+                    vis_r: set[int] = set()
+                    cc_sizes_r: list[int] = []
+                    for rs in next_ring:
+                        if rs in vis_r:
+                            continue
+                        sz = 0
+                        rq = deque([rs])
+                        while rq:
+                            u = rq.popleft()
+                            if u in vis_r:
+                                continue
+                            vis_r.add(u)
+                            sz += 1
+                            for nu in adj.get(u, []):
+                                if (nu in next_ring
+                                        and nu not in vis_r):
+                                    rq.append(nu)
+                        cc_sizes_r.append(sz)
+                    quarter = len(next_ring) * 0.25
+                    if sum(1 for s in cc_sizes_r if s >= quarter) >= 2:
+                        break
+
+                    stub_verts.update(next_ring)
+                    current_ring = next_ring
+                    ring_sizes.append(len(next_ring))
+
+                if next_ring:  # actually eroded
+                    all_stub.update(stub_verts)
+                    global_visited.update(stub_verts)
+                    n_exits_eroded += 1
+
+            if all_stub and len(all_stub) < len(soma_main) * 0.5:
+                soma_set -= all_stub
+                soma_set |= non_main_soma
+                if verbose:
+                    print(
+                        f"[skeliner.pre]   soma prune: "
+                        f"eroded {len(all_stub):,} stub verts "
+                        f"from {n_exits_eroded} exit(s) → "
+                        f"{len(soma_set):,} verts"
+                    )
+
+        # ── 6c. Drop small disconnected soma fragments ─────────────
+        #        Axon sections inside the ellipsoid may form small
+        #        CCs disconnected from the main soma body.
+        main_soma_final = soma_set & main_vert_set
+        vis_final: set[int] = set()
+        largest_final: list[int] = []
+        for cc_start in main_soma_final:
+            if cc_start in vis_final:
                 continue
             cc: list[int] = []
             ccq = deque([cc_start])
             while ccq:
                 v = ccq.popleft()
-                if v in visited_cc:
+                if v in vis_final:
                     continue
-                visited_cc.add(v)
+                vis_final.add(v)
                 cc.append(v)
                 for nv in adj.get(v, []):
-                    if nv in main_soma and nv not in visited_cc:
+                    if nv in main_soma_final and nv not in vis_final:
                         ccq.append(nv)
-            if len(cc) > len(largest_cc):
-                largest_cc = cc
+            if len(cc) > len(largest_final):
+                largest_final = cc
 
-        n_disconn = len(main_soma) - len(largest_cc)
-        if n_disconn > 0:
-            soma_set = set(largest_cc) | non_main_soma
+        n_frag = len(main_soma_final) - len(largest_final)
+        if n_frag > 0:
+            soma_set = set(largest_final) | non_main_soma
             if verbose:
                 print(
                     f"[skeliner.pre]   soma prune: "
-                    f"dropped {n_disconn:,} disconnected → "
+                    f"dropped {n_frag:,} disconnected → "
                     f"{len(soma_set):,} verts"
                 )
 
@@ -2082,6 +2188,209 @@ def find_soma(
             f"{len(soma.verts):,} surface verts "
             f"({len(core)}/{len(centroids)} indicator fragments, "
             f"cutoff ring {cutoff})"
+        )
+
+    return soma
+
+
+def find_soma_alt(
+    mesh: trimesh.Trimesh,
+    *,
+    organelles: np.ndarray | None = None,
+    verbose: bool = False,
+    mesh_stats: tuple | None = None,
+) -> Soma | None:
+    """Alternative soma detection.
+
+    Approach:
+      0. Organelle clustering → soma center
+      1. BFS on external surface (no organelle faces) from center
+      2. Keep all rings up to ~1.5× peak ring (no Otsu cutoff)
+      3. Find and remove neurite stubs from that set
+      4. Fit ellipsoid to the cleaned set
+    """
+    from collections import deque
+
+    if mesh_stats is not None:
+        _, labels, main, _ = mesh_stats
+    else:
+        labels, main = _face_edge_components(mesh)
+
+    # ── 0. Organelle clustering → soma center ─────────────────────
+    if organelles is None:
+        pocket, isolated = find_organelles(mesh, verbose=verbose)
+        organelles = pocket | isolated
+    if organelles.sum() == 0:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: no organelles found")
+        return None
+
+    org_fi = np.where(organelles)[0]
+    org_labels, _ = _face_edge_components(
+        trimesh.Trimesh(
+            vertices=mesh.vertices,
+            faces=mesh.faces[org_fi],
+            process=False,
+        )
+    )
+    centroids = []
+    for cid in np.unique(org_labels):
+        local_fi = org_fi[org_labels == cid]
+        verts = np.unique(mesh.faces[local_fi])
+        centroids.append(mesh.vertices[verts].mean(axis=0))
+    centroids = np.asarray(centroids)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: {organelles.sum():,} organelle faces, "
+            f"{len(centroids)} clusters"
+        )
+    if len(centroids) < 3:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: too few organelle clusters")
+        return None
+
+    tree = KDTree(centroids)
+    dd, _ = tree.query(centroids, k=min(2, len(centroids)))
+    nn_dists = dd[:, 1] if dd.ndim > 1 else dd
+    nn_thresh, _ = _otsu_threshold(nn_dists)
+    pairs = tree.query_pairs(r=nn_thresh)
+    prox_adj: dict[int, set[int]] = defaultdict(set)
+    for i, j in pairs:
+        prox_adj[i].add(j)
+        prox_adj[j].add(i)
+
+    visited_prox: set[int] = set()
+    best_comp: list[int] = []
+    for start in range(len(centroids)):
+        if start in visited_prox:
+            continue
+        comp: list[int] = []
+        pq = deque([start])
+        while pq:
+            v = pq.popleft()
+            if v in visited_prox:
+                continue
+            visited_prox.add(v)
+            comp.append(v)
+            for nv in prox_adj[v]:
+                if nv not in visited_prox:
+                    pq.append(nv)
+        if len(comp) > len(best_comp):
+            best_comp = comp
+
+    core = centroids[best_comp]
+    if len(core) < 3:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: no dense fragment cluster found")
+        return None
+
+    center = np.median(core, axis=0)
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: dense cluster "
+            f"{len(core)}/{len(centroids)} fragments"
+        )
+
+    # ── 1. BFS on external surface from center ────────────────────
+    main_fi = np.where(labels == main)[0]
+    non_org_main = main_fi[~organelles[main_fi]]
+
+    adj_bfs: dict[int, list[int]] = defaultdict(list)
+    for fi in non_org_main:
+        v = mesh.faces[fi]
+        for i in range(3):
+            a, b = int(v[i]), int(v[(i + 1) % 3])
+            adj_bfs[a].append(b)
+            adj_bfs[b].append(a)
+
+    bfs_verts = np.fromiter(adj_bfs.keys(), dtype=np.intp)
+    seed = int(
+        bfs_verts[
+            np.argmin(
+                np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1)
+            )
+        ]
+    )
+
+    ring_level: dict[int, int] = {seed: 0}
+    queue: deque[int] = deque([seed])
+    ring_verts: dict[int, list[int]] = defaultdict(list)
+    ring_verts[0].append(seed)
+    while queue:
+        v = queue.popleft()
+        lv = ring_level[v]
+        for nv in adj_bfs[v]:
+            if nv not in ring_level:
+                ring_level[nv] = lv + 1
+                queue.append(nv)
+                ring_verts[lv + 1].append(nv)
+
+    # Find peak ring (largest connected component width)
+    max_ring = max(ring_verts.keys())
+    largest_comp_size = np.zeros(max_ring + 1)
+    for lv in range(max_ring + 1):
+        vr = ring_verts.get(lv, [])
+        if not vr:
+            continue
+        ring_set = set(vr)
+        vis_r: set[int] = set()
+        mx = 0
+        for st in vr:
+            if st in vis_r:
+                continue
+            sz = 0
+            rq = deque([st])
+            while rq:
+                u = rq.popleft()
+                if u in vis_r:
+                    continue
+                vis_r.add(u)
+                sz += 1
+                for nu in adj_bfs[u]:
+                    if nu in ring_set and nu not in vis_r:
+                        rq.append(nu)
+            if sz > mx:
+                mx = sz
+        largest_comp_size[lv] = mx
+
+    peak_ring = int(np.argmax(largest_comp_size))
+
+    # ── 2. Keep rings 0 to 1.5× peak (no Otsu) ───────────────────
+    boundary = peak_ring + peak_ring // 2
+    soma_set: set[int] = set()
+    for lv in range(min(boundary + 1, max_ring + 1)):
+        soma_set.update(ring_verts[lv])
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: peak ring {peak_ring}, "
+            f"boundary ring {boundary}, "
+            f"{len(soma_set):,} verts"
+        )
+
+    # ── 3. Watershed stub removal ───────────────────────────────
+    #        TODO: implement recursive watershed from tips.
+    #        See dev/mesh/plans/find_soma.md for the algorithm.
+    pass
+
+    # ── 4. Fit ellipsoid ──────────────────────────────────────────
+    if len(soma_set) < 4:
+        if verbose:
+            print("[skeliner.pre] Soma-alt: too few verts")
+        return None
+
+    soma_arr = np.fromiter(sorted(soma_set), dtype=np.intp)
+    soma = Soma.fit(mesh.vertices[soma_arr], verts=soma_arr)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma-alt: center=["
+            f"{soma.center[0]:.0f}, {soma.center[1]:.0f}, "
+            f"{soma.center[2]:.0f}], "
+            f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
+            f"{soma.axes[2]:.0f}], "
+            f"{len(soma.verts):,} surface verts"
         )
 
     return soma
