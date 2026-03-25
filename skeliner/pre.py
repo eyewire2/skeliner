@@ -6530,18 +6530,22 @@ def _find_void_center(
     *,
     verbose: bool = False,
 ) -> np.ndarray | None:
-    """Find the centre of the largest interior void in the organelle field.
+    """Find the centre of the nucleus void in the organelle field.
 
     Two-stage approach:
 
     1. **Density peak** — bin organelle centroids into a coarse 3D grid,
        Gaussian-smooth, and take the peak.  This locates the soma
-       neighbourhood (densest organelle region) quickly.
-    2. **Local void detection** — crop organelles to a radius around the
-       density peak, build a local occupancy grid at finer resolution,
-       dilate to close shell gaps, then use the Euclidean distance
-       transform to find the deepest interior point (furthest from any
-       organelle).  This is the true void centre.
+       neighbourhood (densest organelle region).
+    2. **Enclosure-based void detection** — crop organelles to the soma
+       neighbourhood, build a local occupancy grid, compute the Euclidean
+       distance transform of empty space, then restrict to voxels that
+       are *enclosed* by organelles on all 6 axis-aligned directions.
+       The centroid of these enclosed empty voxels (weighted by DT depth)
+       is the void centre.
+
+    The enclosure test ensures we find the empty pocket *inside* the
+    organelle shell (the nucleus), not empty space outside the cell.
 
     Parameters
     ----------
@@ -6553,8 +6557,7 @@ def _find_void_center(
     np.ndarray or None
         ``(3,)`` void centre in world coordinates, or None if no void found.
     """
-    from scipy.ndimage import binary_dilation, gaussian_filter, label
-    from scipy.ndimage import distance_transform_edt
+    from scipy.ndimage import distance_transform_edt, gaussian_filter
 
     _p = "[_find_void_center]"
 
@@ -6571,9 +6574,8 @@ def _find_void_center(
     peak = mins + np.array(peak_idx) * coarse_res + coarse_res / 2
 
     # Crop to local region around density peak
-    crop_radius = 15_000
-    dists = np.linalg.norm(org_c - peak, axis=1)
-    local = org_c[dists < crop_radius]
+    crop_radius = 10_000
+    local = org_c[np.linalg.norm(org_c - peak, axis=1) < crop_radius]
 
     if len(local) < 50:
         if verbose:
@@ -6586,89 +6588,158 @@ def _find_void_center(
             f"{peak[2]:.0f}), {len(local):,} local organelles"
         )
 
-    # ── Stage 2: local void via distance transform ─────────────────
-    #    Try (vox_res, dilation) pairs from fine to coarse.  Pick the
-    #    first that produces a void with DT > 1 voxel (a real enclosed
-    #    region, not a single-voxel gap).
-    configs = [(300, 4), (400, 3), (500, 2)]
-    for vox_res, dil in configs:
-        vm = local.min(axis=0) - vox_res * 3
-        vb = ((local - vm) / vox_res).astype(int)
-        vs = vb.max(axis=0) + 4
-        occ = np.zeros(vs, dtype=bool)
-        occ[vb[:, 0], vb[:, 1], vb[:, 2]] = True
-
-        dilated = binary_dilation(occ, iterations=dil)
-        dist = distance_transform_edt(~dilated)
-
-        # Zero out boundary-touching components
-        labeled, n_comps = label(~dilated)
-        boundary_labels: set[int] = set()
-        for face_slice in [
-            labeled[0, :, :],
-            labeled[-1, :, :],
-            labeled[:, 0, :],
-            labeled[:, -1, :],
-            labeled[:, :, 0],
-            labeled[:, :, -1],
-        ]:
-            boundary_labels.update(face_slice[face_slice > 0].tolist())
-        for bl in boundary_labels:
-            dist[labeled == bl] = 0
-
-        max_val = float(dist.max())
-        if max_val > 1.5:
-            mi = np.unravel_index(np.argmax(dist), dist.shape)
-            center = vm + np.array(mi) * vox_res + vox_res / 2
-            if verbose:
-                print(
-                    f"{_p} void (vr={vox_res}, dil={dil}): "
-                    f"DT={max_val:.1f} vox ({max_val * vox_res:.0f} units), "
-                    f"centre=({center[0]:.0f}, {center[1]:.0f}, "
-                    f"{center[2]:.0f})"
-                )
-            return center
-
-    # Fallback: all configs gave DT ≤ 1.5 — use the best single-voxel
-    # void from the finest config
-    vox_res, dil = configs[0]
+    # ── Stage 2: enclosure-based void detection ────────────────────
+    vox_res = 300
     vm = local.min(axis=0) - vox_res * 3
     vb = ((local - vm) / vox_res).astype(int)
     vs = vb.max(axis=0) + 4
     occ = np.zeros(vs, dtype=bool)
     occ[vb[:, 0], vb[:, 1], vb[:, 2]] = True
-    dilated = binary_dilation(occ, iterations=dil)
-    dist = distance_transform_edt(~dilated)
-    labeled, n_comps = label(~dilated)
-    boundary_labels = set()
-    for face_slice in [
-        labeled[0, :, :],
-        labeled[-1, :, :],
-        labeled[:, 0, :],
-        labeled[:, -1, :],
-        labeled[:, :, 0],
-        labeled[:, :, -1],
-    ]:
-        boundary_labels.update(face_slice[face_slice > 0].tolist())
-    for bl in boundary_labels:
-        dist[labeled == bl] = 0
 
-    max_val = float(dist.max())
-    if max_val > 0:
-        mi = np.unravel_index(np.argmax(dist), dist.shape)
-        center = vm + np.array(mi) * vox_res + vox_res / 2
+    # Distance to nearest organelle at each empty voxel
+    dt = distance_transform_edt(~occ)
+
+    # Enclosure: for each axis, an occupied voxel must exist both
+    # before and after the current voxel along that axis.
+    enclosed = np.ones(vs, dtype=bool)
+    for axis in range(3):
+        enclosed &= np.maximum.accumulate(occ, axis=axis)
+        enclosed &= np.flip(
+            np.maximum.accumulate(np.flip(occ, axis=axis), axis=axis),
+            axis=axis,
+        )
+
+    # Enclosed empty voxels — the nucleus interior
+    mask = enclosed & ~occ
+    coords = np.argwhere(mask)
+
+    if len(coords) == 0:
         if verbose:
-            print(
-                f"{_p} void fallback (vr={vox_res}, dil={dil}): "
-                f"DT={max_val:.1f} vox, "
-                f"centre=({center[0]:.0f}, {center[1]:.0f}, "
-                f"{center[2]:.0f})"
-            )
-        return center
+            print(f"{_p} no enclosed empty voxels found, "
+                  f"falling back to density peak")
+        return peak.copy()
+
+    # Weighted centroid (deeper = more weight) centres the result
+    weights = dt[mask]
+    center = vm + np.average(coords, axis=0, weights=weights) * vox_res \
+        + vox_res / 2
 
     if verbose:
-        print(f"{_p} no void found")
-    return None
+        dt_max = float(weights.max())
+        print(
+            f"{_p} void: {len(coords)} enclosed voxels, "
+            f"DT_max={dt_max:.1f} vox ({dt_max * vox_res:.0f} units), "
+            f"centre=({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})"
+        )
+
+    return center
+
+
+def _find_void_bounding_box(
+    org_c: np.ndarray,
+    void_center: np.ndarray,
+    *,
+    bin_size: float = 500,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Find the soma bounding box by expanding from the void centre.
+
+    For each axis, bin organelle centroids into slabs and expand outward
+    from the void centre while the count stays above a fraction of the
+    peak count.  The box is naturally centred on the nucleus.
+
+    Parameters
+    ----------
+    org_c : np.ndarray
+        ``(N, 3)`` organelle face centroids.
+    void_center : np.ndarray
+        ``(3,)`` void centre in world coordinates.
+    bin_size : float
+        Width of each slab along each axis.
+
+    Returns
+    -------
+    box_min, box_max : np.ndarray, np.ndarray
+        ``(3,)`` arrays — lower and upper corners of the bounding box.
+    """
+    _p = "[_find_void_bounding_box]"
+    half_bin = bin_size / 2
+    padding = 1000.0
+
+    # Crop to soma neighbourhood — exclude distant neurite organelles
+    crop_radius = 10_000
+    local = org_c[np.linalg.norm(org_c - void_center, axis=1) < crop_radius]
+
+    box_min = np.full(3, -np.inf)
+    box_max = np.full(3, np.inf)
+
+    for axis in range(3):
+        ax_vals = local[:, axis]
+
+        if len(ax_vals) == 0:
+            continue
+
+        lo = ax_vals.min() - bin_size
+        hi = ax_vals.max() + bin_size
+        edges = np.arange(lo, hi + bin_size, bin_size)
+        counts, edges = np.histogram(ax_vals, bins=edges)
+        centres = (edges[:-1] + edges[1:]) / 2
+
+        if len(counts) == 0 or counts.max() == 0:
+            continue
+
+        # Find the slab closest to the void centre
+        vc_idx = int(np.argmin(np.abs(centres - void_center[axis])))
+
+        # Expand outward from void centre in both directions.
+        # Collect the full profile, then find the steepest relative
+        # drop — the soma/neurite boundary.  No fixed threshold.
+        for direction in [-1, +1]:
+            rng = (range(vc_idx - 1, -1, -1) if direction == -1
+                   else range(vc_idx + 1, len(counts)))
+            indices = list(rng)
+            if not indices:
+                continue
+
+            # Smooth the profile with a 3-bin running mean to
+            # reduce noise before looking for the steepest drop.
+            vals = counts[indices].astype(float)
+            if len(vals) >= 3:
+                smoothed = np.convolve(vals, np.ones(3) / 3, mode="same")
+            else:
+                smoothed = vals
+
+            # Find the steepest relative drop: (prev - cur) / prev.
+            # The soma boundary is the first large drop from a
+            # still-high level.
+            best_drop_ratio = 0.0
+            best_drop_pos = len(indices) - 1
+            for j in range(1, len(smoothed)):
+                prev = smoothed[j - 1]
+                if prev <= 0:
+                    continue
+                drop_ratio = (prev - smoothed[j]) / prev
+                if drop_ratio > best_drop_ratio:
+                    best_drop_ratio = drop_ratio
+                    best_drop_pos = j
+
+            # The box extends to the bin just before the steepest drop
+            stop_idx = indices[max(best_drop_pos - 1, 0)]
+            boundary = centres[stop_idx]
+            if direction == -1:
+                box_min[axis] = boundary - half_bin - padding
+            else:
+                box_max[axis] = boundary + half_bin + padding
+
+    if verbose:
+        print(
+            f"{_p} box: "
+            f"X=[{box_min[0]:.0f},{box_max[0]:.0f}] "
+            f"Y=[{box_min[1]:.0f},{box_max[1]:.0f}] "
+            f"Z=[{box_min[2]:.0f},{box_max[2]:.0f}]"
+        )
+
+    return box_min, box_max
 
 
 def _section_contours(
