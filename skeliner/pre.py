@@ -6360,19 +6360,90 @@ def find_soma_void(
         print(f"{_p} void centre: ({void_center[0]:.0f}, "
               f"{void_center[1]:.0f}, {void_center[2]:.0f})")
 
-    # ── 2. Cross-section at every Z-level near the void ────────────
-    z_unique = np.unique(verts[:, 2])
-    z_search_radius = 7000
+    # ── 2. Determine soma bounding box from organelle density ───────
+    #       The soma has dense organelles in all 3 axes.  For each axis,
+    #       count organelles per slab and find the range where density
+    #       is above 5% of the peak.  The intersection = soma box.
+    soma_box_min = np.full(3, -np.inf)
+    soma_box_max = np.full(3, np.inf)
+
+    for axis in range(3):
+        ax_vals = org_c[:, axis]
+        ax_unique = np.unique(np.round(ax_vals / 500) * 500)  # coarse bins
+        search_lo = void_center[axis] - 15000
+        search_hi = void_center[axis] + 15000
+        ax_near = ax_unique[(ax_unique >= search_lo) & (ax_unique <= search_hi)]
+
+        counts = {}
+        for v in ax_near:
+            n = int(((ax_vals >= v - 250) & (ax_vals < v + 250)).sum())
+            counts[v] = n
+
+        if not counts:
+            continue
+
+        max_count = max(counts.values())
+        thresh = max_count * 0.05
+        peak_v = max(counts, key=counts.get)
+        vals_sorted = sorted(counts.keys())
+
+        # Expand from peak in both directions
+        for direction in [-1, +1]:
+            last_good = peak_v
+            bad_run = 0
+            it = vals_sorted if direction == 1 else reversed(vals_sorted)
+            for v in it:
+                if direction == 1 and v <= peak_v:
+                    continue
+                if direction == -1 and v >= peak_v:
+                    continue
+                if counts.get(v, 0) >= thresh:
+                    last_good = v
+                    bad_run = 0
+                else:
+                    bad_run += 1
+                    if bad_run >= 3:
+                        break
+            if direction == -1:
+                soma_box_min[axis] = last_good - 500
+            else:
+                soma_box_max[axis] = last_good + 500
+
+    if verbose:
+        print(f"{_p} soma box: "
+              f"X=[{soma_box_min[0]:.0f},{soma_box_max[0]:.0f}] "
+              f"Y=[{soma_box_min[1]:.0f},{soma_box_max[1]:.0f}] "
+              f"Z=[{soma_box_min[2]:.0f},{soma_box_max[2]:.0f}] "
+              f"({_time.perf_counter() - t0:.1f}s)")
+
+    # ── 3. Cross-section a submesh within the bounding box ──────────
+    #       Build a submesh of faces inside the box so that
+    #       mesh.section() only processes the local geometry.
+    face_in_box = (
+        (all_c[:, 0] >= soma_box_min[0])
+        & (all_c[:, 0] <= soma_box_max[0])
+        & (all_c[:, 1] >= soma_box_min[1])
+        & (all_c[:, 1] <= soma_box_max[1])
+        & (all_c[:, 2] >= soma_box_min[2])
+        & (all_c[:, 2] <= soma_box_max[2])
+    )
+    box_face_idx = np.where(face_in_box)[0]
+    submesh = mesh.submesh([box_face_idx], append=True)
+
+    if verbose:
+        print(f"{_p} submesh: {len(submesh.faces):,} faces "
+              f"(from {n_faces:,})")
+
+    z_unique = np.unique(submesh.vertices[:, 2])
     z_near = z_unique[
-        (z_unique >= void_center[2] - z_search_radius)
-        & (z_unique <= void_center[2] + z_search_radius)
+        (z_unique >= soma_box_min[2]) & (z_unique <= soma_box_max[2])
     ]
 
     z_contours: dict[float, list[tuple[float, np.ndarray]]] = {}
     z_max_area: dict[float, float] = {}
 
     for z in z_near:
-        contours = _section_contours(mesh, float(z))
+        contours = _section_contours(submesh, float(z))
         if contours:
             z_contours[z] = contours
             z_max_area[z] = max(a for a, _ in contours)
@@ -6386,92 +6457,12 @@ def find_soma_void(
         print(f"{_p} collected {len(z_contours)} Z-levels "
               f"({_time.perf_counter() - t0:.1f}s)")
 
-    # ── 3. Determine soma Z-range from contour-area profile ────────
-    max_area = max(z_max_area.values())
-    peak_z = max(z_max_area, key=z_max_area.get)
-
-    z_sorted = sorted(z_max_area.keys())
-
-    def _expand(direction: int, frac: float, n_consec: int = 5) -> float:
-        thresh = max_area * frac
-        last_good = peak_z
-        bad_run = 0
-        it = z_sorted if direction == 1 else reversed(z_sorted)
-        for z in it:
-            if direction == 1 and z <= peak_z:
-                continue
-            if direction == -1 and z >= peak_z:
-                continue
-            if z_max_area.get(z, 0) >= thresh:
-                last_good = z
-                bad_run = 0
-            else:
-                bad_run += 1
-                if bad_run >= n_consec:
-                    break
-        return last_good
-
-    z_min_soma = _expand(-1, 0.02)
-    z_max_soma = _expand(+1, 0.05)
-
-    # Clamp Z-range using organelle density: the soma has dense
-    # organelles; beyond it, organelle count drops to dendrite level.
-    # Count organelles per Z-slab and find where density drops.
-    org_z = org_c[:, 2]
-    z_step = z_sorted[1] - z_sorted[0] if len(z_sorted) > 1 else 21
-    org_counts_per_z = {}
-    for z in z_sorted:
-        if z < z_min_soma - 1000 or z > z_max_soma + 1000:
-            continue
-        n = int(((org_z >= z) & (org_z < z + z_step)).sum())
-        org_counts_per_z[z] = n
-
-    if org_counts_per_z:
-        max_org = max(org_counts_per_z.values())
-        org_thresh = max_org * 0.05  # 5% of peak organelle count
-        vc_z = void_center[2]
-
-        # From void centre downward: stop when organelle count stays low
-        bad_run = 0
-        for z in reversed(z_sorted):
-            if z >= vc_z:
-                continue
-            if z < z_min_soma:
-                break
-            if org_counts_per_z.get(z, 0) < org_thresh:
-                bad_run += 1
-                if bad_run >= 5:
-                    z_min_soma = max(z_min_soma, z + 5 * z_step)
-                    break
-            else:
-                bad_run = 0
-
-        # From void centre upward
-        bad_run = 0
-        for z in z_sorted:
-            if z <= vc_z:
-                continue
-            if z > z_max_soma:
-                break
-            if org_counts_per_z.get(z, 0) < org_thresh:
-                bad_run += 1
-                if bad_run >= 5:
-                    z_max_soma = min(z_max_soma, z - 5 * z_step)
-                    break
-            else:
-                bad_run = 0
-
-    if verbose:
-        print(f"{_p} soma Z-range: [{z_min_soma:.0f}, {z_max_soma:.0f}] "
-              f"(peak Z={peak_z:.0f}, void Z={vc_z:.0f})")
-
     # ── 4. Build merged shapely polygons per Z-level ───────────────
+    max_area = max(z_max_area.values())
     min_contour_area = max_area * 0.0002
     soma_polys: dict[float, object] = {}
 
     for z, contours in z_contours.items():
-        if z < z_min_soma or z > z_max_soma:
-            continue
         polys = []
         for area, pts in contours:
             if area < min_contour_area:
@@ -6494,11 +6485,21 @@ def find_soma_void(
               f"({_time.perf_counter() - t0:.1f}s)")
 
     # ── 5. Classify vertices ───────────────────────────────────────
+    #       A vertex is soma if: (a) it's inside the bounding box AND
+    #       (b) at its Z-level, it's inside the contour polygon.
     vert_in_soma = np.zeros(len(verts), dtype=bool)
     vert_z = verts[:, 2]
 
+    # Pre-filter: only vertices inside the XY bounding box
+    in_box = (
+        (verts[:, 0] >= soma_box_min[0])
+        & (verts[:, 0] <= soma_box_max[0])
+        & (verts[:, 1] >= soma_box_min[1])
+        & (verts[:, 1] <= soma_box_max[1])
+    )
+
     for z, poly in soma_polys.items():
-        at_z = np.where(vert_z == z)[0]
+        at_z = np.where((vert_z == z) & in_box)[0]
         if len(at_z) == 0:
             continue
         inside = np.array(
