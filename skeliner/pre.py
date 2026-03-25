@@ -6414,9 +6414,56 @@ def find_soma_void(
     z_min_soma = _expand(-1, 0.02)
     z_max_soma = _expand(+1, 0.05)
 
+    # Clamp Z-range using organelle density: the soma has dense
+    # organelles; beyond it, organelle count drops to dendrite level.
+    # Count organelles per Z-slab and find where density drops.
+    org_z = org_c[:, 2]
+    z_step = z_sorted[1] - z_sorted[0] if len(z_sorted) > 1 else 21
+    org_counts_per_z = {}
+    for z in z_sorted:
+        if z < z_min_soma - 1000 or z > z_max_soma + 1000:
+            continue
+        n = int(((org_z >= z) & (org_z < z + z_step)).sum())
+        org_counts_per_z[z] = n
+
+    if org_counts_per_z:
+        max_org = max(org_counts_per_z.values())
+        org_thresh = max_org * 0.05  # 5% of peak organelle count
+        vc_z = void_center[2]
+
+        # From void centre downward: stop when organelle count stays low
+        bad_run = 0
+        for z in reversed(z_sorted):
+            if z >= vc_z:
+                continue
+            if z < z_min_soma:
+                break
+            if org_counts_per_z.get(z, 0) < org_thresh:
+                bad_run += 1
+                if bad_run >= 5:
+                    z_min_soma = max(z_min_soma, z + 5 * z_step)
+                    break
+            else:
+                bad_run = 0
+
+        # From void centre upward
+        bad_run = 0
+        for z in z_sorted:
+            if z <= vc_z:
+                continue
+            if z > z_max_soma:
+                break
+            if org_counts_per_z.get(z, 0) < org_thresh:
+                bad_run += 1
+                if bad_run >= 5:
+                    z_max_soma = min(z_max_soma, z - 5 * z_step)
+                    break
+            else:
+                bad_run = 0
+
     if verbose:
         print(f"{_p} soma Z-range: [{z_min_soma:.0f}, {z_max_soma:.0f}] "
-              f"(peak Z={peak_z:.0f})")
+              f"(peak Z={peak_z:.0f}, void Z={vc_z:.0f})")
 
     # ── 4. Build merged shapely polygons per Z-level ───────────────
     min_contour_area = max_area * 0.0002
