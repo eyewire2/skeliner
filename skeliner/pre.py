@@ -6553,6 +6553,97 @@ def find_soma_void(
     return soma_mask
 
 
+def has_soma(
+    org_c: np.ndarray,
+    *,
+    verbose: bool = False,
+) -> tuple[bool, np.ndarray | None, np.ndarray | None]:
+    """Detect whether the cell has a soma based on organelle distribution.
+
+    The soma is characterised by organelles wrapping around a nucleus
+    void — an empty interior enclosed by organelles.  On a coarse
+    occupancy grid (500-unit resolution), inter-organelle gaps vanish
+    and only the nucleus void remains as enclosed empty space.
+
+    Parameters
+    ----------
+    org_c : np.ndarray
+        ``(N, 3)`` organelle face centroids.
+
+    Returns
+    -------
+    detected : bool
+        True if a soma void is detected.
+    void_approx : np.ndarray or None
+        ``(3,)`` approximate void location (centroid of enclosed
+        empty voxels on the coarse grid), or None.
+    soma_mask : np.ndarray or None
+        ``(N,)`` boolean mask over *org_c* selecting organelles in
+        the soma neighbourhood, or None.
+    """
+    from scipy.ndimage import distance_transform_edt, gaussian_filter
+
+    _p = "[has_soma]"
+
+    if len(org_c) < 50:
+        if verbose:
+            print(f"{_p} too few organelles ({len(org_c)})")
+        return False, None, None
+
+    # ── Coarse occupancy grid (500-unit resolution) ───────────────
+    coarse_res = 500
+    mins = org_c.min(axis=0)
+    bins = ((org_c - mins) / coarse_res).astype(int)
+    gs = bins.max(axis=0) + 1
+    grid = np.zeros(gs, dtype=np.float32)
+    np.add.at(grid, (bins[:, 0], bins[:, 1], bins[:, 2]), 1)
+
+    coarse_occ = grid > 0
+
+    # ── 6-ray enclosure test ──────────────────────────────────────
+    # At 500-unit resolution inter-organelle gaps are < 1 voxel and
+    # vanish.  Only the nucleus void (5000+ units) creates enclosed
+    # empty space.
+    enclosed = np.ones(gs, dtype=bool)
+    for axis in range(3):
+        enclosed &= np.maximum.accumulate(coarse_occ, axis=axis)
+        enclosed &= np.flip(
+            np.maximum.accumulate(np.flip(coarse_occ, axis=axis), axis=axis),
+            axis=axis,
+        )
+    ee = enclosed & ~coarse_occ
+    n_enclosed = int(ee.sum())
+
+    if n_enclosed == 0:
+        if verbose:
+            print(f"{_p} no enclosed empty voxels — no soma detected")
+        return False, None, None
+
+    # ── Approximate void location ─────────────────────────────────
+    coords = np.argwhere(ee)
+    coarse_dt = distance_transform_edt(~coarse_occ)
+    dt_vals = coarse_dt[coords[:, 0], coords[:, 1], coords[:, 2]]
+
+    # DT-weighted centroid of enclosed voxels
+    void_vox = np.average(coords.astype(float), axis=0, weights=dt_vals)
+    void_approx = mins + void_vox * coarse_res + coarse_res / 2
+
+    # ── Soma-neighbourhood organelles ─────────────────────────────
+    crop_radius = 10_000
+    soma_mask = np.linalg.norm(org_c - void_approx, axis=1) < crop_radius
+
+    if verbose:
+        dt_max = float(dt_vals.max())
+        print(
+            f"{_p} {n_enclosed} enclosed voxels, "
+            f"DT_max={dt_max:.1f} ({dt_max * coarse_res:.0f} units), "
+            f"void≈({void_approx[0]:.0f}, {void_approx[1]:.0f}, "
+            f"{void_approx[2]:.0f}), {soma_mask.sum():,} soma organelles"
+        )
+
+    return True, void_approx, soma_mask
+
+
 def _find_void_seed(
     org_c: np.ndarray,
     *,
