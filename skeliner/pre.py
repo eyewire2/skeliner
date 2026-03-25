@@ -6663,6 +6663,146 @@ def _find_void_center(
     return center
 
 
+def _find_void_organelles(
+    org_c: np.ndarray,
+    *,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Identify organelle centroids surrounding the nucleus void.
+
+    Balloon / ray-cast approach:
+
+    1. Get a rough seed inside the void from ``_find_void_center``
+       (enclosure + DT-weighted centroid — imperfect but reliably
+       inside the void).
+    2. Build an occupancy grid and cast rays uniformly from the
+       seed.  The first organelle voxel each ray hits is a
+       void-surface organelle.  Rays that escape through the
+       pocket mouth are ignored.
+
+    Parameters
+    ----------
+    org_c : np.ndarray
+        ``(N, 3)`` organelle face centroids.
+
+    Returns
+    -------
+    mask : np.ndarray
+        ``(N,)`` boolean — True for void-surrounding organelles.
+    box_min : np.ndarray
+        ``(3,)`` lower corner of selected-organelle bounding box.
+    box_max : np.ndarray
+        ``(3,)`` upper corner of selected-organelle bounding box.
+    """
+    from scipy.ndimage import distance_transform_edt, gaussian_filter
+
+    _p = "[_find_void_organelles]"
+    out = np.zeros(len(org_c), dtype=bool)
+    nan3 = np.full(3, np.nan)
+
+    # ── Rough seed from the old void-center logic ─────────────────
+    seed_world = _find_void_center(org_c, verbose=verbose)
+    if seed_world is None:
+        if verbose:
+            print(f"{_p} no seed — _find_void_center returned None")
+        return out, nan3, nan3
+
+    # ── Crop organelles around seed ───────────────────────────────
+    crop_radius = 10_000
+    local_mask = np.linalg.norm(org_c - seed_world, axis=1) < crop_radius
+    local = org_c[local_mask]
+
+    if len(local) < 50:
+        if verbose:
+            print(f"{_p} too few local organelles ({len(local)})")
+        return out, nan3, nan3
+
+    # ── Occupancy grid ────────────────────────────────────────────
+    vox_res = 300
+    vm = local.min(axis=0) - vox_res * 3
+    vb = ((local - vm) / vox_res).astype(int)
+    vs = vb.max(axis=0) + 4
+    occ = np.zeros(vs, dtype=bool)
+    occ[vb[:, 0], vb[:, 1], vb[:, 2]] = True
+
+    # Seed in voxel coordinates
+    seed = (seed_world - vm) / vox_res
+
+    # ── Ray-cast from seed in all directions ──────────────────────
+    # Fibonacci sphere sampling for uniform coverage.
+    n_rays = 2000
+    golden = (1 + np.sqrt(5)) / 2
+    idx = np.arange(n_rays, dtype=float)
+    theta = 2 * np.pi * idx / golden
+    phi = np.arccos(1 - 2 * (idx + 0.5) / n_rays)
+    dirs = np.column_stack([
+        np.sin(phi) * np.cos(theta),
+        np.sin(phi) * np.sin(theta),
+        np.cos(phi),
+    ])  # (n_rays, 3)
+
+    # March all rays in parallel — step size 0.5 voxels
+    max_r = float(max(vs))
+    n_steps = int(np.ceil(max_r / 0.5))
+    t = np.arange(1, n_steps + 1, dtype=float) * 0.5  # (T,)
+
+    # positions: (n_rays, T, 3)
+    pos = seed[None, None, :] + dirs[:, None, :] * t[None, :, None]
+    ix = np.round(pos).astype(np.int32)
+
+    # Bounds check
+    valid = (
+        (ix[:, :, 0] >= 0) & (ix[:, :, 0] < vs[0]) &
+        (ix[:, :, 1] >= 0) & (ix[:, :, 1] < vs[1]) &
+        (ix[:, :, 2] >= 0) & (ix[:, :, 2] < vs[2])
+    )
+
+    # Safe indices for look-up (out-of-bounds → 0, masked later)
+    sx = np.where(valid, ix[:, :, 0], 0)
+    sy = np.where(valid, ix[:, :, 1], 0)
+    sz = np.where(valid, ix[:, :, 2], 0)
+
+    is_occ = occ[sx, sy, sz] & valid  # (n_rays, T)
+
+    # First hit along each ray
+    has_hit = is_occ.any(axis=1)
+    first_t = np.argmax(is_occ, axis=1)  # index of first True
+
+    hit_ix = ix[np.arange(n_rays), first_t]  # (n_rays, 3)
+    hit_ix = hit_ix[has_hit]
+
+    # Unique hit voxels → set for fast lookup
+    hit_set = set(map(tuple, hit_ix.tolist()))
+
+    if not hit_set:
+        if verbose:
+            print(f"{_p} no organelle hit by any ray")
+        return out, nan3, nan3
+
+    # Map hit voxels back to org_c indices
+    local_indices = np.where(local_mask)[0]
+    for i in range(len(vb)):
+        if tuple(vb[i]) in hit_set:
+            out[local_indices[i]] = True
+
+    if out.any():
+        sel = org_c[out]
+        box_min, box_max = sel.min(axis=0), sel.max(axis=0)
+    else:
+        box_min, box_max = nan3.copy(), nan3.copy()
+
+    if verbose:
+        n_hit = has_hit.sum()
+        n_escaped = n_rays - n_hit
+        print(
+            f"{_p} {out.sum():,} / {len(org_c):,} void-surrounding "
+            f"organelles ({len(hit_set)} hit voxels, "
+            f"{n_hit} rays hit, {n_escaped} escaped)"
+        )
+
+    return out, box_min, box_max
+
+
 def _find_void_bounding_box(
     org_c: np.ndarray,
     void_center: np.ndarray,
