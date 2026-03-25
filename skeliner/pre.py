@@ -6282,21 +6282,21 @@ def find_soma_void(
     """Detect soma faces using organelle distribution and mesh cross-sections.
 
     The approach exploits the fact that organelles coat the nucleus membrane
-    but are absent from the nucleus interior, creating a 3D void.  The soma
-    is identified as the region enclosed by the largest cross-section
-    contour at each Z-level within the soma Z-range.
+    but are absent from the nucleus interior, creating a 3D void.
 
     **Algorithm**
 
-    1. Find the nucleus void centre from 3D organelle occupancy
-       (morphological dilation → interior void detection).
-    2. Cross-section the mesh at every vertex Z-level near the void.
-    3. Collect the largest contour area per Z-level; derive the soma
-       Z-range from the contour-area profile (expand from peak while
-       area stays above a fraction of the maximum).
-    4. At each soma Z-level, union all significant contour polygons
-       and classify vertices inside them as soma.
-    5. A face is soma if any of its vertices is classified as soma.
+    1. Find the nucleus void centre from the organelle field
+       (density peak → local enclosure-based void detection).
+    2. Build a bounding box centred on the void by expanding outward
+       along each axis until organelle density drops off.
+    3. Cross-section a submesh within the bounding box at every
+       vertex Z-level.
+    4. At each Z-level, select the contour that contains the void
+       centre's XY projection — that is the soma contour.  Neurite
+       contours (which don't contain the void centre) are excluded.
+    5. Classify vertices inside the soma contour at their Z-level.
+    6. A face is soma if any of its vertices is classified as soma.
        Organelle faces (pocket / isolated) are excluded.
 
     Parameters
@@ -6320,7 +6320,6 @@ def find_soma_void(
     """
     import time as _time
 
-    from scipy.ndimage import binary_dilation, label
     from shapely.geometry import Point, Polygon
     from shapely.ops import unary_union
     from shapely import prepare
@@ -6341,8 +6340,7 @@ def find_soma_void(
         _, face_comp, main_ci, _ = stats
 
     org_mask = pocket | isolated
-    org_fi = np.where(org_mask)[0]
-    org_c = all_c[org_fi]
+    org_c = all_c[np.where(org_mask)[0]]
 
     if len(org_c) < 50:
         if verbose:
@@ -6360,54 +6358,10 @@ def find_soma_void(
         print(f"{_p} void centre: ({void_center[0]:.0f}, "
               f"{void_center[1]:.0f}, {void_center[2]:.0f})")
 
-    # ── 2. Determine soma bounding box from organelle density ───────
-    #       The soma has dense organelles in all 3 axes.  For each axis,
-    #       count organelles per slab and find the range where density
-    #       is above 5% of the peak.  The intersection = soma box.
-    soma_box_min = np.full(3, -np.inf)
-    soma_box_max = np.full(3, np.inf)
-
-    for axis in range(3):
-        ax_vals = org_c[:, axis]
-        ax_unique = np.unique(np.round(ax_vals / 500) * 500)  # coarse bins
-        search_lo = void_center[axis] - 15000
-        search_hi = void_center[axis] + 15000
-        ax_near = ax_unique[(ax_unique >= search_lo) & (ax_unique <= search_hi)]
-
-        counts = {}
-        for v in ax_near:
-            n = int(((ax_vals >= v - 250) & (ax_vals < v + 250)).sum())
-            counts[v] = n
-
-        if not counts:
-            continue
-
-        max_count = max(counts.values())
-        thresh = max_count * 0.05
-        peak_v = max(counts, key=counts.get)
-        vals_sorted = sorted(counts.keys())
-
-        # Expand from peak in both directions
-        for direction in [-1, +1]:
-            last_good = peak_v
-            bad_run = 0
-            it = vals_sorted if direction == 1 else reversed(vals_sorted)
-            for v in it:
-                if direction == 1 and v <= peak_v:
-                    continue
-                if direction == -1 and v >= peak_v:
-                    continue
-                if counts.get(v, 0) >= thresh:
-                    last_good = v
-                    bad_run = 0
-                else:
-                    bad_run += 1
-                    if bad_run >= 3:
-                        break
-            if direction == -1:
-                soma_box_min[axis] = last_good - 500
-            else:
-                soma_box_max[axis] = last_good + 500
+    # ── 2. Bounding box centred on the void ────────────────────────
+    soma_box_min, soma_box_max = _find_void_bounding_box(
+        org_c, void_center, verbose=verbose,
+    )
 
     if verbose:
         print(f"{_p} soma box: "
@@ -6416,9 +6370,7 @@ def find_soma_void(
               f"Z=[{soma_box_min[2]:.0f},{soma_box_max[2]:.0f}] "
               f"({_time.perf_counter() - t0:.1f}s)")
 
-    # ── 3. Cross-section a submesh within the bounding box ──────────
-    #       Build a submesh of faces inside the box so that
-    #       mesh.section() only processes the local geometry.
+    # ── 3. Cross-section a submesh within the bounding box ─────────
     face_in_box = (
         (all_c[:, 0] >= soma_box_min[0])
         & (all_c[:, 0] <= soma_box_max[0])
@@ -6428,6 +6380,11 @@ def find_soma_void(
         & (all_c[:, 2] <= soma_box_max[2])
     )
     box_face_idx = np.where(face_in_box)[0]
+    if len(box_face_idx) == 0:
+        if verbose:
+            print(f"{_p} no faces inside bounding box")
+        return np.zeros(n_faces, dtype=bool)
+
     submesh = mesh.submesh([box_face_idx], append=True)
 
     if verbose:
@@ -6439,16 +6396,16 @@ def find_soma_void(
         (z_unique >= soma_box_min[2]) & (z_unique <= soma_box_max[2])
     ]
 
-    z_contours: dict[float, list[tuple[float, np.ndarray]]] = {}
-    z_max_area: dict[float, float] = {}
+    # Void centre XY as a shapely Point for contour selection
+    vc_xy = Point(void_center[0], void_center[1])
 
+    z_contours: dict[float, list[tuple[float, np.ndarray]]] = {}
     for z in z_near:
         contours = _section_contours(submesh, float(z))
         if contours:
             z_contours[z] = contours
-            z_max_area[z] = max(a for a, _ in contours)
 
-    if not z_max_area:
+    if not z_contours:
         if verbose:
             print(f"{_p} no cross-section contours found")
         return np.zeros(n_faces, dtype=bool)
@@ -6457,15 +6414,45 @@ def find_soma_void(
         print(f"{_p} collected {len(z_contours)} Z-levels "
               f"({_time.perf_counter() - t0:.1f}s)")
 
-    # ── 4. Build merged shapely polygons per Z-level ───────────────
-    max_area = max(z_max_area.values())
-    min_contour_area = max_area * 0.0002
-    soma_polys: dict[float, object] = {}
+    # ── 4. Determine soma Z-range and build contour polygons ────────
+    #       The void centre defines the Z-range: the soma exists at
+    #       Z-levels where a contour contains the void centre's XY.
+    #       Within that range, union ALL contours at each Z-level
+    #       (not just the one containing the void centre) to capture
+    #       the full soma surface including folds and pores.
 
+    # First pass: find which Z-levels contain the void centre
+    vc_z_levels: list[float] = []
     for z, contours in z_contours.items():
+        for _area, pts in contours:
+            if len(pts) < 3:
+                continue
+            try:
+                p = Polygon(pts[:, :2])
+                if not p.is_valid:
+                    p = p.buffer(0)
+                if p.is_valid and not p.is_empty and p.contains(vc_xy):
+                    vc_z_levels.append(z)
+                    break
+            except Exception:
+                pass
+
+    if not vc_z_levels:
+        if verbose:
+            print(f"{_p} no contour contains the void centre")
+        return np.zeros(n_faces, dtype=bool)
+
+    soma_z_min = min(vc_z_levels)
+    soma_z_max = max(vc_z_levels)
+
+    # Second pass: within the soma Z-range, union all contours
+    soma_polys: dict[float, object] = {}
+    for z, contours in z_contours.items():
+        if z < soma_z_min or z > soma_z_max:
+            continue
         polys = []
-        for area, pts in contours:
-            if area < min_contour_area:
+        for _area, pts in contours:
+            if len(pts) < 3:
                 continue
             try:
                 p = Polygon(pts[:, :2])
@@ -6481,16 +6468,14 @@ def find_soma_void(
             soma_polys[z] = merged
 
     if verbose:
-        print(f"{_p} built {len(soma_polys)} contour polygons "
+        print(f"{_p} soma Z-range: [{soma_z_min:.0f}, {soma_z_max:.0f}], "
+              f"{len(soma_polys)} Z-levels "
               f"({_time.perf_counter() - t0:.1f}s)")
 
     # ── 5. Classify vertices ───────────────────────────────────────
-    #       A vertex is soma if: (a) it's inside the bounding box AND
-    #       (b) at its Z-level, it's inside the contour polygon.
     vert_in_soma = np.zeros(len(verts), dtype=bool)
     vert_z = verts[:, 2]
 
-    # Pre-filter: only vertices inside the XY bounding box
     in_box = (
         (verts[:, 0] >= soma_box_min[0])
         & (verts[:, 0] <= soma_box_max[0])
