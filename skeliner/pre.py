@@ -6445,7 +6445,49 @@ def find_soma_void(
     soma_z_min = min(vc_z_levels)
     soma_z_max = max(vc_z_levels)
 
-    # Second pass: within the soma Z-range, union all contours
+    # From the void-centre contours, derive the soma XY extent.
+    # This constrains which contours to include — neurites extending
+    # in XY beyond the soma are excluded.
+    soma_x_min, soma_x_max = np.inf, -np.inf
+    soma_y_min, soma_y_max = np.inf, -np.inf
+    for z in vc_z_levels:
+        contours = z_contours.get(z, [])
+        for _area, pts in contours:
+            if len(pts) < 3:
+                continue
+            try:
+                p = Polygon(pts[:, :2])
+                if not p.is_valid:
+                    p = p.buffer(0)
+                if p.is_valid and not p.is_empty and p.contains(vc_xy):
+                    bx = p.bounds  # (minx, miny, maxx, maxy)
+                    soma_x_min = min(soma_x_min, bx[0])
+                    soma_y_min = min(soma_y_min, bx[1])
+                    soma_x_max = max(soma_x_max, bx[2])
+                    soma_y_max = max(soma_y_max, bx[3])
+                    break
+            except Exception:
+                pass
+
+    # Add padding for folds/pores just outside the void-centre contour
+    xy_pad = 1000.0
+    soma_x_min -= xy_pad
+    soma_x_max += xy_pad
+    soma_y_min -= xy_pad
+    soma_y_max += xy_pad
+
+    if verbose:
+        print(f"{_p} soma XY extent: "
+              f"X=[{soma_x_min:.0f},{soma_x_max:.0f}] "
+              f"Y=[{soma_y_min:.0f},{soma_y_max:.0f}]")
+
+    # Second pass: within the soma Z-range, union contours that
+    # overlap with the soma XY extent
+    soma_xy_box = Polygon([
+        (soma_x_min, soma_y_min), (soma_x_max, soma_y_min),
+        (soma_x_max, soma_y_max), (soma_x_min, soma_y_max),
+    ])
+
     soma_polys: dict[float, object] = {}
     for z, contours in z_contours.items():
         if z < soma_z_min or z > soma_z_max:
@@ -6459,7 +6501,8 @@ def find_soma_void(
                 if not p.is_valid:
                     p = p.buffer(0)
                 if p.is_valid and not p.is_empty:
-                    polys.append(p)
+                    if p.intersects(soma_xy_box):
+                        polys.append(p)
             except Exception:
                 pass
         if polys:
