@@ -18,6 +18,7 @@ __all__ = [
     "find_holes",
     "find_offsets",
     "find_soma",
+    "find_soma_void",
     "preprocess",
     "PreprocessResult",
     "remove_fins",
@@ -6263,3 +6264,315 @@ def preprocess(
         mesh_stats=stats,
         vert_map=vert_map,
     )
+
+
+# =====================================================================
+#  find_soma_void — soma detection via organelle-void cross-sections
+# =====================================================================
+
+
+def find_soma_void(
+    mesh: trimesh.Trimesh,
+    pocket: np.ndarray,
+    isolated: np.ndarray,
+    *,
+    mesh_stats: tuple | None = None,
+    verbose: bool = False,
+) -> np.ndarray:
+    """Detect soma faces using organelle distribution and mesh cross-sections.
+
+    The approach exploits the fact that organelles coat the nucleus membrane
+    but are absent from the nucleus interior, creating a 3D void.  The soma
+    is identified as the region enclosed by the largest cross-section
+    contour at each Z-level within the soma Z-range.
+
+    **Algorithm**
+
+    1. Find the nucleus void centre from 3D organelle occupancy
+       (morphological dilation → interior void detection).
+    2. Cross-section the mesh at every vertex Z-level near the void.
+    3. Collect the largest contour area per Z-level; derive the soma
+       Z-range from the contour-area profile (expand from peak while
+       area stays above a fraction of the maximum).
+    4. At each soma Z-level, union all significant contour polygons
+       and classify vertices inside them as soma.
+    5. A face is soma if any of its vertices is classified as soma.
+       Organelle faces (pocket / isolated) are excluded.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh.
+    pocket : np.ndarray
+        Boolean mask ``(nFaces,)`` of pocket organelle faces.
+    isolated : np.ndarray
+        Boolean mask ``(nFaces,)`` of isolated organelle faces.
+    mesh_stats : tuple or None
+        Precomputed ``(outward_dots, face_comp, main_ci, main_face_mask)``.
+    verbose : bool
+        Print progress information.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask ``(nFaces,)`` — soma faces (includes nucleus membrane,
+        excludes organelle faces).
+    """
+    import time as _time
+
+    from scipy.ndimage import binary_dilation, label
+    from shapely.geometry import Point, Polygon
+    from shapely.ops import unary_union
+    from shapely import prepare
+
+    _p = "[find_soma_void]"
+    t0 = _time.perf_counter()
+
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces_arr = np.asarray(mesh.faces)
+    n_faces = len(faces_arr)
+    all_c = verts[faces_arr].mean(axis=1)
+
+    # ── 0. Mesh stats ──────────────────────────────────────────────
+    if mesh_stats is not None:
+        _, face_comp, main_ci, _ = mesh_stats
+    else:
+        stats = compute_mesh_stats(mesh, verbose=verbose)
+        _, face_comp, main_ci, _ = stats
+
+    org_mask = pocket | isolated
+    org_fi = np.where(org_mask)[0]
+    org_c = all_c[org_fi]
+
+    if len(org_c) < 50:
+        if verbose:
+            print(f"{_p} too few organelle faces ({len(org_c)}), skipping")
+        return np.zeros(n_faces, dtype=bool)
+
+    # ── 1. Find the nucleus void centre ────────────────────────────
+    void_center = _find_void_center(org_c, verbose=verbose)
+    if void_center is None:
+        if verbose:
+            print(f"{_p} no void found in organelle field")
+        return np.zeros(n_faces, dtype=bool)
+
+    if verbose:
+        print(f"{_p} void centre: ({void_center[0]:.0f}, "
+              f"{void_center[1]:.0f}, {void_center[2]:.0f})")
+
+    # ── 2. Cross-section at every Z-level near the void ────────────
+    z_unique = np.unique(verts[:, 2])
+    z_search_radius = 7000
+    z_near = z_unique[
+        (z_unique >= void_center[2] - z_search_radius)
+        & (z_unique <= void_center[2] + z_search_radius)
+    ]
+
+    z_contours: dict[float, list[tuple[float, np.ndarray]]] = {}
+    z_max_area: dict[float, float] = {}
+
+    for z in z_near:
+        contours = _section_contours(mesh, float(z))
+        if contours:
+            z_contours[z] = contours
+            z_max_area[z] = max(a for a, _ in contours)
+
+    if not z_max_area:
+        if verbose:
+            print(f"{_p} no cross-section contours found")
+        return np.zeros(n_faces, dtype=bool)
+
+    if verbose:
+        print(f"{_p} collected {len(z_contours)} Z-levels "
+              f"({_time.perf_counter() - t0:.1f}s)")
+
+    # ── 3. Determine soma Z-range from contour-area profile ────────
+    max_area = max(z_max_area.values())
+    peak_z = max(z_max_area, key=z_max_area.get)
+
+    z_sorted = sorted(z_max_area.keys())
+
+    def _expand(direction: int, frac: float, n_consec: int = 5) -> float:
+        thresh = max_area * frac
+        last_good = peak_z
+        bad_run = 0
+        it = z_sorted if direction == 1 else reversed(z_sorted)
+        for z in it:
+            if direction == 1 and z <= peak_z:
+                continue
+            if direction == -1 and z >= peak_z:
+                continue
+            if z_max_area.get(z, 0) >= thresh:
+                last_good = z
+                bad_run = 0
+            else:
+                bad_run += 1
+                if bad_run >= n_consec:
+                    break
+        return last_good
+
+    z_min_soma = _expand(-1, 0.02)
+    z_max_soma = _expand(+1, 0.05)
+
+    if verbose:
+        print(f"{_p} soma Z-range: [{z_min_soma:.0f}, {z_max_soma:.0f}] "
+              f"(peak Z={peak_z:.0f})")
+
+    # ── 4. Build merged shapely polygons per Z-level ───────────────
+    min_contour_area = max_area * 0.0002
+    soma_polys: dict[float, object] = {}
+
+    for z, contours in z_contours.items():
+        if z < z_min_soma or z > z_max_soma:
+            continue
+        polys = []
+        for area, pts in contours:
+            if area < min_contour_area:
+                continue
+            try:
+                p = Polygon(pts[:, :2])
+                if not p.is_valid:
+                    p = p.buffer(0)
+                if p.is_valid and not p.is_empty:
+                    polys.append(p)
+            except Exception:
+                pass
+        if polys:
+            merged = unary_union(polys).buffer(5.0)
+            prepare(merged)
+            soma_polys[z] = merged
+
+    if verbose:
+        print(f"{_p} built {len(soma_polys)} contour polygons "
+              f"({_time.perf_counter() - t0:.1f}s)")
+
+    # ── 5. Classify vertices ───────────────────────────────────────
+    vert_in_soma = np.zeros(len(verts), dtype=bool)
+    vert_z = verts[:, 2]
+
+    for z, poly in soma_polys.items():
+        at_z = np.where(vert_z == z)[0]
+        if len(at_z) == 0:
+            continue
+        inside = np.array(
+            [poly.contains(Point(p)) for p in verts[at_z, :2]]
+        )
+        vert_in_soma[at_z] = inside
+
+    if verbose:
+        print(f"{_p} {vert_in_soma.sum():,} vertices in soma "
+              f"({_time.perf_counter() - t0:.1f}s)")
+
+    # ── 6. Face classification ─────────────────────────────────────
+    face_soma = vert_in_soma[faces_arr].any(axis=1)
+    clean_main = (face_comp == main_ci) & ~pocket & ~isolated
+    soma_mask = face_soma & clean_main
+
+    if verbose:
+        print(
+            f"{_p} soma: {int(soma_mask.sum()):,} faces "
+            f"({_time.perf_counter() - t0:.1f}s)"
+        )
+
+    return soma_mask
+
+
+def _find_void_center(
+    org_c: np.ndarray,
+    *,
+    vox_res: float = 500,
+    dilation_iter: int = 1,
+    verbose: bool = False,
+) -> np.ndarray | None:
+    """Find the centre of the largest interior void in the organelle field.
+
+    Parameters
+    ----------
+    org_c : np.ndarray
+        ``(N, 3)`` organelle face centroids.
+    vox_res : float
+        Voxel size for the occupancy grid.
+    dilation_iter : int
+        Binary dilation iterations to close gaps in the organelle shell.
+
+    Returns
+    -------
+    np.ndarray or None
+        ``(3,)`` void centre in world coordinates, or None if no void found.
+    """
+    from scipy.ndimage import binary_dilation, label
+
+    vox_mins = org_c.min(axis=0) - vox_res * 3
+    vox_bins = ((org_c - vox_mins) / vox_res).astype(int)
+    vox_shape = vox_bins.max(axis=0) + 4
+    occupancy = np.zeros(vox_shape, dtype=bool)
+    occupancy[vox_bins[:, 0], vox_bins[:, 1], vox_bins[:, 2]] = True
+
+    dilated = binary_dilation(occupancy, iterations=dilation_iter)
+    empty = ~dilated
+
+    labeled, n_comps = label(empty)
+
+    # Discard components touching the grid boundary
+    boundary_labels: set[int] = set()
+    for face_slice in [
+        labeled[0, :, :],
+        labeled[-1, :, :],
+        labeled[:, 0, :],
+        labeled[:, -1, :],
+        labeled[:, :, 0],
+        labeled[:, :, -1],
+    ]:
+        boundary_labels.update(face_slice[face_slice > 0].tolist())
+
+    # Find the largest interior void
+    best_size, best_label = 0, -1
+    for i in range(1, n_comps + 1):
+        if i in boundary_labels:
+            continue
+        size = int((labeled == i).sum())
+        if size > best_size:
+            best_size = size
+            best_label = i
+
+    if best_label < 0:
+        return None
+
+    coords = np.argwhere(labeled == best_label)
+    center = vox_mins + coords.mean(axis=0) * vox_res + vox_res / 2
+
+    if verbose:
+        span = (coords.max(axis=0) - coords.min(axis=0)) * vox_res
+        print(
+            f"[_find_void_center] void: {best_size} voxels, "
+            f"centre=({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f}), "
+            f"span=({span[0]:.0f}, {span[1]:.0f}, {span[2]:.0f})"
+        )
+
+    return center
+
+
+def _section_contours(
+    mesh: trimesh.Trimesh,
+    z: float,
+) -> list[tuple[float, np.ndarray]]:
+    """Return ``[(area, vertices_Nx3), ...]`` for each contour at *z*."""
+    section = mesh.section(
+        plane_origin=[0, 0, z], plane_normal=[0, 0, 1]
+    )
+    if section is None:
+        return []
+    sv = section.vertices
+    contours: list[tuple[float, np.ndarray]] = []
+    for entity in section.entities:
+        pts = sv[entity.points]
+        if len(pts) < 3:
+            continue
+        x, y = pts[:, 0], pts[:, 1]
+        area = 0.5 * abs(
+            np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
+            + x[-1] * y[0]
+            - x[0] * y[-1]
+        )
+        contours.append((area, pts))
+    return contours
