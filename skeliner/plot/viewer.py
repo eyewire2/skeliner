@@ -455,13 +455,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     if pocket.any():
                         ann["highlights"].append({
                             "faces": np.where(pocket)[0].tolist(),
-                            "color": [0.2, 0.6, 1.0],
+                            "color": [1, 0.15, 0.15],
                             "label": f"organelle:pocket ({int(pocket.sum()):,})",
                         })
                     if isolated.any():
                         ann["highlights"].append({
                             "faces": np.where(isolated)[0].tolist(),
-                            "color": [1.0, 0.6, 0.2],
+                            "color": [0.15, 0.8, 0.15],
                             "label": f"organelle:isolated ({int(isolated.sum()):,})",
                         })
                     annotations_path.write_text(json.dumps(ann), encoding="utf-8")
@@ -908,7 +908,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             if faces:
                 highlights.append({
                     "faces": faces,
-                    "color": [0.8, 0.4, 0.1],
+                    "color": [0.15, 0.8, 0.15],
                     "label": f"organelle:isolated ({len(faces):,})",
                 })
         else:
@@ -928,7 +928,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             if iso:
                 highlights.append({
                     "faces": iso,
-                    "color": [0.8, 0.4, 0.1],
+                    "color": [0.15, 0.8, 0.15],
                     "label": f"organelle:isolated ({len(iso):,})",
                 })
 
