@@ -6349,7 +6349,7 @@ def find_soma_void(
 
     # ── 1. Find the nucleus void centre ────────────────────────────
     void_center = _find_void_center(org_c, verbose=verbose)
-    if void_center is None:
+    if void_center is None or np.any(np.isnan(void_center)):
         if verbose:
             print(f"{_p} no void found in organelle field")
         return np.zeros(n_faces, dtype=bool)
@@ -6553,27 +6553,16 @@ def find_soma_void(
     return soma_mask
 
 
-def _find_void_center(
+def _find_void_seed(
     org_c: np.ndarray,
     *,
     verbose: bool = False,
 ) -> np.ndarray | None:
-    """Find the centre of the nucleus void in the organelle field.
+    """Find a rough point inside the nucleus void.
 
-    Two-stage approach:
-
-    1. **Density peak** — bin organelle centroids into a coarse 3D grid,
-       Gaussian-smooth, and take the peak.  This locates the soma
-       neighbourhood (densest organelle region).
-    2. **Enclosure-based void detection** — crop organelles to the soma
-       neighbourhood, build a local occupancy grid, compute the Euclidean
-       distance transform of empty space, then restrict to voxels that
-       are *enclosed* by organelles on all 6 axis-aligned directions.
-       The centroid of these enclosed empty voxels (weighted by DT depth)
-       is the void centre.
-
-    The enclosure test ensures we find the empty pocket *inside* the
-    organelle shell (the nucleus), not empty space outside the cell.
+    Not the true centre — biased toward the dense side — but
+    reliably inside the void.  Used as the ray-cast seed by
+    ``_find_void_organelles``.
 
     Parameters
     ----------
@@ -6583,11 +6572,11 @@ def _find_void_center(
     Returns
     -------
     np.ndarray or None
-        ``(3,)`` void centre in world coordinates, or None if no void found.
+        ``(3,)`` approximate void location, or None if not found.
     """
     from scipy.ndimage import distance_transform_edt, gaussian_filter
 
-    _p = "[_find_void_center]"
+    _p = "[_find_void_seed]"
 
     # ── Stage 1: density peak → soma neighbourhood ─────────────────
     coarse_res = 500
@@ -6672,7 +6661,7 @@ def _find_void_organelles(
 
     Balloon / ray-cast approach:
 
-    1. Get a rough seed inside the void from ``_find_void_center``
+    1. Get a rough seed inside the void from ``_find_void_seed``
        (enclosure + DT-weighted centroid — imperfect but reliably
        inside the void).
     2. Build an occupancy grid and cast rays uniformly from the
@@ -6701,10 +6690,10 @@ def _find_void_organelles(
     nan3 = np.full(3, np.nan)
 
     # ── Rough seed from the old void-center logic ─────────────────
-    seed_world = _find_void_center(org_c, verbose=verbose)
+    seed_world = _find_void_seed(org_c, verbose=verbose)
     if seed_world is None:
         if verbose:
-            print(f"{_p} no seed — _find_void_center returned None")
+            print(f"{_p} no seed — _find_void_seed returned None")
         return out, nan3, nan3
 
     # ── Crop organelles around seed ───────────────────────────────
@@ -6801,6 +6790,46 @@ def _find_void_organelles(
         )
 
     return out, box_min, box_max
+
+
+def _find_void_center(
+    org_c: np.ndarray,
+    *,
+    verbose: bool = False,
+) -> np.ndarray | None:
+    """Find the centre of the nucleus void.
+
+    Midpoint of the bounding box of void-surrounding organelles
+    (from ``_find_void_organelles``).  Equidistant from the extremes
+    on each axis — immune to organelle density bias.
+
+    Parameters
+    ----------
+    org_c : np.ndarray
+        ``(N, 3)`` organelle face centroids.
+
+    Returns
+    -------
+    np.ndarray or None
+        ``(3,)`` void centre in world coordinates, or None if not found.
+    """
+    _p = "[_find_void_center]"
+    void_org, box_min, box_max = _find_void_organelles(org_c, verbose=verbose)
+
+    if not void_org.any() or np.any(np.isnan(box_min)):
+        if verbose:
+            print(f"{_p} no void organelles found")
+        return None
+
+    center = (box_min + box_max) / 2
+
+    if verbose:
+        print(
+            f"{_p} centre=({center[0]:.0f}, {center[1]:.0f}, "
+            f"{center[2]:.0f})"
+        )
+
+    return center
 
 
 def _find_void_bounding_box(
