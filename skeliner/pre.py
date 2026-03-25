@@ -6528,41 +6528,119 @@ def find_soma_void(
 def _find_void_center(
     org_c: np.ndarray,
     *,
-    vox_res: float = 500,
-    dilation_iter: int = 1,
     verbose: bool = False,
 ) -> np.ndarray | None:
     """Find the centre of the largest interior void in the organelle field.
+
+    Two-stage approach:
+
+    1. **Density peak** — bin organelle centroids into a coarse 3D grid,
+       Gaussian-smooth, and take the peak.  This locates the soma
+       neighbourhood (densest organelle region) quickly.
+    2. **Local void detection** — crop organelles to a radius around the
+       density peak, build a local occupancy grid at finer resolution,
+       dilate to close shell gaps, then use the Euclidean distance
+       transform to find the deepest interior point (furthest from any
+       organelle).  This is the true void centre.
 
     Parameters
     ----------
     org_c : np.ndarray
         ``(N, 3)`` organelle face centroids.
-    vox_res : float
-        Voxel size for the occupancy grid.
-    dilation_iter : int
-        Binary dilation iterations to close gaps in the organelle shell.
 
     Returns
     -------
     np.ndarray or None
         ``(3,)`` void centre in world coordinates, or None if no void found.
     """
-    from scipy.ndimage import binary_dilation, label
+    from scipy.ndimage import binary_dilation, gaussian_filter, label
+    from scipy.ndimage import distance_transform_edt
 
-    vox_mins = org_c.min(axis=0) - vox_res * 3
-    vox_bins = ((org_c - vox_mins) / vox_res).astype(int)
-    vox_shape = vox_bins.max(axis=0) + 4
-    occupancy = np.zeros(vox_shape, dtype=bool)
-    occupancy[vox_bins[:, 0], vox_bins[:, 1], vox_bins[:, 2]] = True
+    _p = "[_find_void_center]"
 
-    dilated = binary_dilation(occupancy, iterations=dilation_iter)
-    empty = ~dilated
+    # ── Stage 1: density peak → soma neighbourhood ─────────────────
+    coarse_res = 500
+    mins = org_c.min(axis=0)
+    bins = ((org_c - mins) / coarse_res).astype(int)
+    grid_shape = bins.max(axis=0) + 1
+    grid = np.zeros(grid_shape, dtype=np.float32)
+    np.add.at(grid, (bins[:, 0], bins[:, 1], bins[:, 2]), 1)
+    grid_smooth = gaussian_filter(grid, sigma=3)
 
-    labeled, n_comps = label(empty)
+    peak_idx = np.unravel_index(grid_smooth.argmax(), grid_smooth.shape)
+    peak = mins + np.array(peak_idx) * coarse_res + coarse_res / 2
 
-    # Discard components touching the grid boundary
-    boundary_labels: set[int] = set()
+    # Crop to local region around density peak
+    crop_radius = 15_000
+    dists = np.linalg.norm(org_c - peak, axis=1)
+    local = org_c[dists < crop_radius]
+
+    if len(local) < 50:
+        if verbose:
+            print(f"{_p} too few local organelles ({len(local)})")
+        return None
+
+    if verbose:
+        print(
+            f"{_p} density peak: ({peak[0]:.0f}, {peak[1]:.0f}, "
+            f"{peak[2]:.0f}), {len(local):,} local organelles"
+        )
+
+    # ── Stage 2: local void via distance transform ─────────────────
+    #    Try (vox_res, dilation) pairs from fine to coarse.  Pick the
+    #    first that produces a void with DT > 1 voxel (a real enclosed
+    #    region, not a single-voxel gap).
+    configs = [(300, 4), (400, 3), (500, 2)]
+    for vox_res, dil in configs:
+        vm = local.min(axis=0) - vox_res * 3
+        vb = ((local - vm) / vox_res).astype(int)
+        vs = vb.max(axis=0) + 4
+        occ = np.zeros(vs, dtype=bool)
+        occ[vb[:, 0], vb[:, 1], vb[:, 2]] = True
+
+        dilated = binary_dilation(occ, iterations=dil)
+        dist = distance_transform_edt(~dilated)
+
+        # Zero out boundary-touching components
+        labeled, n_comps = label(~dilated)
+        boundary_labels: set[int] = set()
+        for face_slice in [
+            labeled[0, :, :],
+            labeled[-1, :, :],
+            labeled[:, 0, :],
+            labeled[:, -1, :],
+            labeled[:, :, 0],
+            labeled[:, :, -1],
+        ]:
+            boundary_labels.update(face_slice[face_slice > 0].tolist())
+        for bl in boundary_labels:
+            dist[labeled == bl] = 0
+
+        max_val = float(dist.max())
+        if max_val > 1.5:
+            mi = np.unravel_index(np.argmax(dist), dist.shape)
+            center = vm + np.array(mi) * vox_res + vox_res / 2
+            if verbose:
+                print(
+                    f"{_p} void (vr={vox_res}, dil={dil}): "
+                    f"DT={max_val:.1f} vox ({max_val * vox_res:.0f} units), "
+                    f"centre=({center[0]:.0f}, {center[1]:.0f}, "
+                    f"{center[2]:.0f})"
+                )
+            return center
+
+    # Fallback: all configs gave DT ≤ 1.5 — use the best single-voxel
+    # void from the finest config
+    vox_res, dil = configs[0]
+    vm = local.min(axis=0) - vox_res * 3
+    vb = ((local - vm) / vox_res).astype(int)
+    vs = vb.max(axis=0) + 4
+    occ = np.zeros(vs, dtype=bool)
+    occ[vb[:, 0], vb[:, 1], vb[:, 2]] = True
+    dilated = binary_dilation(occ, iterations=dil)
+    dist = distance_transform_edt(~dilated)
+    labeled, n_comps = label(~dilated)
+    boundary_labels = set()
     for face_slice in [
         labeled[0, :, :],
         labeled[-1, :, :],
@@ -6572,32 +6650,25 @@ def _find_void_center(
         labeled[:, :, -1],
     ]:
         boundary_labels.update(face_slice[face_slice > 0].tolist())
+    for bl in boundary_labels:
+        dist[labeled == bl] = 0
 
-    # Find the largest interior void
-    best_size, best_label = 0, -1
-    for i in range(1, n_comps + 1):
-        if i in boundary_labels:
-            continue
-        size = int((labeled == i).sum())
-        if size > best_size:
-            best_size = size
-            best_label = i
-
-    if best_label < 0:
-        return None
-
-    coords = np.argwhere(labeled == best_label)
-    center = vox_mins + coords.mean(axis=0) * vox_res + vox_res / 2
+    max_val = float(dist.max())
+    if max_val > 0:
+        mi = np.unravel_index(np.argmax(dist), dist.shape)
+        center = vm + np.array(mi) * vox_res + vox_res / 2
+        if verbose:
+            print(
+                f"{_p} void fallback (vr={vox_res}, dil={dil}): "
+                f"DT={max_val:.1f} vox, "
+                f"centre=({center[0]:.0f}, {center[1]:.0f}, "
+                f"{center[2]:.0f})"
+            )
+        return center
 
     if verbose:
-        span = (coords.max(axis=0) - coords.min(axis=0)) * vox_res
-        print(
-            f"[_find_void_center] void: {best_size} voxels, "
-            f"centre=({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f}), "
-            f"span=({span[0]:.0f}, {span[1]:.0f}, {span[2]:.0f})"
-        )
-
-    return center
+        print(f"{_p} no void found")
+    return None
 
 
 def _section_contours(
