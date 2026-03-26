@@ -6464,6 +6464,9 @@ def find_nucleus_center(
     if cur:
         runs.append(cur)
 
+    # Drop single-level "chains" — a real nucleus spans multiple Z-levels
+    runs = [r for r in runs if len(r) >= 2]
+
     if not runs:
         if verbose:
             print(f"{_p} no sustained void found")
