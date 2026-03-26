@@ -1284,9 +1284,8 @@ def z_section(
     -------
     fig, ax : Figure, Axes
     """
+    from scipy.ndimage import binary_dilation, label
     from scipy.spatial import ConvexHull
-    from shapely import concave_hull
-    from shapely.geometry import MultiPoint
 
     verts = np.asarray(mesh.vertices)
     faces = np.asarray(mesh.faces)
@@ -1317,14 +1316,38 @@ def z_section(
             ax.scatter(oc[:, 0], oc[:, 1], c="red", s=2, alpha=0.4,
                        zorder=2, rasterized=True, label="organelles")
 
-    # Outer contour (convex hull — never dives into pockets)
+    # Outer contour — convex hull of the LARGEST cluster only
+    # (same clustering as find_nucleus_center: rasterize + dilate + CC)
     if len(pts_xy) >= 4:
         try:
-            hull = ConvexHull(pts_xy)
-            hv = pts_xy[hull.vertices]
-            hv_closed = np.vstack([hv, hv[0:1]])
-            ax.plot(hv_closed[:, 0], hv_closed[:, 1], color="green",
-                    linewidth=2.5, zorder=5, label="outer contour")
+            grid_res = 200.0
+            xy_min = pts_xy.min(axis=0) - grid_res * 3
+            nx = int((pts_xy[:, 0].max() - xy_min[0] + grid_res * 6)
+                     / grid_res) + 1
+            ny = int((pts_xy[:, 1].max() - xy_min[1] + grid_res * 6)
+                     / grid_res) + 1
+            occ = np.zeros((nx, ny), dtype=bool)
+            ix = ((pts_xy[:, 0] - xy_min[0]) / grid_res).astype(int).clip(
+                0, nx - 1)
+            iy = ((pts_xy[:, 1] - xy_min[1]) / grid_res).astype(int).clip(
+                0, ny - 1)
+            occ[ix, iy] = True
+
+            dilated = binary_dilation(occ, np.ones((3, 3), dtype=bool))
+            labeled, n_labels = label(dilated)
+            if n_labels > 0:
+                sizes = np.bincount(labeled.ravel())[1:]
+                lid = int(np.argmax(sizes)) + 1
+                # Map each vertex to its grid cell label
+                vert_labels = labeled[ix, iy]
+                soma_mask = vert_labels == lid
+                soma_pts = pts_xy[soma_mask]
+                if len(soma_pts) >= 4:
+                    hull = ConvexHull(soma_pts)
+                    hv = soma_pts[hull.vertices]
+                    hv_closed = np.vstack([hv, hv[0:1]])
+                    ax.plot(hv_closed[:, 0], hv_closed[:, 1], color="green",
+                            linewidth=2.5, zorder=5, label="outer contour")
         except Exception:
             pass
 
@@ -1357,6 +1380,19 @@ def z_section(
                 ax.plot(inner_closed[:, 0], inner_closed[:, 1],
                         color="goldenrod", linewidth=2.5, zorder=5,
                         label="nucleus void")
+
+    # Auto-zoom to soma cluster (convex hull bounds + padding)
+    if nucleus is not None:
+        slices = nucleus["slices"]
+        dz = np.abs(slices[:, 0] - z)
+        nearest = int(np.argmin(dz))
+        z_step = np.median(np.diff(slices[:, 0])) if len(slices) > 1 else 500
+        if dz[nearest] <= z_step * 0.6:
+            vc = slices[nearest, 1:3]
+            # Zoom to 3× peak_r around void center
+            pad = nucleus["peak_r"] * 4
+            ax.set_xlim(vc[0] - pad, vc[0] + pad)
+            ax.set_ylim(vc[1] - pad, vc[1] + pad)
 
     ax.set_aspect("equal")
     ax.set_title(f"Z = {z:.0f}  ({pts_xy.shape[0]} vertices)")

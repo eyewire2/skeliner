@@ -6440,7 +6440,7 @@ def find_nucleus_center(
     cur: list[int] = []
 
     for i, entry in enumerate(raw):
-        z, cx, cy, r, _ = entry
+        z, cx, cy, r = entry[0], entry[1], entry[2], entry[3]
         if r < min_void_r or np.isnan(cx):
             if cur:
                 runs.append(cur)
