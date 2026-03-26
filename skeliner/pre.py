@@ -6348,8 +6348,7 @@ def find_nucleus_center(
 
     verts = np.asarray(mesh.vertices, dtype=np.float64)
     z_unique = np.unique(verts[:, 2])
-    z_span = z_unique.max() - z_unique.min()
-    z_step = max(300.0, z_span / 120)
+    z_step = 210.0  # ~10× the 21 nm section spacing
     z_levels = np.arange(z_unique.min() + z_step, z_unique.max() - z_step,
                          z_step)
 
