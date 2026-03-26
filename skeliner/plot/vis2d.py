@@ -13,7 +13,8 @@ from scipy.stats import binned_statistic_2d
 
 from ..dataclass import Skeleton
 
-__all__ = ["projection", "threeviews", "details", "node_details"]
+__all__ = ["projection", "threeviews", "details", "node_details",
+           "z_section", "z_section_grid"]
 
 
 Number = int | float
@@ -1237,3 +1238,179 @@ def node_details(
         **kwargs,
     )
     return fig, ax
+
+
+# =====================================================================
+#  Mesh cross-section visualization
+# =====================================================================
+
+
+def z_section(
+    mesh: trimesh.Trimesh,
+    z: float,
+    *,
+    z_tol: float = 150.0,
+    organelles: np.ndarray | None = None,
+    nucleus_center: np.ndarray | None = None,
+    nucleus_radius: float | None = None,
+    ax: Axes | None = None,
+    figsize: tuple[float, float] = (10, 10),
+) -> tuple[Figure, Axes]:
+    """Plot a Z cross-section of the mesh vertex cloud.
+
+    Shows all mesh vertices near *z* as a 2D scatter, with a
+    concave-hull outer contour, optional organelle overlay, and
+    optional nucleus marker.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh.
+    z : float
+        Z-level to slice at.
+    z_tol : float
+        Half-width of the Z slab for collecting vertices.
+    organelles : np.ndarray or None
+        ``(nFaces,)`` boolean mask of organelle faces.  If provided,
+        organelle face centroids are drawn in red.
+    nucleus_center : np.ndarray or None
+        ``(3,)`` nucleus centre.  If provided, drawn as a gold marker.
+    nucleus_radius : float or None
+        Approximate nucleus void radius (nm).  If provided together
+        with *nucleus_center*, drawn as a gold circle.
+    ax : Axes or None
+        Matplotlib axes to draw on.  Created if None.
+    figsize : tuple
+        Figure size when *ax* is None.
+
+    Returns
+    -------
+    fig, ax : Figure, Axes
+    """
+    from shapely import concave_hull
+    from shapely.geometry import MultiPoint
+
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+
+    near_z = np.abs(verts[:, 2] - z) < z_tol
+    pts_xy = verts[near_z, :2]
+
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        fig = ax.figure
+
+    if len(pts_xy) < 3:
+        ax.set_title(f"Z={z:.0f}: too few vertices")
+        return fig, ax
+
+    # All vertices — light gray
+    ax.scatter(pts_xy[:, 0], pts_xy[:, 1], c="#cccccc", s=0.5,
+               alpha=0.3, zorder=1, rasterized=True)
+
+    # Organelle overlay
+    if organelles is not None:
+        centroids = verts[faces].mean(axis=1)
+        face_near = np.abs(centroids[:, 2] - z) < z_tol
+        org_near = face_near & organelles
+        if org_near.sum() > 0:
+            oc = centroids[org_near]
+            ax.scatter(oc[:, 0], oc[:, 1], c="red", s=2, alpha=0.4,
+                       zorder=2, rasterized=True, label="organelles")
+
+    # Outer contour (concave hull)
+    if len(pts_xy) >= 10:
+        try:
+            mp = MultiPoint(pts_xy)
+            shape = concave_hull(mp, ratio=0.1)
+            if hasattr(shape, "exterior"):
+                coords = np.array(shape.exterior.coords)
+                ax.plot(coords[:, 0], coords[:, 1], color="green",
+                        linewidth=2.5, zorder=5, label="outer contour")
+        except Exception:
+            pass
+
+    # Nucleus marker
+    if nucleus_center is not None:
+        nc = np.asarray(nucleus_center)
+        ax.plot(nc[0], nc[1], "x", color="goldenrod", markersize=14,
+                markeredgewidth=3, zorder=6)
+        if nucleus_radius is not None:
+            circle = plt.Circle(
+                (nc[0], nc[1]), nucleus_radius, fill=False,
+                color="goldenrod", linewidth=2.5, zorder=5,
+                label=f"nucleus r={nucleus_radius:.0f}",
+            )
+            ax.add_patch(circle)
+
+    ax.set_aspect("equal")
+    ax.set_title(f"Z = {z:.0f}  ({pts_xy.shape[0]} vertices)")
+    ax.grid(True, alpha=0.2)
+    ax.legend(fontsize=8, loc="upper right")
+    return fig, ax
+
+
+def z_section_grid(
+    mesh: trimesh.Trimesh,
+    z_center: float,
+    *,
+    n_levels: int = 9,
+    z_span: float | None = None,
+    z_tol: float = 150.0,
+    organelles: np.ndarray | None = None,
+    nucleus_center: np.ndarray | None = None,
+    nucleus_radius: float | None = None,
+    figsize: tuple[float, float] = (21, 21),
+) -> tuple[Figure, np.ndarray]:
+    """Plot a grid of Z cross-sections centred on *z_center*.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh.
+    z_center : float
+        Centre Z-level (e.g. nucleus centre Z).
+    n_levels : int
+        Number of Z-levels to plot.  Rounded up to a square grid.
+    z_span : float or None
+        Total Z span to cover.  If None, uses 20 %% of the mesh Z range.
+    z_tol : float
+        Half-width of the Z slab at each level.
+    organelles, nucleus_center, nucleus_radius
+        Forwarded to :func:`z_section`.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    fig, axes : Figure, ndarray of Axes
+    """
+    verts = np.asarray(mesh.vertices)
+    z_range = verts[:, 2].max() - verts[:, 2].min()
+    if z_span is None:
+        z_span = z_range * 0.2
+
+    ncols = int(np.ceil(np.sqrt(n_levels)))
+    nrows = int(np.ceil(n_levels / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+    axes_flat = np.asarray(axes).ravel()
+
+    z_levels = np.linspace(z_center - z_span / 2,
+                           z_center + z_span / 2, n_levels)
+
+    for i, z_val in enumerate(z_levels):
+        z_section(
+            mesh, z_val,
+            z_tol=z_tol,
+            organelles=organelles,
+            nucleus_center=nucleus_center,
+            nucleus_radius=nucleus_radius,
+            ax=axes_flat[i],
+        )
+
+    for j in range(n_levels, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+
+    fig.tight_layout()
+    return fig, axes
