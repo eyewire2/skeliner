@@ -6623,31 +6623,140 @@ def find_soma_from_nucleus(
         print(f"{_p} nucleus: ({nc[0]:.0f}, {nc[1]:.0f}, {nc[2]:.0f}), "
               f"r={peak_r:.0f}nm, {n_chain} Z-levels")
 
-    # Collect soma vertices: at each Z-level, if the soma cluster
-    # contains the nucleus XY, all cluster vertices are soma.
+    # Build per-Z convex hull polygons, restricted to Z-levels within
+    # the nucleus chain range (the soma exists where the nucleus does).
     nc_point = Point(nc[0], nc[1])
-    soma_vert_set: set[int] = set()
-    n_z_hit = 0
+    hull_polys: list[tuple[float, Polygon]] = []  # (z, polygon)
+    # Extend the nucleus Z-range adaptively in each direction:
+    # keep going while the soma cluster contains the nucleus XY
+    # and its area stays above 25% of the peak area in the chain.
+    chain_areas = []
+    for i in best:
+        z, cx, cy, r, void_xy, vi, sm = raw[i]
+        if sm is not None:
+            chain_areas.append(sm.sum())
+    peak_area = max(chain_areas) if chain_areas else 0
+    area_thresh = peak_area * 0.25
+
+    nuc_z_lo = raw[best[0]][0]
+    nuc_z_hi = raw[best[-1]][0]
+
+    # Extend downward
+    for i in range(best[0] - 1, -1, -1):
+        z, cx, cy, r, void_xy, vi, sm = raw[i]
+        if sm is None:
+            break
+        soma_pts = verts[vi[sm], :2]
+        if len(soma_pts) < 4 or sm.sum() < area_thresh:
+            break
+        try:
+            h = ConvexHull(soma_pts)
+            p = Polygon(soma_pts[h.vertices])
+            if not p.contains(nc_point):
+                break
+        except Exception:
+            break
+        nuc_z_lo = z
+
+    # Extend upward
+    for i in range(best[-1] + 1, len(raw)):
+        z, cx, cy, r, void_xy, vi, sm = raw[i]
+        if sm is None:
+            break
+        soma_pts = verts[vi[sm], :2]
+        if len(soma_pts) < 4 or sm.sum() < area_thresh:
+            break
+        try:
+            h = ConvexHull(soma_pts)
+            p = Polygon(soma_pts[h.vertices])
+            if not p.contains(nc_point):
+                break
+        except Exception:
+            break
+        nuc_z_hi = z
+
+    from scipy.ndimage import binary_erosion, binary_dilation
+
+    # Disk structuring element for morphological opening.
+    _r = 2
+    yy, xx = np.ogrid[-_r:_r + 1, -_r:_r + 1]
+    disk = (xx ** 2 + yy ** 2) <= _r ** 2
+    struct3 = np.ones((3, 3), dtype=bool)
 
     for entry in raw:
         z, cx, cy, r, void_xy, vi, soma_mask = entry
+        if z < nuc_z_lo or z > nuc_z_hi:
+            continue
         if soma_mask is None:
             continue
 
-        soma_pts = verts[vi[soma_mask], :2]
-        if len(soma_pts) < 4:
+        # Reconstruct the soma cluster grid
+        pts = verts[vi, :2]
+        cluster = _z_slice_cluster(pts, grid_res)
+        if cluster is None:
             continue
+        occ, soma_region, ix, iy, xy_min = cluster
+        occ_s = occ & soma_region
+
+        # Close (fill vertex gaps) then open (remove thin spikes)
+        closed = binary_dilation(occ_s, struct3)
+        closed = binary_erosion(closed, struct3)
+        opened = binary_dilation(binary_erosion(closed, disk), disk)
+
+        # Convex hull of the opened (spike-free) region
+        opened_ij = np.argwhere(opened)
+        if len(opened_ij) < 4:
+            continue
+        opened_xy = np.column_stack([
+            xy_min[0] + opened_ij[:, 0] * grid_res + grid_res / 2,
+            xy_min[1] + opened_ij[:, 1] * grid_res + grid_res / 2,
+        ])
 
         try:
-            hull = ConvexHull(soma_pts)
-            hull_poly = Polygon(soma_pts[hull.vertices])
-            if not hull_poly.contains(nc_point):
-                continue
+            hull = ConvexHull(opened_xy)
+            hull_poly = Polygon(opened_xy[hull.vertices])
+            if not hull_poly.is_valid:
+                hull_poly = hull_poly.buffer(0)
+            if hull_poly.is_valid and hull_poly.contains(nc_point):
+                from shapely import prepare
+                prepare(hull_poly)
+                hull_polys.append((z, hull_poly))
         except Exception:
             continue
 
-        soma_vert_set.update(vi[soma_mask].tolist())
-        n_z_hit += 1
+    if not hull_polys:
+        if verbose:
+            print(f"{_p} no soma contours found")
+        return None
+
+    hull_z = np.array([h[0] for h in hull_polys])
+    z_lo, z_hi = hull_z.min(), hull_z.max()
+
+    # Classify every mesh vertex: Z within range → check XY against
+    # nearest Z-level's convex hull polygon.
+    z_in_range = (verts[:, 2] >= z_lo) & (verts[:, 2] <= z_hi)
+    candidates = np.where(z_in_range)[0]
+
+    soma_mask_all = np.zeros(len(candidates), dtype=bool)
+    # For each candidate vertex, find the nearest hull Z
+    cand_z = verts[candidates, 2]
+    nearest_idx = np.searchsorted(hull_z, cand_z).clip(0, len(hull_z) - 1)
+    # Also check the index before (searchsorted gives insertion point)
+    for offset in [0, -1]:
+        idx = (nearest_idx + offset).clip(0, len(hull_z) - 1)
+        # Group by hull index for batch point-in-polygon
+        for hi in range(len(hull_polys)):
+            mask = idx == hi
+            if not mask.any():
+                continue
+            ci = candidates[mask]
+            pts_xy = verts[ci, :2]
+            inside = np.array([hull_polys[hi][1].contains(Point(p))
+                               for p in pts_xy])
+            soma_mask_all[mask] |= inside
+
+    soma_vert_set = set(candidates[soma_mask_all].tolist())
+    n_z_hit = len(hull_polys)
 
     if len(soma_vert_set) < 4:
         if verbose:
