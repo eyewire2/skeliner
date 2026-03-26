@@ -6389,7 +6389,7 @@ def find_nucleus_center(
         lid = int(np.argmax(sizes)) + 1
         soma_region = labeled == lid
 
-        # 4-ray enclosure on the original grid within the cluster
+        # 4-ray enclosure within the soma cluster.
         occ_s = occ & soma_region
         enc = np.ones_like(occ_s)
         for ax in range(2):
@@ -6398,6 +6398,12 @@ def find_nucleus_center(
                 np.maximum.accumulate(np.flip(occ_s, axis=ax), axis=ax),
                 axis=ax,
             )
+        # Confine void to inside the soma cluster (filled).
+        # soma_region has a hole at the nucleus void — fill it so the
+        # void can exist there, but can't leak through the pocket mouth.
+        from scipy.ndimage import binary_fill_holes
+        soma_filled = binary_fill_holes(soma_region)
+        enc &= soma_filled
 
         void = enc & ~occ_s
         if not void.any():

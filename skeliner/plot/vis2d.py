@@ -1351,20 +1351,25 @@ def z_section(
         except Exception:
             pass
 
-    # Nucleus void — inner boundary of point cloud from void center
+    # Nucleus void — inner boundary of soma cluster from void center,
+    # clipped to the soma convex hull so it can't escape through the
+    # open pocket mouth.
     if nucleus is not None and len(pts_xy) >= 10:
-        slices = nucleus["slices"]  # (N, 4): z, cx, cy, void_r
+        from shapely.geometry import Polygon, LineString
+
+        slices = nucleus["slices"]
         dz = np.abs(slices[:, 0] - z)
         nearest = int(np.argmin(dz))
         z_step = np.median(np.diff(slices[:, 0])) if len(slices) > 1 else 500
         if dz[nearest] <= z_step * 0.6:
-            vc = slices[nearest, 1:3]  # void center XY at this Z
-            # Sweep angles from void center, find nearest vertex per bin
-            dx = pts_xy[:, 0] - vc[0]
-            dy = pts_xy[:, 1] - vc[1]
+            vc = slices[nearest, 1:3]
+            # Use soma cluster vertices only (soma_pts from above)
+            sweep_pts = soma_pts if "soma_pts" in dir() else pts_xy
+            dx = sweep_pts[:, 0] - vc[0]
+            dy = sweep_pts[:, 1] - vc[1]
             angles = np.arctan2(dy, dx)
             dists = np.sqrt(dx ** 2 + dy ** 2)
-            n_bins = 72  # 5-degree bins
+            n_bins = 72
             bin_edges = np.linspace(-np.pi, np.pi, n_bins + 1)
             inner_pts = []
             for b in range(n_bins):
@@ -1372,14 +1377,35 @@ def z_section(
                 if mask.any():
                     idx = np.where(mask)[0]
                     closest = idx[np.argmin(dists[idx])]
-                    inner_pts.append(pts_xy[closest])
+                    inner_pts.append(sweep_pts[closest])
             if len(inner_pts) >= 3:
                 inner_pts = np.array(inner_pts)
-                # Close the contour
                 inner_closed = np.vstack([inner_pts, inner_pts[0:1]])
-                ax.plot(inner_closed[:, 0], inner_closed[:, 1],
-                        color="goldenrod", linewidth=2.5, zorder=5,
-                        label="nucleus void")
+                # Clip to soma convex hull
+                try:
+                    inner_poly = Polygon(inner_closed[:, :2])
+                    if not inner_poly.is_valid:
+                        inner_poly = inner_poly.buffer(0)
+                    hull_poly = Polygon(hv) if "hv" in dir() else None
+                    if hull_poly is not None and hull_poly.is_valid:
+                        clipped = inner_poly.intersection(hull_poly)
+                        if hasattr(clipped, "exterior"):
+                            cc = np.array(clipped.exterior.coords)
+                            ax.plot(cc[:, 0], cc[:, 1],
+                                    color="goldenrod", linewidth=2.5,
+                                    zorder=5, label="nucleus void")
+                        else:
+                            ax.plot(inner_closed[:, 0], inner_closed[:, 1],
+                                    color="goldenrod", linewidth=2.5,
+                                    zorder=5, label="nucleus void")
+                    else:
+                        ax.plot(inner_closed[:, 0], inner_closed[:, 1],
+                                color="goldenrod", linewidth=2.5,
+                                zorder=5, label="nucleus void")
+                except Exception:
+                    ax.plot(inner_closed[:, 0], inner_closed[:, 1],
+                            color="goldenrod", linewidth=2.5,
+                            zorder=5, label="nucleus void")
 
     # Auto-zoom to soma cluster (convex hull bounds + padding)
     if nucleus is not None:
