@@ -1328,27 +1328,35 @@ def z_section(
         except Exception:
             pass
 
-    # Nucleus void — per-Z contour from find_nucleus_center
-    if nucleus is not None:
-        contours = nucleus.get("contours", {})
+    # Nucleus void — inner boundary of point cloud from void center
+    if nucleus is not None and len(pts_xy) >= 10:
         slices = nucleus["slices"]  # (N, 4): z, cx, cy, void_r
         dz = np.abs(slices[:, 0] - z)
         nearest = int(np.argmin(dz))
         z_step = np.median(np.diff(slices[:, 0])) if len(slices) > 1 else 500
         if dz[nearest] <= z_step * 0.6:
-            nearest_z = slices[nearest, 0]
-            void_xy = contours.get(nearest_z)
-            if void_xy is not None and len(void_xy) >= 4:
-                try:
-                    # Convex hull of the void region
-                    vh = ConvexHull(void_xy)
-                    vhv = void_xy[vh.vertices]
-                    vhv_closed = np.vstack([vhv, vhv[0:1]])
-                    ax.plot(vhv_closed[:, 0], vhv_closed[:, 1],
-                            color="goldenrod", linewidth=2.5, zorder=5,
-                            label="nucleus void")
-                except Exception:
-                    pass
+            vc = slices[nearest, 1:3]  # void center XY at this Z
+            # Sweep angles from void center, find nearest vertex per bin
+            dx = pts_xy[:, 0] - vc[0]
+            dy = pts_xy[:, 1] - vc[1]
+            angles = np.arctan2(dy, dx)
+            dists = np.sqrt(dx ** 2 + dy ** 2)
+            n_bins = 72  # 5-degree bins
+            bin_edges = np.linspace(-np.pi, np.pi, n_bins + 1)
+            inner_pts = []
+            for b in range(n_bins):
+                mask = (angles >= bin_edges[b]) & (angles < bin_edges[b + 1])
+                if mask.any():
+                    idx = np.where(mask)[0]
+                    closest = idx[np.argmin(dists[idx])]
+                    inner_pts.append(pts_xy[closest])
+            if len(inner_pts) >= 3:
+                inner_pts = np.array(inner_pts)
+                # Close the contour
+                inner_closed = np.vstack([inner_pts, inner_pts[0:1]])
+                ax.plot(inner_closed[:, 0], inner_closed[:, 1],
+                        color="goldenrod", linewidth=2.5, zorder=5,
+                        label="nucleus void")
 
     ax.set_aspect("equal")
     ax.set_title(f"Z = {z:.0f}  ({pts_xy.shape[0]} vertices)")
