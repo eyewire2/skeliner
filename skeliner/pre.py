@@ -6327,9 +6327,16 @@ def find_nucleus_center(
 
     Returns
     -------
-    np.ndarray or None
-        ``(3,)`` nucleus centre in world coordinates, or None if no
-        sustained void is found.
+    dict or None
+        ``None`` if no sustained void is found.  Otherwise a dict with:
+
+        - ``center`` — ``(3,)`` nucleus centre in world coordinates.
+        - ``z_range`` — ``(z_lo, z_hi)`` Z extent of the detected void.
+        - ``peak_r`` — peak void radius (nm) across the chain.
+        - ``slices`` — ``(N, 4)`` array where each row is
+          ``(z, cx, cy, void_r)`` for the N Z-levels in the best chain.
+          *cx, cy* are the void centre at each level and *void_r* is
+          the void radius at that level.
     """
     from scipy.ndimage import (
         binary_dilation,
@@ -6434,15 +6441,15 @@ def find_nucleus_center(
         return None
 
     best = max(runs, key=len)
-    best_data = [raw[i] for i in best]
+    slices = np.array([raw[i] for i in best])  # (N, 4): z, cx, cy, r
 
     center = np.array([
-        np.nanmean([d[1] for d in best_data]),
-        np.nanmean([d[2] for d in best_data]),
-        np.mean([d[0] for d in best_data]),
+        np.nanmean(slices[:, 1]),
+        np.nanmean(slices[:, 2]),
+        np.mean(slices[:, 0]),
     ])
-    peak_r = max(d[3] for d in best_data)
-    z_lo, z_hi = best_data[0][0], best_data[-1][0]
+    peak_r = float(slices[:, 3].max())
+    z_lo, z_hi = float(slices[0, 0]), float(slices[-1, 0])
 
     if verbose:
         print(
@@ -6452,7 +6459,12 @@ def find_nucleus_center(
             f"{len(runs)} total runs"
         )
 
-    return center
+    return {
+        "center": center,
+        "z_range": (z_lo, z_hi),
+        "peak_r": peak_r,
+        "slices": slices,
+    }
 
 
 #  find_soma_void — soma detection via organelle-void cross-sections

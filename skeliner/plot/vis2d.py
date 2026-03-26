@@ -1251,8 +1251,7 @@ def z_section(
     *,
     z_tol: float = 150.0,
     organelles: np.ndarray | None = None,
-    nucleus_center: np.ndarray | None = None,
-    nucleus_radius: float | None = None,
+    nucleus: dict | None = None,
     ax: Axes | None = None,
     figsize: tuple[float, float] = (10, 10),
 ) -> tuple[Figure, Axes]:
@@ -1260,7 +1259,7 @@ def z_section(
 
     Shows all mesh vertices near *z* as a 2D scatter, with a
     concave-hull outer contour, optional organelle overlay, and
-    optional nucleus marker.
+    optional nucleus void circle from :func:`find_nucleus_center`.
 
     Parameters
     ----------
@@ -1273,11 +1272,9 @@ def z_section(
     organelles : np.ndarray or None
         ``(nFaces,)`` boolean mask of organelle faces.  If provided,
         organelle face centroids are drawn in red.
-    nucleus_center : np.ndarray or None
-        ``(3,)`` nucleus centre.  If provided, drawn as a gold marker.
-    nucleus_radius : float or None
-        Approximate nucleus void radius (nm).  If provided together
-        with *nucleus_center*, drawn as a gold circle.
+    nucleus : dict or None
+        Result dict from :func:`find_nucleus_center`.  If provided,
+        the per-Z void circle is drawn at the nearest matching slice.
     ax : Axes or None
         Matplotlib axes to draw on.  Created if None.
     figsize : tuple
@@ -1331,16 +1328,22 @@ def z_section(
         except Exception:
             pass
 
-    # Nucleus marker
-    if nucleus_center is not None:
-        nc = np.asarray(nucleus_center)
-        ax.plot(nc[0], nc[1], "x", color="goldenrod", markersize=14,
-                markeredgewidth=3, zorder=6)
-        if nucleus_radius is not None:
+    # Nucleus void — per-Z circle from slices data
+    if nucleus is not None:
+        slices = nucleus["slices"]  # (N, 4): z, cx, cy, void_r
+        # Find the slice closest to this Z
+        dz = np.abs(slices[:, 0] - z)
+        nearest = int(np.argmin(dz))
+        z_step = np.median(np.diff(slices[:, 0])) if len(slices) > 1 else 500
+        if dz[nearest] <= z_step * 0.6:
+            # Within range — draw the per-Z void circle
+            s_cx, s_cy, s_r = slices[nearest, 1], slices[nearest, 2], slices[nearest, 3]
+            ax.plot(s_cx, s_cy, "x", color="goldenrod", markersize=14,
+                    markeredgewidth=3, zorder=6)
             circle = plt.Circle(
-                (nc[0], nc[1]), nucleus_radius, fill=False,
+                (s_cx, s_cy), s_r, fill=False,
                 color="goldenrod", linewidth=2.5, zorder=5,
-                label=f"nucleus r={nucleus_radius:.0f}",
+                label=f"void r={s_r:.0f}",
             )
             ax.add_patch(circle)
 
@@ -1353,31 +1356,33 @@ def z_section(
 
 def z_section_grid(
     mesh: trimesh.Trimesh,
-    z_center: float,
+    nucleus: dict,
     *,
     n_levels: int = 9,
     z_span: float | None = None,
     z_tol: float = 150.0,
     organelles: np.ndarray | None = None,
-    nucleus_center: np.ndarray | None = None,
-    nucleus_radius: float | None = None,
     figsize: tuple[float, float] = (21, 21),
 ) -> tuple[Figure, np.ndarray]:
-    """Plot a grid of Z cross-sections centred on *z_center*.
+    """Plot a grid of Z cross-sections spanning the nucleus Z-range.
+
+    The Z-levels are centred on the nucleus centre and span
+    *z_span* (default: 1.5 × the detected nucleus Z-range).
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Input neuron mesh.
-    z_center : float
-        Centre Z-level (e.g. nucleus centre Z).
+    nucleus : dict
+        Result dict from :func:`find_nucleus_center`.
     n_levels : int
         Number of Z-levels to plot.  Rounded up to a square grid.
     z_span : float or None
-        Total Z span to cover.  If None, uses 20 %% of the mesh Z range.
+        Total Z span to cover.  If None, uses 1.5 × the nucleus
+        Z-range so the void appears and disappears within the grid.
     z_tol : float
         Half-width of the Z slab at each level.
-    organelles, nucleus_center, nucleus_radius
+    organelles : np.ndarray or None
         Forwarded to :func:`z_section`.
     figsize : tuple
         Figure size.
@@ -1386,10 +1391,11 @@ def z_section_grid(
     -------
     fig, axes : Figure, ndarray of Axes
     """
-    verts = np.asarray(mesh.vertices)
-    z_range = verts[:, 2].max() - verts[:, 2].min()
+    z_center = nucleus["center"][2]
     if z_span is None:
-        z_span = z_range * 0.2
+        z_lo, z_hi = nucleus["z_range"]
+        z_span = (z_hi - z_lo) * 1.5
+        z_span = max(z_span, 5000.0)  # at least 5 µm
 
     ncols = int(np.ceil(np.sqrt(n_levels)))
     nrows = int(np.ceil(n_levels / ncols))
@@ -1404,8 +1410,7 @@ def z_section_grid(
             mesh, z_val,
             z_tol=z_tol,
             organelles=organelles,
-            nucleus_center=nucleus_center,
-            nucleus_radius=nucleus_radius,
+            nucleus=nucleus,
             ax=axes_flat[i],
         )
 
