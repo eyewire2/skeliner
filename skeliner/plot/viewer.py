@@ -1054,18 +1054,27 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             from skeliner.pre import find_soma_alt as _find
             label_prefix = "soma (alt)"
             color = [0.3, 0.9, 0.7]
+        elif method == "nucleus":
+            from skeliner.pre import find_soma_from_nucleus as _find
+            label_prefix = "soma (nucleus)"
+            color = [0.85, 0.65, 0.13]
         else:
             from skeliner.pre import find_soma as _find
             label_prefix = "soma"
             color = [0.9, 0.5, 0.9]
 
         mesh = mesh_state["mesh"]
-        soma = await _run_with_log(
-            _find, mesh,
-            organelles=mesh_state.get("organelles"),
-            mesh_stats=mesh_state.get("mesh_stats"),
-            verbose=True,
-        )
+        if method == "nucleus":
+            soma = await _run_with_log(
+                _find, mesh, verbose=True,
+            )
+        else:
+            soma = await _run_with_log(
+                _find, mesh,
+                organelles=mesh_state.get("organelles"),
+                mesh_stats=mesh_state.get("mesh_stats"),
+                verbose=True,
+            )
         if soma is None:
             return JSONResponse({"ok": False, "error": "No soma found"})
 

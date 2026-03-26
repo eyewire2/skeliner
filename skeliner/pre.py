@@ -19,6 +19,7 @@ __all__ = [
     "find_nucleus_center",
     "find_offsets",
     "find_soma",
+    "find_soma_from_nucleus",
     "find_soma_void",
     "preprocess",
     "PreprocessResult",
@@ -6268,6 +6269,110 @@ def preprocess(
 
 
 # =====================================================================
+#  Z-slice helpers (shared by find_nucleus_center & find_soma_from_nucleus)
+# =====================================================================
+
+
+def _z_slice_cluster(
+    verts_xy: np.ndarray,
+    grid_res: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int] | None:
+    """Rasterize 2D points, find the largest connected cluster.
+
+    Returns ``(occ, soma_region, ix, iy, xy_min)`` or None if too few
+    points.  *occ* is the raw occupancy grid, *soma_region* is the
+    dilated largest-component mask, *ix/iy* are per-vertex grid indices,
+    *xy_min* is the grid origin.
+    """
+    from scipy.ndimage import binary_dilation, label
+
+    pts = verts_xy
+    if len(pts) < 10:
+        return None
+
+    xy_min = pts.min(axis=0) - grid_res * 3
+    nx = int((pts[:, 0].max() - xy_min[0] + grid_res * 6) / grid_res) + 1
+    ny = int((pts[:, 1].max() - xy_min[1] + grid_res * 6) / grid_res) + 1
+
+    occ = np.zeros((nx, ny), dtype=bool)
+    ix = ((pts[:, 0] - xy_min[0]) / grid_res).astype(int).clip(0, nx - 1)
+    iy = ((pts[:, 1] - xy_min[1]) / grid_res).astype(int).clip(0, ny - 1)
+    occ[ix, iy] = True
+
+    struct3 = np.ones((3, 3), dtype=bool)
+    dilated = binary_dilation(occ, struct3)
+    labeled, n_labels = label(dilated)
+    if n_labels == 0:
+        return None
+
+    sizes = np.bincount(labeled.ravel())[1:]
+    lid = int(np.argmax(sizes)) + 1
+    soma_region = labeled == lid
+
+    return occ, soma_region, ix, iy, xy_min
+
+
+def _z_slice_void(
+    occ: np.ndarray,
+    soma_region: np.ndarray,
+    xy_min: np.ndarray,
+    grid_res: float,
+) -> tuple[float, float, float, np.ndarray | None] | None:
+    """Detect the nucleus void within a soma cluster.
+
+    Returns ``(cx, cy, void_r, void_xy)`` or None if no void.
+    *void_xy* is ``(M, 2)`` world-coordinate points of the void region.
+    """
+    from scipy.ndimage import binary_fill_holes, distance_transform_edt, label
+
+    occ_s = occ & soma_region
+
+    # 4-ray enclosure
+    enc = np.ones_like(occ_s)
+    for ax in range(2):
+        enc &= np.maximum.accumulate(occ_s, axis=ax)
+        enc &= np.flip(
+            np.maximum.accumulate(np.flip(occ_s, axis=ax), axis=ax),
+            axis=ax,
+        )
+    # Confine to filled soma cluster (can't leak through pocket mouth)
+    soma_filled = binary_fill_holes(soma_region)
+    enc &= soma_filled
+
+    void = enc & ~occ_s
+    if not void.any():
+        return None
+
+    dt = distance_transform_edt(~occ_s)
+    dtv = dt * void
+    pk = np.unravel_index(dtv.argmax(), dtv.shape)
+    cx = float(xy_min[0] + pk[0] * grid_res + grid_res / 2)
+    cy = float(xy_min[1] + pk[1] * grid_res + grid_res / 2)
+    void_r = float(dtv.max()) * grid_res
+
+    # Keep only the connected component containing the peak,
+    # with dt > 2 to exclude small vertex-spacing gaps.
+    deep_void = void & (dt > 2)
+    if not deep_void.any():
+        return cx, cy, void_r, None
+
+    void_labeled, _ = label(deep_void)
+    peak_label = void_labeled[pk[0], pk[1]]
+    if peak_label == 0:
+        deep_ij = np.argwhere(deep_void)
+        dists = np.abs(deep_ij[:, 0] - pk[0]) + np.abs(deep_ij[:, 1] - pk[1])
+        peak_label = void_labeled[deep_ij[np.argmin(dists)][0],
+                                  deep_ij[np.argmin(dists)][1]]
+    nucleus_void = void_labeled == peak_label
+
+    void_ij = np.argwhere(nucleus_void)
+    void_xy = np.column_stack([
+        xy_min[0] + void_ij[:, 0] * grid_res + grid_res / 2,
+        xy_min[1] + void_ij[:, 1] * grid_res + grid_res / 2,
+    ])
+    return cx, cy, void_r, void_xy
+
+
 #  find_nucleus_center — nucleus detection via Z-slice void analysis
 # =====================================================================
 
@@ -6338,112 +6443,99 @@ def find_nucleus_center(
           *cx, cy* are the void centre at each level and *void_r* is
           the void radius at that level.
     """
-    from scipy.ndimage import (
-        binary_dilation,
-        distance_transform_edt,
-        label,
-    )
-
     _p = "[find_nucleus_center]"
 
     verts = np.asarray(mesh.vertices, dtype=np.float64)
+    if verbose:
+        z_unique = np.unique(verts[:, 2])
+        n_levels = int((z_unique.max() - z_unique.min()) / 210)
+        print(f"{_p} {len(verts):,} vertices, ~{n_levels} Z-levels")
+
+    raw, best, center = _z_scan(verts, grid_res, z_tol,
+                                min_void_r, max_shift)
+
+    if best is None:
+        if verbose:
+            print(f"{_p} no sustained void found")
+        return None
+
+    slices_numeric = np.array(
+        [(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best]
+    )
+    contours = {raw[i][0]: raw[i][4] for i in best}
+
+    peak_r = float(slices_numeric[:, 3].max())
+    z_lo = float(slices_numeric[0, 0])
+    z_hi = float(slices_numeric[-1, 0])
+
+    if verbose:
+        print(
+            f"{_p} nucleus: center=({center[0]:.0f}, {center[1]:.0f}, "
+            f"{center[2]:.0f}), Z=[{z_lo:.0f},{z_hi:.0f}], "
+            f"peak_r={peak_r:.0f} nm, {len(best)} Z-levels"
+        )
+
+    return {
+        "center": center,
+        "z_range": (z_lo, z_hi),
+        "peak_r": peak_r,
+        "slices": slices_numeric,
+        "contours": contours,
+    }
+
+
+#  find_soma_from_nucleus — soma detection using nucleus center
+# =====================================================================
+
+
+def _z_scan(
+    verts: np.ndarray,
+    grid_res: float = 200.0,
+    z_tol: float = 150.0,
+    min_void_r: float = 500.0,
+    max_shift: float = 3000.0,
+) -> tuple[list[tuple], list[int] | None, np.ndarray | None]:
+    """Shared Z-scan: cluster + void detection + spatial coherence.
+
+    Returns ``(raw, best_run, nucleus_center)`` where *raw* is the
+    per-Z-level data ``[(z, cx, cy, void_r, void_xy, vert_indices,
+    soma_mask), ...]``, *best_run* is the indices into *raw* of the
+    nucleus chain (or None), and *nucleus_center* is ``(3,)`` or None.
+    """
     z_unique = np.unique(verts[:, 2])
-    z_step = 210.0  # ~10× the 21 nm section spacing
+    z_step = 210.0
     z_levels = np.arange(z_unique.min() + z_step, z_unique.max() - z_step,
                          z_step)
 
-    if verbose:
-        print(f"{_p} {len(verts):,} vertices, {len(z_levels)} Z-levels "
-              f"(step {z_step:.0f} nm)")
-
-    # ── Pass 1: per-Z void detection ─────────────────────────────────
-    struct3 = np.ones((3, 3), dtype=bool)
-    raw: list[tuple[float, float, float, float]] = []
+    all_vi = np.arange(len(verts))
+    raw: list[tuple] = []
+    # Each entry: (z, cx, cy, void_r, void_xy, vert_indices, soma_mask)
+    #   vert_indices: indices into mesh.vertices for verts near this Z
+    #   soma_mask: bool array over vert_indices, True = in soma cluster
 
     for z in z_levels:
         near_z = np.abs(verts[:, 2] - z) < z_tol
-        pts = verts[near_z, :2]
-        if len(pts) < 10:
-            raw.append((z, np.nan, np.nan, 0.0))
+        vi = all_vi[near_z]
+        pts = verts[vi, :2]
+
+        cluster = _z_slice_cluster(pts, grid_res)
+        if cluster is None:
+            raw.append((z, np.nan, np.nan, 0.0, None, vi, None))
             continue
 
-        # Rasterize XY
-        xy_min = pts.min(axis=0) - grid_res * 3
-        nx = int((pts[:, 0].max() - xy_min[0] + grid_res * 6) / grid_res) + 1
-        ny = int((pts[:, 1].max() - xy_min[1] + grid_res * 6) / grid_res) + 1
+        occ, soma_region, ix, iy, xy_min = cluster
+        soma_mask = soma_region[ix, iy]
 
-        occ = np.zeros((nx, ny), dtype=bool)
-        ix = ((pts[:, 0] - xy_min[0]) / grid_res).astype(int).clip(0, nx - 1)
-        iy = ((pts[:, 1] - xy_min[1]) / grid_res).astype(int).clip(0, ny - 1)
-        occ[ix, iy] = True
+        void_result = _z_slice_void(occ, soma_region, xy_min, grid_res)
+        if void_result is None:
+            raw.append((z, np.nan, np.nan, 0.0, None, vi, soma_mask))
+        else:
+            cx, cy, void_r, void_xy = void_result
+            raw.append((z, cx, cy, void_r, void_xy, vi, soma_mask))
 
-        # Largest connected component after 1-px dilation
-        dilated = binary_dilation(occ, struct3)
-        labeled, n_labels = label(dilated)
-        if n_labels == 0:
-            raw.append((z, np.nan, np.nan, 0.0))
-            continue
-
-        sizes = np.bincount(labeled.ravel())[1:]
-        lid = int(np.argmax(sizes)) + 1
-        soma_region = labeled == lid
-
-        # 4-ray enclosure within the soma cluster.
-        occ_s = occ & soma_region
-        enc = np.ones_like(occ_s)
-        for ax in range(2):
-            enc &= np.maximum.accumulate(occ_s, axis=ax)
-            enc &= np.flip(
-                np.maximum.accumulate(np.flip(occ_s, axis=ax), axis=ax),
-                axis=ax,
-            )
-        # Confine void to inside the soma cluster (filled).
-        # soma_region has a hole at the nucleus void — fill it so the
-        # void can exist there, but can't leak through the pocket mouth.
-        from scipy.ndimage import binary_fill_holes
-        soma_filled = binary_fill_holes(soma_region)
-        enc &= soma_filled
-
-        void = enc & ~occ_s
-        if not void.any():
-            raw.append((z, np.nan, np.nan, 0.0, None))
-            continue
-
-        dt = distance_transform_edt(~occ_s)
-        dtv = dt * void
-        pk = np.unravel_index(dtv.argmax(), dtv.shape)
-        cx = xy_min[0] + pk[0] * grid_res + grid_res / 2
-        cy = xy_min[1] + pk[1] * grid_res + grid_res / 2
-        void_r = float(dtv.max()) * grid_res
-
-        # Keep only the connected component of void containing the peak,
-        # and only cells with dt > 2 (truly far from vertices, not just
-        # small gaps between organelle pocket vertices).
-        deep_void = void & (dt > 2)
-        if not deep_void.any():
-            raw.append((z, cx, cy, void_r, None))
-            continue
-        void_labeled, n_void = label(deep_void)
-        peak_label = void_labeled[pk[0], pk[1]]
-        if peak_label == 0:
-            # Peak cell was shallow — find nearest deep void component
-            deep_ij = np.argwhere(deep_void)
-            dists = np.abs(deep_ij[:, 0] - pk[0]) + np.abs(deep_ij[:, 1] - pk[1])
-            nearest = deep_ij[np.argmin(dists)]
-            peak_label = void_labeled[nearest[0], nearest[1]]
-        nucleus_void = void_labeled == peak_label
-
-        void_ij = np.argwhere(nucleus_void)
-        void_xy = np.column_stack([
-            xy_min[0] + void_ij[:, 0] * grid_res + grid_res / 2,
-            xy_min[1] + void_ij[:, 1] * grid_res + grid_res / 2,
-        ])
-        raw.append((z, cx, cy, void_r, void_xy))
-
-    # ── Pass 2: spatial-coherence chains ─────────────────────────────
+    # Spatial-coherence chains
     runs: list[list[int]] = []
     cur: list[int] = []
-
     for i, entry in enumerate(raw):
         z, cx, cy, r = entry[0], entry[1], entry[2], entry[3]
         if r < min_void_r or np.isnan(cx):
@@ -6451,7 +6543,6 @@ def find_nucleus_center(
                 runs.append(cur)
                 cur = []
             continue
-
         if not cur:
             cur = [i]
         else:
@@ -6464,46 +6555,119 @@ def find_nucleus_center(
     if cur:
         runs.append(cur)
 
-    # Drop single-level "chains" — a real nucleus spans multiple Z-levels
     runs = [r for r in runs if len(r) >= 2]
 
     if not runs:
-        if verbose:
-            print(f"{_p} no sustained void found")
-        return None
+        return raw, None, None
 
     best = max(runs, key=len)
-
-    # Build per-Z slice records
-    slices_numeric = np.array(
-        [(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best]
-    )  # (N, 4): z, cx, cy, void_r
-    contours = {raw[i][0]: raw[i][4] for i in best}  # z → (M, 2) void XY
-
+    slices = np.array([(raw[i][0], raw[i][1], raw[i][2], raw[i][3])
+                       for i in best])
     center = np.array([
-        np.nanmean(slices_numeric[:, 1]),
-        np.nanmean(slices_numeric[:, 2]),
-        np.mean(slices_numeric[:, 0]),
+        np.nanmean(slices[:, 1]),
+        np.nanmean(slices[:, 2]),
+        np.mean(slices[:, 0]),
     ])
-    peak_r = float(slices_numeric[:, 3].max())
-    z_lo = float(slices_numeric[0, 0])
-    z_hi = float(slices_numeric[-1, 0])
+
+    return raw, best, center
+
+
+def find_soma_from_nucleus(
+    mesh: trimesh.Trimesh,
+    *,
+    grid_res: float = 200.0,
+    z_tol: float = 150.0,
+    verbose: bool = False,
+) -> "Soma | None":
+    """Detect the soma by first locating the nucleus void.
+
+    Single-pass Z-scan: finds the nucleus void via spatial coherence,
+    then collects soma-cluster vertices at all Z-levels where the
+    cluster contains the nucleus XY.  Returns the same ``Soma`` type
+    as :func:`find_soma`.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh.
+    grid_res : float
+        2D rasterization cell size in nm.
+    z_tol : float
+        Half-width of the Z slab.
+    verbose : bool
+        Print progress.
+
+    Returns
+    -------
+    Soma or None
+    """
+    from scipy.spatial import ConvexHull
+    from shapely.geometry import Point, Polygon
+
+    _p = "[find_soma_from_nucleus]"
+
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    if verbose:
+        print(f"{_p} {len(verts):,} vertices")
+
+    raw, best, nc = _z_scan(verts, grid_res, z_tol)
+
+    if nc is None:
+        if verbose:
+            print(f"{_p} no nucleus found")
+        return None
+
+    if verbose:
+        n_chain = len(best)
+        peak_r = max(raw[i][3] for i in best)
+        print(f"{_p} nucleus: ({nc[0]:.0f}, {nc[1]:.0f}, {nc[2]:.0f}), "
+              f"r={peak_r:.0f}nm, {n_chain} Z-levels")
+
+    # Collect soma vertices: at each Z-level, if the soma cluster
+    # contains the nucleus XY, all cluster vertices are soma.
+    nc_point = Point(nc[0], nc[1])
+    soma_vert_set: set[int] = set()
+    n_z_hit = 0
+
+    for entry in raw:
+        z, cx, cy, r, void_xy, vi, soma_mask = entry
+        if soma_mask is None:
+            continue
+
+        soma_pts = verts[vi[soma_mask], :2]
+        if len(soma_pts) < 4:
+            continue
+
+        try:
+            hull = ConvexHull(soma_pts)
+            hull_poly = Polygon(soma_pts[hull.vertices])
+            if not hull_poly.contains(nc_point):
+                continue
+        except Exception:
+            continue
+
+        soma_vert_set.update(vi[soma_mask].tolist())
+        n_z_hit += 1
+
+    if len(soma_vert_set) < 4:
+        if verbose:
+            print(f"{_p} too few soma vertices ({len(soma_vert_set)})")
+        return None
+
+    soma_arr = np.fromiter(sorted(soma_vert_set), dtype=np.intp)
+    soma = Soma.fit(mesh.vertices[soma_arr], verts=soma_arr)
 
     if verbose:
         print(
-            f"{_p} nucleus: center=({center[0]:.0f}, {center[1]:.0f}, "
-            f"{center[2]:.0f}), Z=[{z_lo:.0f},{z_hi:.0f}], "
-            f"peak_r={peak_r:.0f} nm, {len(best)} Z-levels, "
-            f"{len(runs)} total runs"
+            f"{_p} soma: center=["
+            f"{soma.center[0]:.0f}, {soma.center[1]:.0f}, "
+            f"{soma.center[2]:.0f}], "
+            f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
+            f"{soma.axes[2]:.0f}], "
+            f"{len(soma.verts):,} verts from {n_z_hit} Z-levels"
         )
 
-    return {
-        "center": center,
-        "z_range": (z_lo, z_hi),
-        "peak_r": peak_r,
-        "slices": slices_numeric,
-        "contours": contours,
-    }
+    return soma
 
 
 #  find_soma_void — soma detection via organelle-void cross-sections
