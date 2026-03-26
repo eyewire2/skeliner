@@ -22,6 +22,7 @@ dependencies = [
     "pytest>=8.3.5",
     "python-multipart>=0.0.22",
     "scikit-learn>=1.7.2",
+    "shapely>=2.1.2",
 ]
 license = "GPL-3.0-or-later"
 readme = {file = "README.md", content-type = "text/markdown"}
