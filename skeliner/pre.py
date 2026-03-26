@@ -6401,7 +6401,7 @@ def find_nucleus_center(
 
         void = enc & ~occ_s
         if not void.any():
-            raw.append((z, np.nan, np.nan, 0.0))
+            raw.append((z, np.nan, np.nan, 0.0, None))
             continue
 
         dt = distance_transform_edt(~occ_s)
@@ -6410,13 +6410,37 @@ def find_nucleus_center(
         cx = xy_min[0] + pk[0] * grid_res + grid_res / 2
         cy = xy_min[1] + pk[1] * grid_res + grid_res / 2
         void_r = float(dtv.max()) * grid_res
-        raw.append((z, cx, cy, void_r))
+
+        # Keep only the connected component of void containing the peak,
+        # and only cells with dt > 2 (truly far from vertices, not just
+        # small gaps between organelle pocket vertices).
+        deep_void = void & (dt > 2)
+        if not deep_void.any():
+            raw.append((z, cx, cy, void_r, None))
+            continue
+        void_labeled, n_void = label(deep_void)
+        peak_label = void_labeled[pk[0], pk[1]]
+        if peak_label == 0:
+            # Peak cell was shallow — find nearest deep void component
+            deep_ij = np.argwhere(deep_void)
+            dists = np.abs(deep_ij[:, 0] - pk[0]) + np.abs(deep_ij[:, 1] - pk[1])
+            nearest = deep_ij[np.argmin(dists)]
+            peak_label = void_labeled[nearest[0], nearest[1]]
+        nucleus_void = void_labeled == peak_label
+
+        void_ij = np.argwhere(nucleus_void)
+        void_xy = np.column_stack([
+            xy_min[0] + void_ij[:, 0] * grid_res + grid_res / 2,
+            xy_min[1] + void_ij[:, 1] * grid_res + grid_res / 2,
+        ])
+        raw.append((z, cx, cy, void_r, void_xy))
 
     # ── Pass 2: spatial-coherence chains ─────────────────────────────
     runs: list[list[int]] = []
     cur: list[int] = []
 
-    for i, (z, cx, cy, r) in enumerate(raw):
+    for i, entry in enumerate(raw):
+        z, cx, cy, r, _ = entry
         if r < min_void_r or np.isnan(cx):
             if cur:
                 runs.append(cur)
@@ -6441,15 +6465,21 @@ def find_nucleus_center(
         return None
 
     best = max(runs, key=len)
-    slices = np.array([raw[i] for i in best])  # (N, 4): z, cx, cy, r
+
+    # Build per-Z slice records
+    slices_numeric = np.array(
+        [(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best]
+    )  # (N, 4): z, cx, cy, void_r
+    contours = {raw[i][0]: raw[i][4] for i in best}  # z → (M, 2) void XY
 
     center = np.array([
-        np.nanmean(slices[:, 1]),
-        np.nanmean(slices[:, 2]),
-        np.mean(slices[:, 0]),
+        np.nanmean(slices_numeric[:, 1]),
+        np.nanmean(slices_numeric[:, 2]),
+        np.mean(slices_numeric[:, 0]),
     ])
-    peak_r = float(slices[:, 3].max())
-    z_lo, z_hi = float(slices[0, 0]), float(slices[-1, 0])
+    peak_r = float(slices_numeric[:, 3].max())
+    z_lo = float(slices_numeric[0, 0])
+    z_hi = float(slices_numeric[-1, 0])
 
     if verbose:
         print(
@@ -6463,7 +6493,8 @@ def find_nucleus_center(
         "center": center,
         "z_range": (z_lo, z_hi),
         "peak_r": peak_r,
-        "slices": slices,
+        "slices": slices_numeric,
+        "contours": contours,
     }
 
 

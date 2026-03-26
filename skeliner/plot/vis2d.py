@@ -1284,6 +1284,7 @@ def z_section(
     -------
     fig, ax : Figure, Axes
     """
+    from scipy.spatial import ConvexHull
     from shapely import concave_hull
     from shapely.geometry import MultiPoint
 
@@ -1316,36 +1317,38 @@ def z_section(
             ax.scatter(oc[:, 0], oc[:, 1], c="red", s=2, alpha=0.4,
                        zorder=2, rasterized=True, label="organelles")
 
-    # Outer contour (concave hull)
-    if len(pts_xy) >= 10:
+    # Outer contour (convex hull — never dives into pockets)
+    if len(pts_xy) >= 4:
         try:
-            mp = MultiPoint(pts_xy)
-            shape = concave_hull(mp, ratio=0.1)
-            if hasattr(shape, "exterior"):
-                coords = np.array(shape.exterior.coords)
-                ax.plot(coords[:, 0], coords[:, 1], color="green",
-                        linewidth=2.5, zorder=5, label="outer contour")
+            hull = ConvexHull(pts_xy)
+            hv = pts_xy[hull.vertices]
+            hv_closed = np.vstack([hv, hv[0:1]])
+            ax.plot(hv_closed[:, 0], hv_closed[:, 1], color="green",
+                    linewidth=2.5, zorder=5, label="outer contour")
         except Exception:
             pass
 
-    # Nucleus void — per-Z circle from slices data
+    # Nucleus void — per-Z contour from find_nucleus_center
     if nucleus is not None:
+        contours = nucleus.get("contours", {})
         slices = nucleus["slices"]  # (N, 4): z, cx, cy, void_r
-        # Find the slice closest to this Z
         dz = np.abs(slices[:, 0] - z)
         nearest = int(np.argmin(dz))
         z_step = np.median(np.diff(slices[:, 0])) if len(slices) > 1 else 500
         if dz[nearest] <= z_step * 0.6:
-            # Within range — draw the per-Z void circle
-            s_cx, s_cy, s_r = slices[nearest, 1], slices[nearest, 2], slices[nearest, 3]
-            ax.plot(s_cx, s_cy, "x", color="goldenrod", markersize=14,
-                    markeredgewidth=3, zorder=6)
-            circle = plt.Circle(
-                (s_cx, s_cy), s_r, fill=False,
-                color="goldenrod", linewidth=2.5, zorder=5,
-                label=f"void r={s_r:.0f}",
-            )
-            ax.add_patch(circle)
+            nearest_z = slices[nearest, 0]
+            void_xy = contours.get(nearest_z)
+            if void_xy is not None and len(void_xy) >= 4:
+                try:
+                    # Convex hull of the void region
+                    vh = ConvexHull(void_xy)
+                    vhv = void_xy[vh.vertices]
+                    vhv_closed = np.vstack([vhv, vhv[0:1]])
+                    ax.plot(vhv_closed[:, 0], vhv_closed[:, 1],
+                            color="goldenrod", linewidth=2.5, zorder=5,
+                            label="nucleus void")
+                except Exception:
+                    pass
 
     ax.set_aspect("equal")
     ax.set_title(f"Z = {z:.0f}  ({pts_xy.shape[0]} vertices)")
