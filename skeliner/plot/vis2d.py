@@ -1316,11 +1316,28 @@ def z_section(
             ax.scatter(oc[:, 0], oc[:, 1], c="red", s=2, alpha=0.4,
                        zorder=2, rasterized=True, label="organelles")
 
-    # Outer contour — convex hull of the soma cluster.
-    # When nucleus is provided, merge all clusters near the nucleus
-    # centre (handles broken-ring Z-levels where the soma splits).
+    # Outer contour — use pre-computed constrained hull from nucleus
+    # dict when available; otherwise fall back to local convex hull.
     soma_pts = None
-    if len(pts_xy) >= 4:
+    hull_poly = None  # Shapely polygon for clipping inner contour
+    soma_hulls = nucleus.get("soma_hulls") if nucleus is not None else None
+    if soma_hulls is not None:
+        # Find the nearest Z-level hull
+        hull_zs = np.array(sorted(soma_hulls.keys()))
+        if len(hull_zs) > 0:
+            nearest_z = hull_zs[np.argmin(np.abs(hull_zs - z))]
+            hull_poly = soma_hulls[nearest_z]
+            if hull_poly is not None and hasattr(hull_poly, "exterior"):
+                cc = np.array(hull_poly.exterior.coords)
+                ax.plot(cc[:, 0], cc[:, 1], color="green",
+                        linewidth=2.5, zorder=5, label="outer contour")
+                # Build soma_pts for inner contour sweep
+                from shapely.geometry import Point as _Pt
+                soma_pts = np.array([
+                    p for p in pts_xy
+                    if hull_poly.contains(_Pt(p[0], p[1]))
+                ])
+    if soma_pts is None and len(pts_xy) >= 4:
         try:
             grid_res = 200.0
             xy_min = pts_xy.min(axis=0) - grid_res * 3
@@ -1340,27 +1357,8 @@ def z_section(
             if n_labels > 0:
                 sizes = np.bincount(labeled.ravel())[1:]
                 vert_labels = labeled[ix, iy]
-
-                if nucleus is not None:
-                    # Merge all clusters whose centroid is within
-                    # peak_r * 3 of the nucleus XY centre.
-                    nc_xy = nucleus["center"][:2]
-                    merge_r = nucleus["peak_r"] * 3
-                    soma_mask = np.zeros(len(pts_xy), dtype=bool)
-                    for lid in range(1, n_labels + 1):
-                        cij = np.argwhere(labeled == lid)
-                        centroid = np.array([
-                            xy_min[0] + cij[:, 0].mean() * grid_res
-                            + grid_res / 2,
-                            xy_min[1] + cij[:, 1].mean() * grid_res
-                            + grid_res / 2,
-                        ])
-                        if np.linalg.norm(centroid - nc_xy) < merge_r:
-                            soma_mask |= (vert_labels == lid)
-                else:
-                    lid = int(np.argmax(sizes)) + 1
-                    soma_mask = vert_labels == lid
-
+                lid = int(np.argmax(sizes)) + 1
+                soma_mask = vert_labels == lid
                 soma_pts = pts_xy[soma_mask]
                 if len(soma_pts) >= 4:
                     hull = ConvexHull(soma_pts)

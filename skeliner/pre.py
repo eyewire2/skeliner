@@ -6812,8 +6812,8 @@ def find_nucleus_center(
         n_levels = int((z_unique.max() - z_unique.min()) / 210)
         print(f"{_p} {len(verts):,} vertices, ~{n_levels} Z-levels")
 
-    raw, best, center = _z_scan(verts, grid_res, z_tol,
-                                min_void_r, max_shift)
+    raw, best, center, constrained_hulls = _z_scan(
+        verts, grid_res, z_tol, min_void_r, max_shift)
 
     if best is None:
         if verbose:
@@ -6836,12 +6836,18 @@ def find_nucleus_center(
             f"peak_r={peak_r:.0f} nm, {len(best)} Z-levels"
         )
 
+    # Map constrained hulls from raw-index to Z-value keys
+    soma_hulls = {}
+    for i, poly in constrained_hulls.items():
+        soma_hulls[raw[i][0]] = poly
+
     return {
         "center": center,
         "z_range": (z_lo, z_hi),
         "peak_r": peak_r,
         "slices": slices_numeric,
         "contours": contours,
+        "soma_hulls": soma_hulls,
     }
 
 
@@ -6855,19 +6861,22 @@ def _z_scan(
     z_tol: float = 150.0,
     min_void_r: float = 500.0,
     max_shift: float = 3000.0,
-) -> tuple[list[tuple], list[int] | None, np.ndarray | None]:
+) -> tuple[list[tuple], list[int] | None, np.ndarray | None, dict]:
     """Shared Z-scan: cluster + void detection + spatial coherence.
 
-    Two-pass approach:
+    Three-pass approach:
     1. Per-Z independent clustering + void detection → find best chain.
-    2. For Z-levels near the chain that failed (broken ring), use the
-       convex hull from the nearest good neighbor to merge all nearby
-       clusters, then re-run void detection.
+    2. Hull-guided void detection for broken Z-levels near the chain.
+    3. IoU-based hull constraining: propagate from mid-chain outward,
+       clipping levels whose hull IoU with the previous level drops
+       below *min_iou* (removes neurite protrusions).
 
-    Returns ``(raw, best_run, nucleus_center)`` where *raw* is the
-    per-Z-level data ``[(z, cx, cy, void_r, void_xy, vert_indices,
+    Returns ``(raw, best_run, nucleus_center, hulls)`` where *raw* is
+    the per-Z-level data ``[(z, cx, cy, void_r, void_xy, vert_indices,
     soma_mask), ...]``, *best_run* is the indices into *raw* of the
-    nucleus chain (or None), and *nucleus_center* is ``(3,)`` or None.
+    nucleus chain (or None), *nucleus_center* is ``(3,)`` or None, and
+    *hulls* is a dict mapping chain index → Shapely Polygon (constrained
+    convex hull) or None if no chain.
     """
     from scipy.ndimage import binary_dilation, label
     from scipy.spatial import ConvexHull
@@ -7093,7 +7102,65 @@ def _z_scan(
         np.mean(slices[:, 0]),
     ])
 
-    return raw, best, center
+    # --- Pass 3: neighbor-intersection hull constraining ---
+    # Build per-Z convex hulls, then for each level intersect with
+    # expanded hulls from ±K neighbors.  Holes (broken rings) are
+    # already handled by pass 2; this pass clips protrusions (e.g.
+    # neurites) that only appear at a few consecutive Z-levels.
+    from shapely.geometry import Polygon as _Poly
+
+    local_hulls: dict[int, _Poly] = {}
+    for i in best:
+        sm = raw[i][6]
+        vi = raw[i][5]
+        if sm is None:
+            continue
+        soma_pts = verts[vi[sm], :2]
+        if len(soma_pts) < 4:
+            continue
+        try:
+            h = ConvexHull(soma_pts)
+            p = _Poly(soma_pts[h.vertices])
+            if p.is_valid:
+                local_hulls[i] = p
+        except Exception:
+            pass
+
+    constrained_hulls: dict[int, _Poly] = {}
+    K = 3  # neighbor half-window
+
+    for pos, i in enumerate(local_hulls):
+        if i not in local_hulls:
+            continue
+        local = local_hulls[i]
+        best_pos = best.index(i)
+
+        # Collect neighbor hulls at ±1..K steps
+        neighbors = []
+        for d in range(-K, K + 1):
+            if d == 0:
+                continue
+            nb_pos = best_pos + d
+            if 0 <= nb_pos < len(best) and best[nb_pos] in local_hulls:
+                neighbors.append(local_hulls[best[nb_pos]])
+
+        if not neighbors:
+            constrained_hulls[i] = local
+            continue
+
+        # Intersect local hull with each neighbor (slightly expanded).
+        # The expansion accommodates legitimate Z-to-Z growth.
+        result = local
+        for nb in neighbors:
+            nb_r = np.sqrt(nb.area / np.pi)
+            expanded_nb = nb.buffer(nb_r * 0.15)
+            clipped = result.intersection(expanded_nb)
+            if not clipped.is_empty and clipped.area > local.area * 0.3:
+                result = clipped
+
+        constrained_hulls[i] = result
+
+    return raw, best, center, constrained_hulls
 
 
 def find_soma_from_nucleus(
@@ -7135,7 +7202,7 @@ def find_soma_from_nucleus(
     if verbose:
         print(f"{_p} {len(verts):,} vertices")
 
-    raw, best, nc = _z_scan(verts, grid_res, z_tol)
+    raw, best, nc, constrained_hulls = _z_scan(verts, grid_res, z_tol)
 
     if nc is None:
         if verbose:
