@@ -6858,11 +6858,20 @@ def _z_scan(
 ) -> tuple[list[tuple], list[int] | None, np.ndarray | None]:
     """Shared Z-scan: cluster + void detection + spatial coherence.
 
+    Two-pass approach:
+    1. Per-Z independent clustering + void detection → find best chain.
+    2. For Z-levels near the chain that failed (broken ring), use the
+       convex hull from the nearest good neighbor to merge all nearby
+       clusters, then re-run void detection.
+
     Returns ``(raw, best_run, nucleus_center)`` where *raw* is the
     per-Z-level data ``[(z, cx, cy, void_r, void_xy, vert_indices,
     soma_mask), ...]``, *best_run* is the indices into *raw* of the
     nucleus chain (or None), and *nucleus_center* is ``(3,)`` or None.
     """
+    from scipy.ndimage import binary_dilation, label
+    from scipy.spatial import ConvexHull
+
     z_unique = np.unique(verts[:, 2])
     z_step = 210.0
     z_levels = np.arange(z_unique.min() + z_step, z_unique.max() - z_step,
@@ -6874,6 +6883,10 @@ def _z_scan(
     #   vert_indices: indices into mesh.vertices for verts near this Z
     #   soma_mask: bool array over vert_indices, True = in soma cluster
 
+    # --- Pass 1: independent per-Z detection ---
+    # Also store the grid data for pass 2 re-processing.
+    grid_data: list[tuple | None] = []  # (occ, ix, iy, xy_min, labeled)
+
     for z in z_levels:
         near_z = np.abs(verts[:, 2] - z) < z_tol
         vi = all_vi[near_z]
@@ -6882,10 +6895,17 @@ def _z_scan(
         cluster = _z_slice_cluster(pts, grid_res)
         if cluster is None:
             raw.append((z, np.nan, np.nan, 0.0, None, vi, None))
+            grid_data.append(None)
             continue
 
         occ, soma_region, ix, iy, xy_min = cluster
         soma_mask = soma_region[ix, iy]
+
+        # Store labeled grid for pass 2
+        struct3 = np.ones((3, 3), dtype=bool)
+        dilated = binary_dilation(occ, struct3)
+        labeled, _ = label(dilated)
+        grid_data.append((occ, ix, iy, xy_min, labeled))
 
         void_result = _z_slice_void(occ, soma_region, xy_min, grid_res)
         if void_result is None:
@@ -6922,6 +6942,149 @@ def _z_scan(
         return raw, None, None
 
     best = max(runs, key=len)
+
+    # --- Pass 2: hull-guided void detection for broken Z-levels ---
+    # When the soma ring has a gap (surface hole), the 4-ray enclosure
+    # and binary_fill_holes both fail.  Use the convex hull from the
+    # nearest good neighbor to define "inside" at broken levels.
+    best_set = set(best)
+    chain_lo, chain_hi = best[0], best[-1]
+
+    # Scan levels adjacent to the chain in both directions
+    retry_indices = []
+    for i in range(chain_lo - 1, -1, -1):
+        if grid_data[i] is None:
+            break
+        retry_indices.append(i)
+    for i in range(chain_hi + 1, len(raw)):
+        if grid_data[i] is None:
+            break
+        retry_indices.append(i)
+
+    for i in retry_indices:
+        if i in best_set:
+            continue
+        r_existing = raw[i][3]
+        if r_existing >= min_void_r and not np.isnan(raw[i][1]):
+            continue  # already good
+
+        gd = grid_data[i]
+        if gd is None:
+            continue
+        occ, ix, iy, xy_min, labeled = gd
+
+        # Find nearest good neighbor in the chain
+        ref_i = chain_lo if i < chain_lo else chain_hi
+
+        # Build convex hull from the reference soma vertices
+        ref_vi = raw[ref_i][5]
+        ref_sm = raw[ref_i][6]
+        if ref_sm is None:
+            continue
+        ref_pts = verts[ref_vi[ref_sm], :2]
+        if len(ref_pts) < 4:
+            continue
+        try:
+            ref_hull = ConvexHull(ref_pts)
+        except Exception:
+            continue
+
+        # Build hull mask on this level's grid: for each grid cell,
+        # test if its centre falls inside the reference convex hull.
+        nx, ny = occ.shape
+        gi, gj = np.meshgrid(np.arange(nx), np.arange(ny), indexing="ij")
+        gx = xy_min[0] + gi * grid_res + grid_res / 2
+        gy = xy_min[1] + gj * grid_res + grid_res / 2
+        grid_pts = np.column_stack([gx.ravel(), gy.ravel()])
+        inside_hull = np.ones(len(grid_pts), dtype=bool)
+        for eq in ref_hull.equations:
+            inside_hull &= (grid_pts @ eq[:-1] + eq[-1] <= 0)
+        hull_mask = inside_hull.reshape(nx, ny)
+
+        # Merge all clusters whose centroid is inside the hull
+        n_labels = labeled.max()
+        merged_region = np.zeros_like(occ)
+        for lid in range(1, n_labels + 1):
+            cij = np.argwhere(labeled == lid)
+            centroid = np.array([
+                xy_min[0] + cij[:, 0].mean() * grid_res + grid_res / 2,
+                xy_min[1] + cij[:, 1].mean() * grid_res + grid_res / 2,
+            ])
+            if all(eq[:-1] @ centroid + eq[-1] <= grid_res
+                   for eq in ref_hull.equations):
+                merged_region |= (labeled == lid)
+        if not merged_region.any():
+            continue
+        soma_mask_new = merged_region[ix, iy]
+
+        # Hull-guided void detection: use hull_mask instead of
+        # binary_fill_holes to define the interior.
+        from scipy.ndimage import distance_transform_edt as _edt, label as _label
+        occ_h = occ & hull_mask
+        enc = np.ones_like(occ_h)
+        for ax in range(2):
+            enc &= np.maximum.accumulate(occ_h, axis=ax)
+            enc &= np.flip(
+                np.maximum.accumulate(np.flip(occ_h, axis=ax), axis=ax),
+                axis=ax)
+        enc &= hull_mask
+        void = enc & ~occ_h
+        if not void.any():
+            continue
+
+        dt = _edt(~occ_h)
+        dtv = dt * void
+        pk = np.unravel_index(dtv.argmax(), dtv.shape)
+        void_r = float(dtv.max()) * grid_res
+        cx = float(xy_min[0] + pk[0] * grid_res + grid_res / 2)
+        cy = float(xy_min[1] + pk[1] * grid_res + grid_res / 2)
+
+        deep_void = void & (dt > 2)
+        void_xy = None
+        if deep_void.any():
+            vl, _ = _label(deep_void)
+            pl = vl[pk[0], pk[1]]
+            if pl == 0:
+                dij = np.argwhere(deep_void)
+                dd = np.abs(dij[:, 0] - pk[0]) + np.abs(dij[:, 1] - pk[1])
+                pl = vl[dij[dd.argmin()][0], dij[dd.argmin()][1]]
+            nv = vl == pl
+            vij = np.argwhere(nv)
+            void_xy = np.column_stack([
+                xy_min[0] + vij[:, 0] * grid_res + grid_res / 2,
+                xy_min[1] + vij[:, 1] * grid_res + grid_res / 2,
+            ])
+
+        z = raw[i][0]
+        vi = raw[i][5]
+        raw[i] = (z, cx, cy, void_r, void_xy, vi, soma_mask_new)
+
+    # Re-run spatial coherence with potentially new void detections
+    runs2: list[list[int]] = []
+    cur2: list[int] = []
+    for i, entry in enumerate(raw):
+        z, cx, cy, r = entry[0], entry[1], entry[2], entry[3]
+        if r < min_void_r or np.isnan(cx):
+            if cur2:
+                runs2.append(cur2)
+                cur2 = []
+            continue
+        if not cur2:
+            cur2 = [i]
+        else:
+            pcx, pcy = raw[cur2[-1]][1], raw[cur2[-1]][2]
+            if np.sqrt((cx - pcx) ** 2 + (cy - pcy) ** 2) < max_shift:
+                cur2.append(i)
+            else:
+                runs2.append(cur2)
+                cur2 = [i]
+    if cur2:
+        runs2.append(cur2)
+
+    runs2 = [r for r in runs2 if len(r) >= 2]
+    if runs2:
+        best = max(runs2, key=len)
+
     slices = np.array([(raw[i][0], raw[i][1], raw[i][2], raw[i][3])
                        for i in best])
     center = np.array([

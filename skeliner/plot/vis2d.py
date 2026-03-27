@@ -1316,8 +1316,10 @@ def z_section(
             ax.scatter(oc[:, 0], oc[:, 1], c="red", s=2, alpha=0.4,
                        zorder=2, rasterized=True, label="organelles")
 
-    # Outer contour — convex hull of the LARGEST cluster only
-    # (same clustering as find_nucleus_center: rasterize + dilate + CC)
+    # Outer contour — convex hull of the soma cluster.
+    # When nucleus is provided, merge all clusters near the nucleus
+    # centre (handles broken-ring Z-levels where the soma splits).
+    soma_pts = None
     if len(pts_xy) >= 4:
         try:
             grid_res = 200.0
@@ -1337,10 +1339,28 @@ def z_section(
             labeled, n_labels = label(dilated)
             if n_labels > 0:
                 sizes = np.bincount(labeled.ravel())[1:]
-                lid = int(np.argmax(sizes)) + 1
-                # Map each vertex to its grid cell label
                 vert_labels = labeled[ix, iy]
-                soma_mask = vert_labels == lid
+
+                if nucleus is not None:
+                    # Merge all clusters whose centroid is within
+                    # peak_r * 3 of the nucleus XY centre.
+                    nc_xy = nucleus["center"][:2]
+                    merge_r = nucleus["peak_r"] * 3
+                    soma_mask = np.zeros(len(pts_xy), dtype=bool)
+                    for lid in range(1, n_labels + 1):
+                        cij = np.argwhere(labeled == lid)
+                        centroid = np.array([
+                            xy_min[0] + cij[:, 0].mean() * grid_res
+                            + grid_res / 2,
+                            xy_min[1] + cij[:, 1].mean() * grid_res
+                            + grid_res / 2,
+                        ])
+                        if np.linalg.norm(centroid - nc_xy) < merge_r:
+                            soma_mask |= (vert_labels == lid)
+                else:
+                    lid = int(np.argmax(sizes)) + 1
+                    soma_mask = vert_labels == lid
+
                 soma_pts = pts_xy[soma_mask]
                 if len(soma_pts) >= 4:
                     hull = ConvexHull(soma_pts)
@@ -1364,7 +1384,7 @@ def z_section(
         if dz[nearest] <= z_step * 0.6:
             vc = slices[nearest, 1:3]
             # Use soma cluster vertices only (soma_pts from above)
-            sweep_pts = soma_pts if "soma_pts" in dir() else pts_xy
+            sweep_pts = soma_pts if soma_pts is not None else pts_xy
             dx = sweep_pts[:, 0] - vc[0]
             dy = sweep_pts[:, 1] - vc[1]
             angles = np.arctan2(dy, dx)
@@ -1386,7 +1406,7 @@ def z_section(
                     inner_poly = Polygon(inner_closed[:, :2])
                     if not inner_poly.is_valid:
                         inner_poly = inner_poly.buffer(0)
-                    hull_poly = Polygon(hv) if "hv" in dir() else None
+                    hull_poly = Polygon(hv) if soma_pts is not None else None
                     if hull_poly is not None and hull_poly.is_valid:
                         clipped = inner_poly.intersection(hull_poly)
                         if hasattr(clipped, "exterior"):
@@ -1427,11 +1447,11 @@ def z_section_grid(
     mesh: trimesh.Trimesh,
     nucleus: dict,
     *,
-    n_levels: int = 9,
+    z_step: float = 210.0,
     z_span: float | None = None,
     z_tol: float = 150.0,
     organelles: np.ndarray | None = None,
-    figsize: tuple[float, float] = (21, 21),
+    figsize: tuple[float, float] | None = None,
 ) -> tuple[Figure, np.ndarray]:
     """Plot a grid of Z cross-sections spanning the nucleus Z-range.
 
@@ -1444,8 +1464,8 @@ def z_section_grid(
         Input neuron mesh.
     nucleus : dict
         Result dict from :func:`find_nucleus_center`.
-    n_levels : int
-        Number of Z-levels to plot.  Rounded up to a square grid.
+    z_step : float
+        Spacing between Z-levels in nm.
     z_span : float or None
         Total Z span to cover.  If None, uses 1.5 × the nucleus
         Z-range so the void appears and disappears within the grid.
@@ -1453,8 +1473,8 @@ def z_section_grid(
         Half-width of the Z slab at each level.
     organelles : np.ndarray or None
         Forwarded to :func:`z_section`.
-    figsize : tuple
-        Figure size.
+    figsize : tuple or None
+        Figure size.  If None, auto-scaled from the grid dimensions.
 
     Returns
     -------
@@ -1466,8 +1486,13 @@ def z_section_grid(
         z_span = (z_hi - z_lo) * 1.5
         z_span = max(z_span, 5000.0)  # at least 5 µm
 
+    n_levels = max(4, int(np.ceil(z_span / z_step)))
+
     ncols = int(np.ceil(np.sqrt(n_levels)))
     nrows = int(np.ceil(n_levels / ncols))
+
+    if figsize is None:
+        figsize = (ncols * 3.5, nrows * 3.5)
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
     axes_flat = np.asarray(axes).ravel()
 
