@@ -6962,6 +6962,7 @@ def find_soma_from_nucleus(
     -------
     Soma or None
     """
+    from collections import deque
     from scipy.spatial import ConvexHull
     from shapely.geometry import Point, Polygon
 
@@ -7123,6 +7124,64 @@ def find_soma_from_nucleus(
         if verbose:
             print(f"{_p} too few soma vertices ({len(soma_vert_set)})")
         return None
+
+    # --- Face-level hole fill ---
+    # Convert vertex set → face mask (face is soma if ≥ 2 of 3 verts are soma)
+    faces = np.asarray(mesh.faces)
+    n_faces = len(faces)
+    vert_in_soma = np.zeros(len(verts), dtype=bool)
+    vert_in_soma[list(soma_vert_set)] = True
+    soma_face_count = vert_in_soma[faces].sum(axis=1)  # 0..3 per face
+    soma_face = soma_face_count >= 2
+
+    pre_fill = int(soma_face.sum())
+
+    # Build face adjacency
+    adj = _face_adjacency(mesh)
+
+    # BFS through non-soma face clusters, fill entrapped ones
+    non_soma_idx = set(np.where(~soma_face)[0].tolist())
+    visited: set[int] = set()
+    hole_count = 0
+
+    for fi in non_soma_idx:
+        if fi in visited:
+            continue
+        cluster: list[int] = []
+        n_soma_boundary = 0
+        n_total_boundary = 0
+        bfs_queue = deque([fi])
+        while bfs_queue:
+            curr = bfs_queue.popleft()
+            if curr in visited:
+                continue
+            visited.add(curr)
+            cluster.append(curr)
+            for nfi in adj.get(curr, set()):
+                if nfi in non_soma_idx and nfi not in visited:
+                    bfs_queue.append(nfi)
+                elif nfi not in non_soma_idx:
+                    n_total_boundary += 1
+                    if soma_face[nfi]:
+                        n_soma_boundary += 1
+        if len(cluster) == 0:
+            continue
+        enclosure = (n_soma_boundary / n_total_boundary
+                     if n_total_boundary else 0)
+        is_small = len(cluster) <= 500
+        is_entrapped = enclosure >= 0.99 and len(cluster) < n_faces * 0.05
+        if (is_small and enclosure >= 0.5) or is_entrapped:
+            for c in cluster:
+                soma_face[c] = True
+            hole_count += len(cluster)
+
+    # Convert face mask back to vertex set
+    soma_face_indices = np.where(soma_face)[0]
+    soma_vert_set = set(faces[soma_face_indices].ravel().tolist())
+
+    if verbose:
+        print(f"{_p} hole fill: {pre_fill} faces → "
+              f"{int(soma_face.sum())} faces (+{hole_count} filled)")
 
     soma_arr = np.fromiter(sorted(soma_vert_set), dtype=np.intp)
     soma = Soma.fit(mesh.vertices[soma_arr], verts=soma_arr)
