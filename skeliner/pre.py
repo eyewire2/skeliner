@@ -4607,7 +4607,6 @@ def find_pocket_organelles(
         cluster: list[int] = []
         n_pocket_boundary = 0
         n_total_boundary = 0
-        too_large = False
         bfs_queue = deque([fi])
         while bfs_queue:
             curr = bfs_queue.popleft()
@@ -4615,17 +4614,6 @@ def find_pocket_organelles(
                 continue
             np_visited.add(curr)
             cluster.append(curr)
-            if len(cluster) > max_hole_size:
-                too_large = True
-                while bfs_queue:
-                    c2 = bfs_queue.popleft()
-                    if c2 not in np_visited:
-                        np_visited.add(c2)
-                        cluster.append(c2)
-                        for n2 in adj.get(c2, set()):
-                            if n2 in non_pocket_idx and n2 not in np_visited:
-                                bfs_queue.append(n2)
-                break
             for nfi in adj.get(curr, set()):
                 if nfi in non_pocket_idx and nfi not in np_visited:
                     bfs_queue.append(nfi)
@@ -4633,10 +4621,16 @@ def find_pocket_organelles(
                     n_total_boundary += 1
                     if pocket[nfi]:
                         n_pocket_boundary += 1
-        if too_large or len(cluster) == 0:
+        if len(cluster) == 0:
             continue
         enclosure = n_pocket_boundary / n_total_boundary if n_total_boundary else 0
-        if enclosure >= hole_enclosure_ratio:
+        # Small holes: fill if enclosure meets threshold.
+        # Large holes: only fill if fully entrapped (enclosure ~1.0)
+        #   and not the main mesh body (< 5% of faces).
+        n_faces = len(pocket)
+        is_small = len(cluster) <= max_hole_size
+        is_entrapped = enclosure >= 0.99 and len(cluster) < n_faces * 0.05
+        if (is_small and enclosure >= hole_enclosure_ratio) or is_entrapped:
             for c in cluster:
                 pocket[c] = True
             hole_count += len(cluster)
