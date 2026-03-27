@@ -4740,18 +4740,7 @@ def find_pocket_organelles_alt(
             )
         face_edges[fi] = fe
 
-    # -- barrier: ALL neg/pos boundary edges + closure edges --
-    # All neg/pos boundaries seal every neg-dot cluster (including
-    # small/flat ones that don't qualify as pockets).  The closure
-    # edges from find_pocket_mouths seal gaps at mesh boundary edges.
-    neg_mask = (outward_dots < 0) & main_face_mask
-    mouth_edge_set: set[tuple[int, int]] = set()
-    for fi in np.where(neg_mask)[0]:
-        for e in face_edges[int(fi)]:
-            for nfi in edge_to_face.get(e, []):
-                if nfi != fi and outward_dots[nfi] >= 0:
-                    mouth_edge_set.add(e)
-
+    # -- closed mouths (one per validated pocket) --
     mouths = find_pocket_mouths(
         mesh,
         radius=radius,
@@ -4764,48 +4753,109 @@ def find_pocket_organelles_alt(
         _edge_to_face=edge_to_face,
     )
 
-    # Add closure edges (the shortest-path bridges that seal gaps)
-    for m in mouths:
-        mouth_edge_set.update(m)
+    # -- per-pocket fill --
+    # Each entry in *mouths* contains ALL edges for one pocket (one
+    # neg-dot cluster may have multiple openings — all are included).
+    # Flood both sides of the complete barrier; the smaller side is
+    # the pocket.  This naturally prevents trapping outer surface
+    # between pockets: a trapped region is on the outward (larger)
+    # side of every adjacent pocket's barrier.
+    area_arr = np.asarray(mesh.area_faces)
+    pocket = np.zeros(n_faces, dtype=bool)
+    n_main = int(main_face_mask.sum())
 
-    if verbose:
-        print(
-            f"[skeliner.pre] Mouth barrier: {len(mouth_edge_set):,} edges "
-            f"(all neg/pos + {len(mouths)} pocket closures)"
-        )
+    for mouth in mouths:
+        mouth_edges_local = set(mouth)
 
-    # -- flood from exterior, blocked by mouth edges --
-    start_face = int(np.argmax(outward_dots * main_face_mask))
-    outside = np.zeros(n_faces, dtype=bool)
-    vis = np.zeros(n_faces, dtype=bool)
-    queue: deque[int] = deque([start_face])
-
-    while queue:
-        fi = queue.popleft()
-        if vis[fi]:
+        # Seed inward: a neg-dot face adjacent to a mouth edge.
+        inward_seed = -1
+        for e in mouth:
+            for fi in edge_to_face.get(e, []):
+                if main_face_mask[fi] and outward_dots[fi] < 0:
+                    inward_seed = fi
+                    break
+            if inward_seed >= 0:
+                break
+        if inward_seed < 0:
             continue
-        vis[fi] = True
-        if not main_face_mask[fi]:
-            continue
-        outside[fi] = True
-        for nfi in adj.get(fi, set()):
-            if vis[nfi]:
-                continue
-            shared = face_edges[fi] & face_edges[nfi]
-            if any(e in mouth_edge_set for e in shared):
-                continue
-            queue.append(nfi)
 
-    # -- pocket = main faces not reached from outside --
-    pocket = main_face_mask & ~outside
+        # Flood inward, blocked by this pocket's mouth edges.
+        inward: list[int] = []
+        vis_in: set[int] = set()
+        queue = deque([inward_seed])
+        too_large = False
+        while queue:
+            fi = queue.popleft()
+            if fi in vis_in:
+                continue
+            vis_in.add(fi)
+            if not main_face_mask[fi]:
+                continue
+            inward.append(fi)
+            if len(inward) > n_main // 2:
+                too_large = True
+                break  # inward > half mesh → can't be pocket
+            for nfi in adj.get(fi, set()):
+                if nfi in vis_in:
+                    continue
+                shared = face_edges[fi] & face_edges[nfi]
+                if any(e in mouth_edges_local for e in shared):
+                    continue
+                queue.append(nfi)
+
+        if too_large:
+            continue
+
+        for fi in inward:
+            pocket[fi] = True
 
     # -- filter small clusters --
     pocket = _filter_small_clusters(mesh, pocket, min_cluster_size)
 
+    # -- filter shallow pits by fold ratio --
+    pocket_idx = set(np.where(pocket)[0].tolist())
+    comp_vis: set[int] = set()
+    reject: set[int] = set()
+    n_shallow = 0
+
+    for fi in pocket_idx:
+        if fi in comp_vis:
+            continue
+        comp: list[int] = []
+        queue = deque([fi])
+        while queue:
+            curr = queue.popleft()
+            if curr in comp_vis:
+                continue
+            comp_vis.add(curr)
+            comp.append(curr)
+            for nfi in adj.get(curr, set()):
+                if nfi in pocket_idx and nfi not in comp_vis:
+                    queue.append(nfi)
+
+        pocket_area = float(area_arr[comp].sum())
+        cap_faces: set[int] = set()
+        for cfi in comp:
+            for nfi in adj.get(cfi, set()):
+                if nfi not in pocket_idx:
+                    cap_faces.add(nfi)
+        if not cap_faces:
+            continue
+        cap_area = float(area_arr[list(cap_faces)].sum())
+        if cap_area <= 0:
+            continue
+        if pocket_area / cap_area < min_fold_ratio:
+            reject.update(comp)
+            n_shallow += 1
+
+    if reject:
+        pocket[list(reject)] = False
+
     if verbose:
         print(
-            f"[skeliner.pre] Pocket organelles (alt): "
-            f"{int(pocket.sum()):,} faces"
+            f"[skeliner.pre] Pocket organelles: "
+            f"{int(pocket.sum()):,} faces "
+            f"({n_shallow} shallow rejected)"
         )
 
     return pocket
