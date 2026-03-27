@@ -4196,6 +4196,203 @@ def find_rims(
     return rims
 
 
+def find_pocket_mouths(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    min_pocket_size: int = 5,
+    min_fold_ratio: float = 3.0,
+    verbose: bool = False,
+    mesh_stats: tuple | None = None,
+    _adj: dict[int, set[int]] | None = None,
+    _edge_to_face: dict[tuple[int, int], list[int]] | None = None,
+) -> list[list[tuple[int, int]]]:
+    """Find closed mouth edge-loops of pockets.
+
+    Same boundary-edge detection as *find_rims*, but gaps (degree-1
+    endpoints caused by mesh boundary edges) are closed by shortest
+    vertex-paths on the mesh surface.
+
+    Returns
+    -------
+    list[list[tuple[int, int]]]
+        One list of edges per pocket mouth (original rim edges +
+        closure edges).  Same format as *find_rims*.
+    """
+    from collections import deque
+
+    if mesh_stats is not None:
+        outward_dots, _, _, main_face_mask = mesh_stats
+    else:
+        outward_dots, _, _, main_face_mask = compute_mesh_stats(
+            mesh, radius, radius_multiplier, verbose,
+        )
+    n_faces = len(mesh.faces)
+    edge_to_face = (
+        _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
+    )
+    adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
+
+    faces_arr = np.asarray(mesh.faces)
+    area_arr = np.asarray(mesh.area_faces)
+    verts_arr = np.asarray(mesh.vertices)
+
+    # -- neg-dot clusters (same as find_rims) --
+    neg_mask = (outward_dots < 0) & main_face_mask
+    neg_idx = set(np.where(neg_mask)[0].tolist())
+    cluster_vis: set[int] = set()
+    clusters: list[list[int]] = []
+    for fi in neg_idx:
+        if fi in cluster_vis:
+            continue
+        cluster: list[int] = []
+        queue: deque[int] = deque([fi])
+        while queue:
+            curr = queue.popleft()
+            if curr in cluster_vis:
+                continue
+            cluster_vis.add(curr)
+            cluster.append(curr)
+            for nfi in adj.get(curr, set()):
+                if nfi in neg_idx and nfi not in cluster_vis:
+                    queue.append(nfi)
+        clusters.append(cluster)
+
+    # -- vertex adjacency for shortest-path closure --
+    vert_adj: dict[int, set[int]] = defaultdict(set)
+    for e in edge_to_face:
+        vert_adj[e[0]].add(e[1])
+        vert_adj[e[1]].add(e[0])
+
+    # -- per-cluster: collect boundary edges, validate, close gaps --
+    mouths: list[list[tuple[int, int]]] = []
+
+    for cluster in clusters:
+        if len(cluster) < min_pocket_size:
+            continue
+        cset = set(cluster)
+
+        # Boundary edges (identical to find_rims)
+        boundary_edges: list[tuple[int, int]] = []
+        seen_edges: set[tuple[int, int]] = set()
+        for fi in cluster:
+            f = faces_arr[fi]
+            for i in range(3):
+                e = (
+                    min(int(f[i]), int(f[(i + 1) % 3])),
+                    max(int(f[i]), int(f[(i + 1) % 3])),
+                )
+                if e in seen_edges:
+                    continue
+                seen_edges.add(e)
+                foe = edge_to_face[e]
+                if len(foe) == 2:
+                    other = foe[1] if foe[0] in cset else foe[0]
+                    if other not in cset:
+                        boundary_edges.append(e)
+        if not boundary_edges:
+            continue
+
+        # Fold-ratio validation (identical to find_rims)
+        pocket_area = float(area_arr[cluster].sum())
+        opening_area = _rim_enclosed_area(boundary_edges, verts_arr)
+        if opening_area <= 0:
+            continue
+        if pocket_area / opening_area < min_fold_ratio:
+            continue
+
+        # -- close gaps: find degree-1 vertices and connect them --
+        degree: dict[int, int] = defaultdict(int)
+        for a, b in boundary_edges:
+            degree[a] += 1
+            degree[b] += 1
+
+        endpoints = [v for v, d in degree.items() if d == 1]
+
+        if not endpoints:
+            # Already closed
+            mouths.append(boundary_edges)
+            continue
+
+        # Greedily pair nearest endpoints and connect via shortest
+        # vertex-path on the mesh.
+        closure_edges: list[tuple[int, int]] = []
+        remaining = list(endpoints)
+
+        while len(remaining) >= 2:
+            # Find closest pair
+            best_dist = float("inf")
+            best_i, best_j = 0, 1
+            for i in range(len(remaining)):
+                for j in range(i + 1, len(remaining)):
+                    d = float(
+                        np.linalg.norm(
+                            verts_arr[remaining[i]]
+                            - verts_arr[remaining[j]]
+                        )
+                    )
+                    if d < best_dist:
+                        best_dist = d
+                        best_i, best_j = i, j
+
+            v_start = remaining[best_i]
+            v_end = remaining[best_j]
+            # Remove in reverse index order to keep indices valid
+            for idx in sorted([best_i, best_j], reverse=True):
+                remaining.pop(idx)
+
+            # BFS shortest vertex-path
+            parent: dict[int, int] = {v_start: -1}
+            bfs: deque[int] = deque([v_start])
+            found = False
+            while bfs:
+                v = bfs.popleft()
+                if v == v_end:
+                    found = True
+                    break
+                for nv in vert_adj.get(v, set()):
+                    if nv not in parent:
+                        parent[nv] = v
+                        bfs.append(nv)
+            if found:
+                # Trace path and collect edges
+                v = v_end
+                while parent[v] != -1:
+                    pv = parent[v]
+                    closure_edges.append((min(v, pv), max(v, pv)))
+                    v = pv
+
+        closed = boundary_edges + closure_edges
+        # Drop mouths that still have degree-1 vertices (unsealed gaps)
+        if any(d == 1 for d in _mouth_degree(closed).values()):
+            continue
+        mouths.append(closed)
+
+    if verbose:
+        n_edges = sum(len(m) for m in mouths)
+        n_sealed = sum(
+            1
+            for m in mouths
+            if all(d != 1 for d in _mouth_degree(m).values())
+        )
+        print(
+            f"[skeliner.pre] Pocket mouths: {len(mouths)} pockets, "
+            f"{n_edges:,} edges ({n_sealed}/{len(mouths)} sealed)"
+        )
+
+    return mouths
+
+
+def _mouth_degree(edges: list[tuple[int, int]]) -> dict[int, int]:
+    """Vertex degree map for an edge list."""
+    deg: dict[int, int] = defaultdict(int)
+    for a, b in edges:
+        deg[a] += 1
+        deg[b] += 1
+    return deg
+
+
 def _face_adjacency(
     mesh: trimesh.Trimesh,
     edge_to_face: dict[tuple[int, int], list[int]] | None = None,
@@ -4491,6 +4688,126 @@ def find_pocket_organelles(
             f"holes +{hole_count:,}, "
             f"rejected {n_rejected})"
         )
+    return pocket
+
+
+def find_pocket_organelles_alt(
+    mesh: trimesh.Trimesh,
+    *,
+    radius: float | None = None,
+    radius_multiplier: float = 5.0,
+    min_pocket_size: int = 5,
+    min_fold_ratio: float = 3.0,
+    min_cluster_size: int = 5,
+    verbose: bool = False,
+    mesh_stats: tuple | None = None,
+) -> np.ndarray:
+    """Detect pocket organelles using closed mouth boundaries.
+
+    Uses :func:`find_pocket_mouths` to get sealed edge-loops at each
+    pocket opening, then floods from the exterior blocked by those
+    edges.  Everything not reached is pocket.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask ``(nFaces,)`` — pocket organelle faces.
+    """
+    from collections import deque
+
+    if mesh_stats is not None:
+        outward_dots, _, _, main_face_mask = mesh_stats
+    else:
+        outward_dots, _, _, main_face_mask = compute_mesh_stats(
+            mesh, radius, radius_multiplier, verbose,
+        )
+    n_faces = len(mesh.faces)
+    edge_to_face = _edge_to_faces(mesh)
+    adj = _face_adjacency(mesh, edge_to_face)
+    faces_arr = np.asarray(mesh.faces)
+
+    # -- face → edge set lookup --
+    face_edges: dict[int, set[tuple[int, int]]] = {}
+    for fi in range(n_faces):
+        f = faces_arr[fi]
+        fe: set[tuple[int, int]] = set()
+        for i in range(3):
+            fe.add(
+                (
+                    min(int(f[i]), int(f[(i + 1) % 3])),
+                    max(int(f[i]), int(f[(i + 1) % 3])),
+                )
+            )
+        face_edges[fi] = fe
+
+    # -- barrier: ALL neg/pos boundary edges + closure edges --
+    # All neg/pos boundaries seal every neg-dot cluster (including
+    # small/flat ones that don't qualify as pockets).  The closure
+    # edges from find_pocket_mouths seal gaps at mesh boundary edges.
+    neg_mask = (outward_dots < 0) & main_face_mask
+    mouth_edge_set: set[tuple[int, int]] = set()
+    for fi in np.where(neg_mask)[0]:
+        for e in face_edges[int(fi)]:
+            for nfi in edge_to_face.get(e, []):
+                if nfi != fi and outward_dots[nfi] >= 0:
+                    mouth_edge_set.add(e)
+
+    mouths = find_pocket_mouths(
+        mesh,
+        radius=radius,
+        radius_multiplier=radius_multiplier,
+        min_pocket_size=min_pocket_size,
+        min_fold_ratio=min_fold_ratio,
+        verbose=verbose,
+        mesh_stats=mesh_stats,
+        _adj=adj,
+        _edge_to_face=edge_to_face,
+    )
+
+    # Add closure edges (the shortest-path bridges that seal gaps)
+    for m in mouths:
+        mouth_edge_set.update(m)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Mouth barrier: {len(mouth_edge_set):,} edges "
+            f"(all neg/pos + {len(mouths)} pocket closures)"
+        )
+
+    # -- flood from exterior, blocked by mouth edges --
+    start_face = int(np.argmax(outward_dots * main_face_mask))
+    outside = np.zeros(n_faces, dtype=bool)
+    vis = np.zeros(n_faces, dtype=bool)
+    queue: deque[int] = deque([start_face])
+
+    while queue:
+        fi = queue.popleft()
+        if vis[fi]:
+            continue
+        vis[fi] = True
+        if not main_face_mask[fi]:
+            continue
+        outside[fi] = True
+        for nfi in adj.get(fi, set()):
+            if vis[nfi]:
+                continue
+            shared = face_edges[fi] & face_edges[nfi]
+            if any(e in mouth_edge_set for e in shared):
+                continue
+            queue.append(nfi)
+
+    # -- pocket = main faces not reached from outside --
+    pocket = main_face_mask & ~outside
+
+    # -- filter small clusters --
+    pocket = _filter_small_clusters(mesh, pocket, min_cluster_size)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Pocket organelles (alt): "
+            f"{int(pocket.sum()):,} faces"
+        )
+
     return pocket
 
 
