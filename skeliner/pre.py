@@ -1780,9 +1780,7 @@ def find_soma_deprecated(
         print("[skeliner.pre] Soma: BFS ring analysis...")
     bfs_verts = np.fromiter(adj_bfs.keys(), dtype=np.intp)
     seed = int(
-        bfs_verts[
-            np.argmin(np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1))
-        ]
+        bfs_verts[np.argmin(np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1))]
     )
 
     ring_level: dict[int, int] = {seed: 0}
@@ -1910,8 +1908,7 @@ def find_soma_deprecated(
 
     if len(soma_arr) >= 4:
         body_dist = np.sqrt(
-            (initial_soma._body_coords(mesh.vertices[soma_arr]) ** 2)
-            .sum(axis=1)
+            (initial_soma._body_coords(mesh.vertices[soma_arr]) ** 2).sum(axis=1)
         )
         inside_set: set[int] = set()
         outside_set: set[int] = set()
@@ -1955,9 +1952,7 @@ def find_soma_deprecated(
                 ns_sizes.append(len(cc))
 
             if len(ns_sizes) >= 2:
-                ns_thresh, _ = _otsu_threshold(
-                    np.array(ns_sizes, dtype=np.float64)
-                )
+                ns_thresh, _ = _otsu_threshold(np.array(ns_sizes, dtype=np.float64))
                 for cc, sz in zip(ns_ccs, ns_sizes):
                     if sz > ns_thresh:
                         neurite_tree.update(cc)
@@ -1989,20 +1984,12 @@ def find_soma_deprecated(
 
                     # Does this component border the neurite tree?
                     borders = any(
-                        nv in neurite_tree
-                        for v in comp
-                        for nv in adj.get(v, [])
+                        nv in neurite_tree for v in comp for nv in adj.get(v, [])
                     )
                     # How far does it extend in body coords?
-                    comp_body = initial_soma._body_coords(
-                        mesh.vertices[np.array(comp)]
-                    )
-                    max_ext = float(
-                        np.sqrt((comp_body**2).sum(axis=1)).max()
-                    )
-                    outside_comps.append(
-                        (comp, borders, max_ext)
-                    )
+                    comp_body = initial_soma._body_coords(mesh.vertices[np.array(comp)])
+                    max_ext = float(np.sqrt((comp_body**2).sum(axis=1)).max())
+                    outside_comps.append((comp, borders, max_ext))
 
                 # Prune components extending far beyond the typical
                 # near-surface bump.  Threshold = 2× the 25th
@@ -2088,9 +2075,11 @@ def find_soma_deprecated(
                     next_ring: set[int] = set()
                     for v in current_ring:
                         for nv in adj.get(v, []):
-                            if (nv in soma_main
-                                    and nv not in visited_er
-                                    and nv not in global_visited):
+                            if (
+                                nv in soma_main
+                                and nv not in visited_er
+                                and nv not in global_visited
+                            ):
                                 next_ring.add(nv)
                                 visited_er.add(nv)
                     if not next_ring:
@@ -2114,8 +2103,7 @@ def find_soma_deprecated(
                             vis_r.add(u)
                             sz += 1
                             for nu in adj.get(u, []):
-                                if (nu in next_ring
-                                        and nu not in vis_r):
+                                if nu in next_ring and nu not in vis_r:
                                     rq.append(nu)
                         cc_sizes_r.append(sz)
                     quarter = len(next_ring) * 0.25
@@ -2301,8 +2289,7 @@ def find_soma(
     center = np.median(core, axis=0)
     if verbose:
         print(
-            f"[skeliner.pre] Soma: dense cluster "
-            f"{len(core)}/{len(centroids)} fragments"
+            f"[skeliner.pre] Soma: dense cluster {len(core)}/{len(centroids)} fragments"
         )
 
     # ── 1. BFS on external surface from center ────────────────────
@@ -2319,11 +2306,7 @@ def find_soma(
 
     bfs_verts = np.fromiter(adj_bfs.keys(), dtype=np.intp)
     seed = int(
-        bfs_verts[
-            np.argmin(
-                np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1)
-            )
-        ]
+        bfs_verts[np.argmin(np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1))]
     )
 
     ring_level: dict[int, int] = {seed: 0}
@@ -2378,9 +2361,9 @@ def find_soma(
     spread_ratio = 1.0
     if len(nonzero) >= 3:
         width_thresh, _ = _otsu_threshold(nonzero)
-        above_idx = np.where(
-            nonzero_mask & (largest_comp_size > width_thresh)
-        )[0].astype(float)
+        above_idx = np.where(nonzero_mask & (largest_comp_size > width_thresh))[
+            0
+        ].astype(float)
         all_idx = np.where(nonzero_mask)[0].astype(float)
         if len(above_idx) >= 2 and np.std(all_idx) > 0:
             spread_ratio = float(np.std(above_idx) / np.std(all_idx))
@@ -2472,7 +2455,7 @@ def find_soma(
     # exclusion handles shared branches automatically.
 
     _PERP_REF = 10  # rings into tube before computing perpendicular seed
-    _SMOOTH_W = 5   # smoothing window for ring-size profile
+    _SMOOTH_W = 5  # smoothing window for ring-size profile
 
     def _perp_seed(tip_verts, domain):
         """BFS from tip, find perpendicular cross-section at _PERP_REF."""
@@ -2567,12 +2550,7 @@ def find_soma(
         con = 0
         for b in range(start, tube_end):
             i1, i2 = b - off1, b - off2
-            if (
-                0 <= i1 < len(d1)
-                and 0 <= i2 < len(d2)
-                and d1[i1] > 0
-                and d2[i2] > 0
-            ):
+            if 0 <= i1 < len(d1) and 0 <= i2 < len(d2) and d1[i1] > 0 and d2[i2] > 0:
                 con += 1
                 if con > max_con:
                     max_con = con
@@ -2584,9 +2562,7 @@ def find_soma(
             i1, i2 = b - off1, b - off2
             if i1 + sustain > len(d1) or i2 + sustain > len(d2):
                 break
-            if all(
-                d1[i1 + k] > 0 and d2[i2 + k] > 0 for k in range(sustain)
-            ):
+            if all(d1[i1 + k] > 0 and d2[i2 + k] > 0 for k in range(sustain)):
                 return b
         return skip
 
@@ -2690,11 +2666,13 @@ def find_soma_alt(
     for cid in np.unique(org_labels):
         local_fi = org_fi[org_labels == cid]
         verts = set(int(v) for v in np.unique(mesh.faces[local_fi]))
-        clusters.append({
-            "verts": verts,
-            "centroid": mesh.vertices[list(verts)].mean(axis=0),
-            "size": int(len(local_fi)),
-        })
+        clusters.append(
+            {
+                "verts": verts,
+                "centroid": mesh.vertices[list(verts)].mean(axis=0),
+                "size": int(len(local_fi)),
+            }
+        )
 
     if verbose:
         print(
@@ -2794,9 +2772,7 @@ def find_soma_alt(
     # ── 1. BFS from center ───────────────────────────────────────
     bfs_verts = np.fromiter(adj_bfs.keys(), dtype=np.intp)
     seed = int(
-        bfs_verts[
-            np.argmin(np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1))
-        ]
+        bfs_verts[np.argmin(np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1))]
     )
 
     ring_level: dict[int, int] = {seed: 0}
@@ -2899,9 +2875,7 @@ def find_soma_alt(
     filtered_tips: list[list[int]] = []
     for cluster in tip_clusters:
         med_dist = float(
-            np.median(
-                [np.linalg.norm(mesh.vertices[v] - center) for v in cluster]
-            )
+            np.median([np.linalg.norm(mesh.vertices[v] - center) for v in cluster])
         )
         if med_dist >= equator_dist:
             filtered_tips.append(cluster)
@@ -2967,9 +2941,7 @@ def find_soma_alt(
         )
         half = el * 1.5
         return [
-            v
-            for v in nbr
-            if abs(float(np.dot(mesh.vertices[v] - ctr, axis))) < half
+            v for v in nbr if abs(float(np.dot(mesh.vertices[v] - ctr, axis))) < half
         ]
 
     def _bfs_from(seeds, domain):
@@ -3009,12 +2981,7 @@ def find_soma_alt(
         con = 0
         for b in range(start, tube_end):
             i1, i2 = b - off1, b - off2
-            if (
-                0 <= i1 < len(d1)
-                and 0 <= i2 < len(d2)
-                and d1[i1] > 0
-                and d2[i2] > 0
-            ):
+            if 0 <= i1 < len(d1) and 0 <= i2 < len(d2) and d1[i1] > 0 and d2[i2] > 0:
                 con += 1
                 if con > max_con:
                     max_con = con
@@ -3025,9 +2992,7 @@ def find_soma_alt(
             i1, i2 = b - off1, b - off2
             if i1 + sustain > len(d1) or i2 + sustain > len(d2):
                 break
-            if all(
-                d1[i1 + k] > 0 and d2[i2 + k] > 0 for k in range(sustain)
-            ):
+            if all(d1[i1 + k] > 0 and d2[i2 + k] > 0 for k in range(sustain)):
                 return b
         return skip
 
@@ -4226,12 +4191,13 @@ def find_pocket_mouths(
         outward_dots, _, _, main_face_mask = mesh_stats
     else:
         outward_dots, _, _, main_face_mask = compute_mesh_stats(
-            mesh, radius, radius_multiplier, verbose,
+            mesh,
+            radius,
+            radius_multiplier,
+            verbose,
         )
     n_faces = len(mesh.faces)
-    edge_to_face = (
-        _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
-    )
+    edge_to_face = _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
     adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
 
     faces_arr = np.asarray(mesh.faces)
@@ -4328,8 +4294,7 @@ def find_pocket_mouths(
                 for j in range(i + 1, len(remaining)):
                     d = float(
                         np.linalg.norm(
-                            verts_arr[remaining[i]]
-                            - verts_arr[remaining[j]]
+                            verts_arr[remaining[i]] - verts_arr[remaining[j]]
                         )
                     )
                     if d < best_dist:
@@ -4372,9 +4337,7 @@ def find_pocket_mouths(
     if verbose:
         n_edges = sum(len(m) for m in mouths)
         n_sealed = sum(
-            1
-            for m in mouths
-            if all(d != 1 for d in _mouth_degree(m).values())
+            1 for m in mouths if all(d != 1 for d in _mouth_degree(m).values())
         )
         print(
             f"[skeliner.pre] Pocket mouths: {len(mouths)} pockets, "
@@ -4713,7 +4676,10 @@ def find_pocket_organelles_alt(
         outward_dots, _, _, main_face_mask = mesh_stats
     else:
         outward_dots, _, _, main_face_mask = compute_mesh_stats(
-            mesh, radius, radius_multiplier, verbose,
+            mesh,
+            radius,
+            radius_multiplier,
+            verbose,
         )
     n_faces = len(mesh.faces)
     edge_to_face = _edge_to_faces(mesh)
@@ -5890,7 +5856,7 @@ def _detect_tile_size(vertices: np.ndarray) -> int:
         peak_counts = counts[above]
         # Use only the top peaks (sorted by count descending)
         order = np.argsort(-peak_counts)
-        top_peaks = np.sort(peak_coords[order[:max(3, len(order) // 5)]])
+        top_peaks = np.sort(peak_coords[order[: max(3, len(order) // 5)]])
         if len(top_peaks) >= 2:
             diffs = np.diff(top_peaks)
             diffs = diffs[diffs > 100]
@@ -6100,12 +6066,8 @@ def find_offsets(
     results: list[dict] = []
     for z_floor, z_ceil in gaps:
         # Flat faces at the gap boundaries
-        cap_fi_floor = np.where(
-            (face_z == z_floor) & flat_mask
-        )[0]
-        cap_fi_ceil = np.where(
-            (face_z == z_ceil) & flat_mask
-        )[0]
+        cap_fi_floor = np.where((face_z == z_floor) & flat_mask)[0]
+        cap_fi_ceil = np.where((face_z == z_ceil) & flat_mask)[0]
 
         if len(cap_fi_floor) < 3 or len(cap_fi_ceil) < 3:
             continue
@@ -6143,9 +6105,7 @@ def find_offsets(
         # (like the main mesh) may have faces there — that's OK.
         floor_comp = int(comp_labels[cap_fi_floor[0]])
         in_floor_comp = comp_labels == floor_comp
-        in_gap_z = (face_z > z_floor + z_res * 0.5) & (
-            face_z < z_ceil - z_res * 0.5
-        )
+        in_gap_z = (face_z > z_floor + z_res * 0.5) & (face_z < z_ceil - z_res * 0.5)
         faces_in_gap = (in_floor_comp & in_gap_z).sum()
         if faces_in_gap > 0:
             continue
@@ -6187,9 +6147,7 @@ def find_offsets(
             fc = floor_clusters[best_fi]
 
             # Filter floor cluster to vertices near ceiling
-            ceil_extent = np.linalg.norm(
-                cc - cc_center, axis=1
-            ).max()
+            ceil_extent = np.linalg.norm(cc - cc_center, axis=1).max()
             fc_dists = np.linalg.norm(fc - cc_center, axis=1)
             near = fc[fc_dists < ceil_extent * 3]
             if len(near) >= 3:
@@ -6201,33 +6159,27 @@ def find_offsets(
 
             # Determine shifted side
             floor_cap_local = [
-                fi for fi in cap_fi_floor
-                if np.linalg.norm(centroids[fi, :2] - fc_center)
-                < cluster_radius
+                fi
+                for fi in cap_fi_floor
+                if np.linalg.norm(centroids[fi, :2] - fc_center) < cluster_radius
             ]
             ceil_cap_local = [
-                fi for fi in cap_fi_ceil
-                if np.linalg.norm(centroids[fi, :2] - cc_center)
-                < cluster_radius
+                fi
+                for fi in cap_fi_ceil
+                if np.linalg.norm(centroids[fi, :2] - cc_center) < cluster_radius
             ]
             f_comps = set(
-                int(comp_labels[fi]) for fi in floor_cap_local
-                if comp_labels[fi] >= 0
+                int(comp_labels[fi]) for fi in floor_cap_local if comp_labels[fi] >= 0
             )
             c_comps = set(
-                int(comp_labels[fi]) for fi in ceil_cap_local
-                if comp_labels[fi] >= 0
+                int(comp_labels[fi]) for fi in ceil_cap_local if comp_labels[fi] >= 0
             )
             # Same component at branch level → skip
             if f_comps & c_comps:
                 continue
 
-            f_size = sum(
-                int((comp_labels == c).sum()) for c in f_comps
-            )
-            c_size = sum(
-                int((comp_labels == c).sum()) for c in c_comps
-            )
+            f_size = sum(int((comp_labels == c).sum()) for c in f_comps)
+            c_size = sum(int((comp_labels == c).sum()) for c in c_comps)
             if f_size <= c_size:
                 shifted_side = "below"
                 s_comps = f_comps
@@ -6240,15 +6192,10 @@ def find_offsets(
                 s_mask |= comp_labels == c
             shifted_vi = np.unique(mesh.faces[s_mask].ravel())
 
-            cap_faces = np.array(
-                floor_cap_local + ceil_cap_local, dtype=np.intp
-            )
-            floor_pos = np.array(
-                [fc_center[0], fc_center[1], z_floor]
-            )
+            cap_faces = np.array(floor_cap_local + ceil_cap_local, dtype=np.intp)
+            floor_pos = np.array([fc_center[0], fc_center[1], z_floor])
             corrected_pos = np.array(
-                [fc_center[0] + offset[0],
-                 fc_center[1] + offset[1], z_ceil]
+                [fc_center[0] + offset[0], fc_center[1] + offset[1], z_ceil]
             )
 
             results.append(
@@ -6375,10 +6322,8 @@ def remove_offsets(
         # that are near the corrected region
         moved_center = mesh.vertices[below_mask, :2].mean(axis=0)
         moved_extent = max(
-            mesh.vertices[below_mask, 0].max()
-            - mesh.vertices[below_mask, 0].min(),
-            mesh.vertices[below_mask, 1].max()
-            - mesh.vertices[below_mask, 1].min(),
+            mesh.vertices[below_mask, 0].max() - mesh.vertices[below_mask, 0].min(),
+            mesh.vertices[below_mask, 1].max() - mesh.vertices[below_mask, 1].min(),
         )
         for c in range(int(comp_labels.max()) + 1):
             if c == main_comp:
@@ -6722,15 +6667,18 @@ def _z_slice_void(
     if peak_label == 0:
         deep_ij = np.argwhere(deep_void)
         dists = np.abs(deep_ij[:, 0] - pk[0]) + np.abs(deep_ij[:, 1] - pk[1])
-        peak_label = void_labeled[deep_ij[np.argmin(dists)][0],
-                                  deep_ij[np.argmin(dists)][1]]
+        peak_label = void_labeled[
+            deep_ij[np.argmin(dists)][0], deep_ij[np.argmin(dists)][1]
+        ]
     nucleus_void = void_labeled == peak_label
 
     void_ij = np.argwhere(nucleus_void)
-    void_xy = np.column_stack([
-        xy_min[0] + void_ij[:, 0] * grid_res + grid_res / 2,
-        xy_min[1] + void_ij[:, 1] * grid_res + grid_res / 2,
-    ])
+    void_xy = np.column_stack(
+        [
+            xy_min[0] + void_ij[:, 0] * grid_res + grid_res / 2,
+            xy_min[1] + void_ij[:, 1] * grid_res + grid_res / 2,
+        ]
+    )
     return cx, cy, void_r, void_xy
 
 
@@ -6813,7 +6761,8 @@ def find_nucleus_center(
         print(f"{_p} {len(verts):,} vertices, ~{n_levels} Z-levels")
 
     raw, best, center, constrained_hulls = _z_scan(
-        verts, grid_res, z_tol, min_void_r, max_shift)
+        verts, grid_res, z_tol, min_void_r, max_shift
+    )
 
     if best is None:
         if verbose:
@@ -6883,8 +6832,7 @@ def _z_scan(
 
     z_unique = np.unique(verts[:, 2])
     z_step = 210.0
-    z_levels = np.arange(z_unique.min() + z_step, z_unique.max() - z_step,
-                         z_step)
+    z_levels = np.arange(z_unique.min() + z_step, z_unique.max() - z_step, z_step)
 
     all_vi = np.arange(len(verts))
     raw: list[tuple] = []
@@ -7007,7 +6955,7 @@ def _z_scan(
         grid_pts = np.column_stack([gx.ravel(), gy.ravel()])
         inside_hull = np.ones(len(grid_pts), dtype=bool)
         for eq in ref_hull.equations:
-            inside_hull &= (grid_pts @ eq[:-1] + eq[-1] <= 0)
+            inside_hull &= grid_pts @ eq[:-1] + eq[-1] <= 0
         hull_mask = inside_hull.reshape(nx, ny)
 
         # Merge all clusters whose centroid is inside the hull
@@ -7015,27 +6963,32 @@ def _z_scan(
         merged_region = np.zeros_like(occ)
         for lid in range(1, n_labels + 1):
             cij = np.argwhere(labeled == lid)
-            centroid = np.array([
-                xy_min[0] + cij[:, 0].mean() * grid_res + grid_res / 2,
-                xy_min[1] + cij[:, 1].mean() * grid_res + grid_res / 2,
-            ])
-            if all(eq[:-1] @ centroid + eq[-1] <= grid_res
-                   for eq in ref_hull.equations):
-                merged_region |= (labeled == lid)
+            centroid = np.array(
+                [
+                    xy_min[0] + cij[:, 0].mean() * grid_res + grid_res / 2,
+                    xy_min[1] + cij[:, 1].mean() * grid_res + grid_res / 2,
+                ]
+            )
+            if all(
+                eq[:-1] @ centroid + eq[-1] <= grid_res for eq in ref_hull.equations
+            ):
+                merged_region |= labeled == lid
         if not merged_region.any():
             continue
         soma_mask_new = merged_region[ix, iy]
 
         # Hull-guided void detection: use hull_mask instead of
         # binary_fill_holes to define the interior.
-        from scipy.ndimage import distance_transform_edt as _edt, label as _label
+        from scipy.ndimage import distance_transform_edt as _edt
+        from scipy.ndimage import label as _label
+
         occ_h = occ & hull_mask
         enc = np.ones_like(occ_h)
         for ax in range(2):
             enc &= np.maximum.accumulate(occ_h, axis=ax)
             enc &= np.flip(
-                np.maximum.accumulate(np.flip(occ_h, axis=ax), axis=ax),
-                axis=ax)
+                np.maximum.accumulate(np.flip(occ_h, axis=ax), axis=ax), axis=ax
+            )
         enc &= hull_mask
         void = enc & ~occ_h
         if not void.any():
@@ -7059,10 +7012,12 @@ def _z_scan(
                 pl = vl[dij[dd.argmin()][0], dij[dd.argmin()][1]]
             nv = vl == pl
             vij = np.argwhere(nv)
-            void_xy = np.column_stack([
-                xy_min[0] + vij[:, 0] * grid_res + grid_res / 2,
-                xy_min[1] + vij[:, 1] * grid_res + grid_res / 2,
-            ])
+            void_xy = np.column_stack(
+                [
+                    xy_min[0] + vij[:, 0] * grid_res + grid_res / 2,
+                    xy_min[1] + vij[:, 1] * grid_res + grid_res / 2,
+                ]
+            )
 
         z = raw[i][0]
         vi = raw[i][5]
@@ -7094,27 +7049,30 @@ def _z_scan(
     if runs2:
         best = max(runs2, key=len)
 
-    slices = np.array([(raw[i][0], raw[i][1], raw[i][2], raw[i][3])
-                       for i in best])
-    center = np.array([
-        np.nanmean(slices[:, 1]),
-        np.nanmean(slices[:, 2]),
-        np.mean(slices[:, 0]),
-    ])
+    slices = np.array([(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best])
+    center = np.array(
+        [
+            np.nanmean(slices[:, 1]),
+            np.nanmean(slices[:, 2]),
+            np.mean(slices[:, 0]),
+        ]
+    )
 
     # --- Pass 3: neighbor-intersection hull constraining ---
-    # Build per-Z convex hulls, then for each level intersect with
-    # expanded hulls from ±K neighbors.  Holes (broken rings) are
-    # already handled by pass 2; this pass clips protrusions (e.g.
-    # neurites) that only appear at a few consecutive Z-levels.
+    # Build per-Z convex hulls for ALL levels with a soma cluster
+    # (not just the nucleus chain), then intersect each with expanded
+    # hulls from ±K neighbors to clip protrusions.
     from shapely.geometry import Polygon as _Poly
 
+    # Ordered list of all levels with soma data
+    soma_levels = [
+        i for i in range(len(raw)) if raw[i][6] is not None and raw[i][6].sum() >= 4
+    ]
+
     local_hulls: dict[int, _Poly] = {}
-    for i in best:
+    for i in soma_levels:
         sm = raw[i][6]
         vi = raw[i][5]
-        if sm is None:
-            continue
         soma_pts = verts[vi[sm], :2]
         if len(soma_pts) < 4:
             continue
@@ -7126,23 +7084,23 @@ def _z_scan(
         except Exception:
             pass
 
+    # Filter soma_levels to those with hulls
+    soma_levels = [i for i in soma_levels if i in local_hulls]
+
     constrained_hulls: dict[int, _Poly] = {}
     K = 3  # neighbor half-window
 
-    for pos, i in enumerate(local_hulls):
-        if i not in local_hulls:
-            continue
+    for pos, i in enumerate(soma_levels):
         local = local_hulls[i]
-        best_pos = best.index(i)
 
         # Collect neighbor hulls at ±1..K steps
         neighbors = []
         for d in range(-K, K + 1):
             if d == 0:
                 continue
-            nb_pos = best_pos + d
-            if 0 <= nb_pos < len(best) and best[nb_pos] in local_hulls:
-                neighbors.append(local_hulls[best[nb_pos]])
+            nb_pos = pos + d
+            if 0 <= nb_pos < len(soma_levels):
+                neighbors.append(local_hulls[soma_levels[nb_pos]])
 
         if not neighbors:
             constrained_hulls[i] = local
@@ -7160,12 +7118,39 @@ def _z_scan(
 
         constrained_hulls[i] = result
 
+    # Keep only levels within 1.96× the nucleus Z-range AND whose
+    # hull centroid is near the nucleus XY.  Levels dominated by
+    # neurites have centroids far from the nucleus.
+    nuc_z_lo = raw[best[0]][0]
+    nuc_z_hi = raw[best[-1]][0]
+    nuc_z_span = (nuc_z_hi - nuc_z_lo) * 1.96
+    nuc_z_mid = center[2]
+    soma_z_lo = nuc_z_mid - nuc_z_span / 2
+    soma_z_hi = nuc_z_mid + nuc_z_span / 2
+
+    # Peak soma radius from chain hulls
+    chain_areas = [constrained_hulls[i].area for i in best
+                   if i in constrained_hulls]
+    max_r = np.sqrt(max(chain_areas) / np.pi) if chain_areas else 5000
+    max_dist = max_r * 1.5
+
+    filtered = {}
+    for i, p in constrained_hulls.items():
+        if not (soma_z_lo <= raw[i][0] <= soma_z_hi):
+            continue
+        cx, cy = p.centroid.x, p.centroid.y
+        dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
+        if dist <= max_dist:
+            filtered[i] = p
+    constrained_hulls = filtered
+
     return raw, best, center, constrained_hulls
 
 
 def find_soma_from_nucleus(
     mesh: trimesh.Trimesh,
     *,
+    organelles: np.ndarray | None = None,
     grid_res: float = 200.0,
     z_tol: float = 150.0,
     verbose: bool = False,
@@ -7173,14 +7158,17 @@ def find_soma_from_nucleus(
     """Detect the soma by first locating the nucleus void.
 
     Single-pass Z-scan: finds the nucleus void via spatial coherence,
-    then collects soma-cluster vertices at all Z-levels where the
-    cluster contains the nucleus XY.  Returns the same ``Soma`` type
+    then classifies faces whose centroids fall inside the per-Z
+    constrained contours as soma.  Returns the same ``Soma`` type
     as :func:`find_soma`.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Input neuron mesh.
+    organelles : np.ndarray or None
+        ``(nFaces,)`` boolean mask of organelle faces.  If provided,
+        organelle faces are excluded from the soma vertex set.
     grid_res : float
         2D rasterization cell size in nm.
     z_tol : float
@@ -7210,16 +7198,17 @@ def find_soma_from_nucleus(
     if verbose:
         n_chain = len(best)
         peak_r = max(raw[i][3] for i in best)
-        print(f"{_p} nucleus: ({nc[0]:.0f}, {nc[1]:.0f}, {nc[2]:.0f}), "
-              f"r={peak_r:.0f}nm, {n_chain} Z-levels")
+        print(
+            f"{_p} nucleus: ({nc[0]:.0f}, {nc[1]:.0f}, {nc[2]:.0f}), "
+            f"r={peak_r:.0f}nm, {n_chain} Z-levels"
+        )
 
-    # Use constrained hulls from _z_scan (already clipped for
-    # broken rings and neurite protrusions).
+    # Use constrained hulls from _z_scan — covers all Z-levels
+    # with a soma cluster, not just the nucleus chain.
     from shapely import prepare
-    hull_polys: list[tuple[float, Polygon]] = []
-    for i in best:
-        if i not in constrained_hulls:
-            continue
+
+    hull_polys: list[tuple[float, "Polygon"]] = []
+    for i in sorted(constrained_hulls.keys()):
         poly = constrained_hulls[i]
         if poly is None or poly.is_empty:
             continue
@@ -7234,9 +7223,20 @@ def find_soma_from_nucleus(
             print(f"{_p} no soma contours found")
         return None
 
-    hull_z = np.array([h[0] for h in hull_polys])
+    # Expand each hull by 20% to capture surface faces at the
+    # contour edge (organelle folds, junction clipping margin).
+    expanded_polys: list[tuple[float, "Polygon"]] = []
+    for z_val, poly in hull_polys:
+        r_eq = np.sqrt(poly.area / np.pi)
+        ep = poly.buffer(r_eq * 0.2)
+        if not ep.is_valid:
+            ep = ep.buffer(0)
+        prepare(ep)
+        expanded_polys.append((z_val, ep))
+
+    hull_z = np.array([h[0] for h in expanded_polys])
     z_lo, z_hi = hull_z.min(), hull_z.max()
-    n_z_hit = len(hull_polys)
+    n_z_hit = len(expanded_polys)
 
     # Classify faces: centroid inside the nearest Z-level's contour → soma.
     faces = np.asarray(mesh.faces)
@@ -7258,9 +7258,38 @@ def find_soma_from_nucleus(
                 continue
             fi_batch = cand_fi[mask]
             pts_xy = centroids[fi_batch, :2]
-            inside = np.array([hull_polys[hi][1].contains(Point(p))
-                               for p in pts_xy])
+            inside = np.array([expanded_polys[hi][1].contains(Point(p)) for p in pts_xy])
             soma_face[fi_batch] |= inside
+
+    # Exclude organelle faces from soma
+    if organelles is not None:
+        soma_face &= ~organelles
+
+    # Keep only the largest connected component of soma faces
+    from collections import deque
+    adj = _face_adjacency(mesh)
+    soma_idx = set(np.where(soma_face)[0].tolist())
+    visited: set[int] = set()
+    largest_comp: list[int] = []
+    for fi in soma_idx:
+        if fi in visited:
+            continue
+        comp: list[int] = []
+        q = deque([fi])
+        while q:
+            c = q.popleft()
+            if c in visited:
+                continue
+            visited.add(c)
+            comp.append(c)
+            for nfi in adj.get(c, set()):
+                if nfi in soma_idx and nfi not in visited:
+                    q.append(nfi)
+        if len(comp) > len(largest_comp):
+            largest_comp = comp
+    soma_face[:] = False
+    for fi in largest_comp:
+        soma_face[fi] = True
 
     n_soma_faces = int(soma_face.sum())
     if n_soma_faces < 4:
@@ -7339,9 +7368,9 @@ def find_soma_void(
     """
     import time as _time
 
+    from shapely import prepare
     from shapely.geometry import Point, Polygon
     from shapely.ops import unary_union
-    from shapely import prepare
 
     _p = "[find_soma_void]"
     t0 = _time.perf_counter()
@@ -7374,20 +7403,26 @@ def find_soma_void(
         return np.zeros(n_faces, dtype=bool)
 
     if verbose:
-        print(f"{_p} void centre: ({void_center[0]:.0f}, "
-              f"{void_center[1]:.0f}, {void_center[2]:.0f})")
+        print(
+            f"{_p} void centre: ({void_center[0]:.0f}, "
+            f"{void_center[1]:.0f}, {void_center[2]:.0f})"
+        )
 
     # ── 2. Bounding box centred on the void ────────────────────────
     soma_box_min, soma_box_max = _find_void_bounding_box(
-        org_c, void_center, verbose=verbose,
+        org_c,
+        void_center,
+        verbose=verbose,
     )
 
     if verbose:
-        print(f"{_p} soma box: "
-              f"X=[{soma_box_min[0]:.0f},{soma_box_max[0]:.0f}] "
-              f"Y=[{soma_box_min[1]:.0f},{soma_box_max[1]:.0f}] "
-              f"Z=[{soma_box_min[2]:.0f},{soma_box_max[2]:.0f}] "
-              f"({_time.perf_counter() - t0:.1f}s)")
+        print(
+            f"{_p} soma box: "
+            f"X=[{soma_box_min[0]:.0f},{soma_box_max[0]:.0f}] "
+            f"Y=[{soma_box_min[1]:.0f},{soma_box_max[1]:.0f}] "
+            f"Z=[{soma_box_min[2]:.0f},{soma_box_max[2]:.0f}] "
+            f"({_time.perf_counter() - t0:.1f}s)"
+        )
 
     # ── 3. Cross-section a submesh within the bounding box ─────────
     face_in_box = (
@@ -7407,13 +7442,10 @@ def find_soma_void(
     submesh = mesh.submesh([box_face_idx], append=True)
 
     if verbose:
-        print(f"{_p} submesh: {len(submesh.faces):,} faces "
-              f"(from {n_faces:,})")
+        print(f"{_p} submesh: {len(submesh.faces):,} faces (from {n_faces:,})")
 
     z_unique = np.unique(submesh.vertices[:, 2])
-    z_near = z_unique[
-        (z_unique >= soma_box_min[2]) & (z_unique <= soma_box_max[2])
-    ]
+    z_near = z_unique[(z_unique >= soma_box_min[2]) & (z_unique <= soma_box_max[2])]
 
     # Void centre XY as a shapely Point for contour selection
     vc_xy = Point(void_center[0], void_center[1])
@@ -7430,8 +7462,10 @@ def find_soma_void(
         return np.zeros(n_faces, dtype=bool)
 
     if verbose:
-        print(f"{_p} collected {len(z_contours)} Z-levels "
-              f"({_time.perf_counter() - t0:.1f}s)")
+        print(
+            f"{_p} collected {len(z_contours)} Z-levels "
+            f"({_time.perf_counter() - t0:.1f}s)"
+        )
 
     # ── 4. Determine soma Z-range and build contour polygons ────────
     #       The void centre defines the Z-range: the soma exists at
@@ -7496,16 +7530,22 @@ def find_soma_void(
     soma_y_max += xy_pad
 
     if verbose:
-        print(f"{_p} soma XY extent: "
-              f"X=[{soma_x_min:.0f},{soma_x_max:.0f}] "
-              f"Y=[{soma_y_min:.0f},{soma_y_max:.0f}]")
+        print(
+            f"{_p} soma XY extent: "
+            f"X=[{soma_x_min:.0f},{soma_x_max:.0f}] "
+            f"Y=[{soma_y_min:.0f},{soma_y_max:.0f}]"
+        )
 
     # Second pass: within the soma Z-range, union contours that
     # overlap with the soma XY extent
-    soma_xy_box = Polygon([
-        (soma_x_min, soma_y_min), (soma_x_max, soma_y_min),
-        (soma_x_max, soma_y_max), (soma_x_min, soma_y_max),
-    ])
+    soma_xy_box = Polygon(
+        [
+            (soma_x_min, soma_y_min),
+            (soma_x_max, soma_y_min),
+            (soma_x_max, soma_y_max),
+            (soma_x_min, soma_y_max),
+        ]
+    )
 
     soma_polys: dict[float, object] = {}
     for z, contours in z_contours.items():
@@ -7530,9 +7570,11 @@ def find_soma_void(
             soma_polys[z] = merged
 
     if verbose:
-        print(f"{_p} soma Z-range: [{soma_z_min:.0f}, {soma_z_max:.0f}], "
-              f"{len(soma_polys)} Z-levels "
-              f"({_time.perf_counter() - t0:.1f}s)")
+        print(
+            f"{_p} soma Z-range: [{soma_z_min:.0f}, {soma_z_max:.0f}], "
+            f"{len(soma_polys)} Z-levels "
+            f"({_time.perf_counter() - t0:.1f}s)"
+        )
 
     # ── 5. Classify vertices ───────────────────────────────────────
     vert_in_soma = np.zeros(len(verts), dtype=bool)
@@ -7549,14 +7591,14 @@ def find_soma_void(
         at_z = np.where((vert_z == z) & in_box)[0]
         if len(at_z) == 0:
             continue
-        inside = np.array(
-            [poly.contains(Point(p)) for p in verts[at_z, :2]]
-        )
+        inside = np.array([poly.contains(Point(p)) for p in verts[at_z, :2]])
         vert_in_soma[at_z] = inside
 
     if verbose:
-        print(f"{_p} {vert_in_soma.sum():,} vertices in soma "
-              f"({_time.perf_counter() - t0:.1f}s)")
+        print(
+            f"{_p} {vert_in_soma.sum():,} vertices in soma "
+            f"({_time.perf_counter() - t0:.1f}s)"
+        )
 
     # ── 6. Face classification ─────────────────────────────────────
     face_soma = vert_in_soma[faces_arr].any(axis=1)
@@ -7742,14 +7784,12 @@ def _find_void_seed(
 
     if len(coords) == 0:
         if verbose:
-            print(f"{_p} no enclosed empty voxels found, "
-                  f"falling back to density peak")
+            print(f"{_p} no enclosed empty voxels found, falling back to density peak")
         return peak.copy()
 
     # Weighted centroid (deeper = more weight) centres the result
     weights = dt[mask]
-    center = vm + np.average(coords, axis=0, weights=weights) * vox_res \
-        + vox_res / 2
+    center = vm + np.average(coords, axis=0, weights=weights) * vox_res + vox_res / 2
 
     if verbose:
         dt_max = float(weights.max())
@@ -7834,11 +7874,13 @@ def _find_void_organelles(
     idx = np.arange(n_rays, dtype=float)
     theta = 2 * np.pi * idx / golden
     phi = np.arccos(1 - 2 * (idx + 0.5) / n_rays)
-    dirs = np.column_stack([
-        np.sin(phi) * np.cos(theta),
-        np.sin(phi) * np.sin(theta),
-        np.cos(phi),
-    ])  # (n_rays, 3)
+    dirs = np.column_stack(
+        [
+            np.sin(phi) * np.cos(theta),
+            np.sin(phi) * np.sin(theta),
+            np.cos(phi),
+        ]
+    )  # (n_rays, 3)
 
     # March all rays in parallel — step size 0.5 voxels
     max_r = float(max(vs))
@@ -7851,9 +7893,12 @@ def _find_void_organelles(
 
     # Bounds check
     valid = (
-        (ix[:, :, 0] >= 0) & (ix[:, :, 0] < vs[0]) &
-        (ix[:, :, 1] >= 0) & (ix[:, :, 1] < vs[1]) &
-        (ix[:, :, 2] >= 0) & (ix[:, :, 2] < vs[2])
+        (ix[:, :, 0] >= 0)
+        & (ix[:, :, 0] < vs[0])
+        & (ix[:, :, 1] >= 0)
+        & (ix[:, :, 1] < vs[1])
+        & (ix[:, :, 2] >= 0)
+        & (ix[:, :, 2] < vs[2])
     )
 
     # Safe indices for look-up (out-of-bounds → 0, masked later)
@@ -7934,10 +7979,7 @@ def _find_void_center(
     center = (box_min + box_max) / 2
 
     if verbose:
-        print(
-            f"{_p} centre=({center[0]:.0f}, {center[1]:.0f}, "
-            f"{center[2]:.0f})"
-        )
+        print(f"{_p} centre=({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})")
 
     return center
 
@@ -8002,8 +8044,11 @@ def _find_void_bounding_box(
         # Collect the full profile, then find the steepest relative
         # drop — the soma/neurite boundary.  No fixed threshold.
         for direction in [-1, +1]:
-            rng = (range(vc_idx - 1, -1, -1) if direction == -1
-                   else range(vc_idx + 1, len(counts)))
+            rng = (
+                range(vc_idx - 1, -1, -1)
+                if direction == -1
+                else range(vc_idx + 1, len(counts))
+            )
             indices = list(rng)
             if not indices:
                 continue
@@ -8054,9 +8099,7 @@ def _section_contours(
     z: float,
 ) -> list[tuple[float, np.ndarray]]:
     """Return ``[(area, vertices_Nx3), ...]`` for each contour at *z*."""
-    section = mesh.section(
-        plane_origin=[0, 0, z], plane_normal=[0, 0, 1]
-    )
+    section = mesh.section(plane_origin=[0, 0, z], plane_normal=[0, 0, 1])
     if section is None:
         return []
     sv = section.vertices
@@ -8067,9 +8110,7 @@ def _section_contours(
             continue
         x, y = pts[:, 0], pts[:, 1]
         area = 0.5 * abs(
-            np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
-            + x[-1] * y[0]
-            - x[0] * y[-1]
+            np.sum(x[:-1] * y[1:] - x[1:] * y[:-1]) + x[-1] * y[0] - x[0] * y[-1]
         )
         contours.append((area, pts))
     return contours

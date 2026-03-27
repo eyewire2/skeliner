@@ -1481,7 +1481,7 @@ def z_section_grid(
     z_center = nucleus["center"][2]
     if z_span is None:
         z_lo, z_hi = nucleus["z_range"]
-        z_span = (z_hi - z_lo) * 1.5
+        z_span = (z_hi - z_lo) * 1.96
         z_span = max(z_span, 5000.0)  # at least 5 µm
 
     n_levels = max(4, int(np.ceil(z_span / z_step)))
