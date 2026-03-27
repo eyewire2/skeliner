@@ -7139,7 +7139,9 @@ def find_soma_from_nucleus(
     # Build face adjacency
     adj = _face_adjacency(mesh)
 
-    # BFS through non-soma face clusters, fill entrapped ones
+    # BFS through non-soma face clusters, fill entrapped ones.
+    # The 25% guard excludes the main mesh body (typically 60-80% of faces)
+    # while allowing large interior holes to be filled.
     non_soma_idx = set(np.where(~soma_face)[0].tolist())
     visited: set[int] = set()
     hole_count = 0
@@ -7169,7 +7171,7 @@ def find_soma_from_nucleus(
         enclosure = (n_soma_boundary / n_total_boundary
                      if n_total_boundary else 0)
         is_small = len(cluster) <= 500
-        is_entrapped = enclosure >= 0.99 and len(cluster) < n_faces * 0.05
+        is_entrapped = enclosure >= 0.99 and len(cluster) < n_faces * 0.25
         if (is_small and enclosure >= 0.5) or is_entrapped:
             for c in cluster:
                 soma_face[c] = True

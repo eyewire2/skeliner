@@ -1407,18 +1407,14 @@ def z_section(
                             color="goldenrod", linewidth=2.5,
                             zorder=5, label="nucleus void")
 
-    # Auto-zoom to soma cluster (convex hull bounds + padding)
+    # Auto-zoom centred on nucleus XY
     if nucleus is not None:
-        slices = nucleus["slices"]
-        dz = np.abs(slices[:, 0] - z)
-        nearest = int(np.argmin(dz))
-        z_step = np.median(np.diff(slices[:, 0])) if len(slices) > 1 else 500
-        if dz[nearest] <= z_step * 0.6:
-            vc = slices[nearest, 1:3]
-            # Zoom to 3× peak_r around void center
-            pad = nucleus["peak_r"] * 4
-            ax.set_xlim(vc[0] - pad, vc[0] + pad)
-            ax.set_ylim(vc[1] - pad, vc[1] + pad)
+        nc = nucleus["center"]
+        pad = nucleus["peak_r"] * 4
+        ax.set_xlim(nc[0] - pad, nc[0] + pad)
+        ax.set_ylim(nc[1] - pad, nc[1] + pad)
+        ax.plot(nc[0], nc[1], "+", color="red", markersize=10,
+                markeredgewidth=2, zorder=10)
 
     ax.set_aspect("equal")
     ax.set_title(f"Z = {z:.0f}  ({pts_xy.shape[0]} vertices)")
