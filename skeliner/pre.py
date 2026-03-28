@@ -6760,9 +6760,7 @@ def find_nucleus_center(
         n_levels = int((z_unique.max() - z_unique.min()) / 210)
         print(f"{_p} {len(verts):,} vertices, ~{n_levels} Z-levels")
 
-    raw, best, center, constrained_hulls = _z_scan(
-        verts, grid_res, z_tol, min_void_r, max_shift
-    )
+    raw, best, center = _z_scan(verts, grid_res, z_tol, min_void_r, max_shift)
 
     if best is None:
         if verbose:
@@ -6785,18 +6783,12 @@ def find_nucleus_center(
             f"peak_r={peak_r:.0f} nm, {len(best)} Z-levels"
         )
 
-    # Map constrained hulls from raw-index to Z-value keys
-    soma_hulls = {}
-    for i, poly in constrained_hulls.items():
-        soma_hulls[raw[i][0]] = poly
-
     return {
         "center": center,
         "z_range": (z_lo, z_hi),
         "peak_r": peak_r,
         "slices": slices_numeric,
         "contours": contours,
-        "soma_hulls": soma_hulls,
     }
 
 
@@ -6810,22 +6802,17 @@ def _z_scan(
     z_tol: float = 150.0,
     min_void_r: float = 500.0,
     max_shift: float = 3000.0,
-) -> tuple[list[tuple], list[int] | None, np.ndarray | None, dict]:
+) -> tuple[list[tuple], list[int] | None, np.ndarray | None]:
     """Shared Z-scan: cluster + void detection + spatial coherence.
 
-    Three-pass approach:
+    Two-pass approach:
     1. Per-Z independent clustering + void detection → find best chain.
     2. Hull-guided void detection for broken Z-levels near the chain.
-    3. IoU-based hull constraining: propagate from mid-chain outward,
-       clipping levels whose hull IoU with the previous level drops
-       below *min_iou* (removes neurite protrusions).
 
-    Returns ``(raw, best_run, nucleus_center, hulls)`` where *raw* is
-    the per-Z-level data ``[(z, cx, cy, void_r, void_xy, vert_indices,
+    Returns ``(raw, best_run, nucleus_center)`` where *raw* is the
+    per-Z-level data ``[(z, cx, cy, void_r, void_xy, vert_indices,
     soma_mask), ...]``, *best_run* is the indices into *raw* of the
-    nucleus chain (or None), *nucleus_center* is ``(3,)`` or None, and
-    *hulls* is a dict mapping chain index → Shapely Polygon (constrained
-    convex hull) or None if no chain.
+    nucleus chain (or None), and *nucleus_center* is ``(3,)`` or None.
     """
     from scipy.ndimage import binary_dilation, label
     from scipy.spatial import ConvexHull
@@ -7058,10 +7045,24 @@ def _z_scan(
         ]
     )
 
-    # --- Pass 3: neighbor-intersection hull constraining ---
-    # Build per-Z convex hulls for ALL levels with a soma cluster
-    # (not just the nucleus chain), then intersect each with expanded
-    # hulls from ±K neighbors to clip protrusions.
+    return raw, best, center
+
+
+def _constrain_hulls(
+    raw: list[tuple],
+    best: list[int],
+    center: np.ndarray,
+    verts: np.ndarray,
+) -> dict:
+    """Neighbor-intersection hull constraining (expensive).
+
+    Build per-Z convex hulls for ALL levels with a soma cluster
+    (not just the nucleus chain), then intersect each with expanded
+    hulls from ±K neighbors to clip neurite protrusions.
+
+    Returns a dict mapping raw-index → Shapely Polygon.
+    """
+    from scipy.spatial import ConvexHull
     from shapely.geometry import Polygon as _Poly
 
     # Ordered list of all levels with soma data
@@ -7142,9 +7143,8 @@ def _z_scan(
         dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
         if dist <= max_dist:
             filtered[i] = p
-    constrained_hulls = filtered
 
-    return raw, best, center, constrained_hulls
+    return filtered
 
 
 def find_soma_from_nucleus(
@@ -7188,7 +7188,7 @@ def find_soma_from_nucleus(
     if verbose:
         print(f"{_p} {len(verts):,} vertices")
 
-    raw, best, nc, constrained_hulls = _z_scan(verts, grid_res, z_tol)
+    raw, best, nc = _z_scan(verts, grid_res, z_tol)
 
     if nc is None:
         if verbose:
@@ -7203,8 +7203,8 @@ def find_soma_from_nucleus(
             f"r={peak_r:.0f}nm, {n_chain} Z-levels"
         )
 
-    # Use constrained hulls from _z_scan — covers all Z-levels
-    # with a soma cluster, not just the nucleus chain.
+    constrained_hulls = _constrain_hulls(raw, best, nc, verts)
+
     from shapely import prepare
 
     hull_polys: list[tuple[float, "Polygon"]] = []
