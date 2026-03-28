@@ -7137,29 +7137,65 @@ def _soma_hulls(
         except Exception:
             pass
 
-    # Keep only levels within 1.96× the nucleus Z-range AND whose
-    # hull centroid is near the nucleus XY.
-    nuc_z_lo = raw[best[0]][0]
-    nuc_z_hi = raw[best[-1]][0]
-    nuc_z_span = (nuc_z_hi - nuc_z_lo) * 1.96
-    nuc_z_mid = center[2]
-    soma_z_lo = nuc_z_mid - nuc_z_span / 2
-    soma_z_hi = nuc_z_mid + nuc_z_span / 2
-
+    # Walk outward from the nucleus chain in both Z-directions.
+    # Stop when the hull area drops well below the peak (soma is
+    # tapering into neurites).  If the area is still large at the
+    # mesh boundary, include everything — the soma is cut off by
+    # the segmentation volume, not by a natural taper.
     chain_areas = [hulls[i].area for i in best if i in hulls]
-    max_r = np.sqrt(max(chain_areas) / np.pi) if chain_areas else 5000
+    peak_area = max(chain_areas) if chain_areas else 0
+    max_r = np.sqrt(peak_area / np.pi) if peak_area > 0 else 5000
     max_dist = max_r * 1.5
+    # Area threshold: levels whose hull area drops below this are
+    # neurite-sized, not soma.  Neurite cross-sections are typically
+    # ~100× smaller than the soma peak.  A cutoff at 5% of peak
+    # cleanly separates them while keeping levels where the soma is
+    # cut off by the segmentation volume boundary.
+    area_cutoff = peak_area * 0.05
 
-    filtered = {}
-    for i, p in hulls.items():
-        if not (soma_z_lo <= raw[i][0] <= soma_z_hi):
-            continue
+    # Collect all levels with hulls, sorted by index
+    hull_levels = sorted(hulls.keys())
+
+    # Find the chain's position in hull_levels
+    chain_set = set(best)
+    chain_positions = [pos for pos, i in enumerate(hull_levels)
+                       if i in chain_set]
+    if not chain_positions:
+        return {}
+    mid_lo = min(chain_positions)
+    mid_hi = max(chain_positions)
+
+    # Walk outward: include levels whose area and centroid are
+    # still soma-like.  Stop at the first level that fails.
+    accepted = set()
+    for pos in range(mid_lo, mid_hi + 1):
+        accepted.add(hull_levels[pos])
+
+    # Walk downward
+    for pos in range(mid_lo - 1, -1, -1):
+        i = hull_levels[pos]
+        p = hulls[i]
+        if p.area < area_cutoff:
+            break
         cx, cy = p.centroid.x, p.centroid.y
         dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
-        if dist <= max_dist:
-            filtered[i] = p
+        if dist > max_dist:
+            break
+        accepted.add(i)
 
-    return filtered
+    # Walk upward
+    for pos in range(mid_hi + 1, len(hull_levels)):
+        i = hull_levels[pos]
+        p = hulls[i]
+        if p.area < area_cutoff:
+            break
+        cx, cy = p.centroid.x, p.centroid.y
+        dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
+        if dist > max_dist:
+            break
+        accepted.add(i)
+
+    return {i: hulls[i] for i in accepted}
 
 
 def find_soma_from_nucleus(
@@ -7252,6 +7288,15 @@ def find_soma_from_nucleus(
     hull_z = np.array([h[0] for h in expanded_polys])
     z_lo, z_hi = hull_z.min(), hull_z.max()
     n_z_hit = len(expanded_polys)
+
+    # Extend the classification range to the mesh boundary when the
+    # soma hull is still large at the edge — the soma is cut off by
+    # the segmentation volume, not by a natural taper.  Faces beyond
+    # the last hull are tested against the nearest (edge) hull.
+    mesh_z_lo = float(verts[:, 2].min())
+    mesh_z_hi = float(verts[:, 2].max())
+    z_lo = min(z_lo, mesh_z_lo)
+    z_hi = max(z_hi, mesh_z_hi)
 
     # Classify faces: centroid inside the nearest Z-level's contour → soma.
     faces = np.asarray(mesh.faces)
