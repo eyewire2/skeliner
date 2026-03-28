@@ -281,13 +281,14 @@
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
                 <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
 
-                <span style="position:relative; display:inline-block; margin-left:4px">
-                    <button id="detectSomaBtn">Soma &#9662;</button>
-                    <div id="somaMenu" style="display:none; position:absolute; top:100%; left:0; z-index:100; background:#2a2a2a; border:1px solid #555; border-radius:4px; padding:2px 0; min-width:140px">
-                        <div class="soma-opt" data-method="z_contour" style="padding:4px 10px; cursor:pointer; color:#ddd">Soma (z_contour)</div>
-                        <div class="soma-opt" data-method="new" style="padding:4px 10px; cursor:pointer; color:#ddd">Soma (new)</div>
-                        <div class="soma-opt" data-method="alt" style="padding:4px 10px; cursor:pointer; color:#ddd">Soma (alt)</div>
-                        <div class="soma-opt" data-method="deprecated" style="padding:4px 10px; cursor:pointer; color:#ddd">Soma (old)</div>
+                <span style="position:relative;display:inline-block;margin-left:4px">
+                    <button id="detectSomaBtn">Soma</button>
+                    <div id="somaMenu" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:4px;background:rgba(0,0,0,0.85);border:1px solid #555;border-radius:4px;padding:6px 8px;white-space:nowrap;z-index:300">
+                        <div style="color:#888;font-size:10px;margin-bottom:4px">Detect method:</div>
+                        <button class="soma-opt" data-method="z_contour" style="display:block;width:100%;text-align:left;margin-bottom:2px">Z-contour</button>
+                        <button class="soma-opt" data-method="new" style="display:block;width:100%;text-align:left;margin-bottom:2px">New</button>
+                        <button class="soma-opt" data-method="alt" style="display:block;width:100%;text-align:left;margin-bottom:2px">Alt</button>
+                        <button class="soma-opt" data-method="deprecated" style="display:block;width:100%;text-align:left">Old</button>
                     </div>
                 </span>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
