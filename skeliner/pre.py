@@ -6806,8 +6806,13 @@ def _z_scan(
     """Shared Z-scan: cluster + void detection + spatial coherence.
 
     Two-pass approach:
+
     1. Per-Z independent clustering + void detection → find best chain.
-    2. Hull-guided void detection for broken Z-levels near the chain.
+    2. Hull-guided void detection for Z-levels where the soma ring has
+       holes (mesh artifacts / missing faces).  The gap breaks the
+       4-ray enclosure test, so the void goes undetected.  Pass 2
+       borrows the convex hull from the nearest good neighbor to close
+       the gap and recover the void.
 
     Returns ``(raw, best_run, nucleus_center)`` where *raw* is the
     per-Z-level data ``[(z, cx, cy, void_r, void_xy, vert_indices,
@@ -7056,9 +7061,12 @@ def _constrain_hulls(
 ) -> dict:
     """Neighbor-intersection hull constraining (expensive).
 
-    Build per-Z convex hulls for ALL levels with a soma cluster
-    (not just the nucleus chain), then intersect each with expanded
-    hulls from ±K neighbors to clip neurite protrusions.
+    At some Z-levels neurites sprout horizontally from the soma,
+    inflating the convex hull well beyond the true soma boundary.
+    This function clips each level's hull by intersecting it with
+    slightly expanded hulls from ±K neighboring levels — regions
+    that only appear at one level (neurite protrusions) get cut,
+    while the shared soma core is preserved.
 
     Returns a dict mapping raw-index → Shapely Polygon.
     """
