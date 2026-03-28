@@ -2081,9 +2081,14 @@ def find_soma_via_ring_cutoff(
                 soma.verts = sv
 
     # ── 7. Exclude organelle vertices from final soma ───────────
+    #       Only remove vertices that appear exclusively on organelle
+    #       faces.  Rim vertices (shared between organelle and
+    #       non-organelle faces) must stay in the soma.
     if organelles.any():
         org_verts = set(np.unique(mesh.faces[organelles]).tolist())
-        soma_set = set(soma.verts.tolist()) - org_verts
+        non_org_verts = set(np.unique(mesh.faces[~organelles]).tolist())
+        exclusive_org = org_verts - non_org_verts
+        soma_set = set(soma.verts.tolist()) - exclusive_org
         n_removed = len(soma.verts) - len(soma_set)
         if n_removed > 0:
             sv = np.fromiter(sorted(soma_set), dtype=np.intp)
