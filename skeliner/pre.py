@@ -7208,7 +7208,22 @@ def _soma_hulls(
     cutoff_hi = min_chain_area * 0.5
 
     # First walk with low cutoff to determine which sides are bounded.
-    _, extend_lo, extend_hi = _walk(cutoff_lo)
+    acc_probe, extend_lo, extend_hi = _walk(cutoff_lo)
+
+    # Override: if the soma walk reached close to the mesh boundary,
+    # the soma is at the edge of the segmentation volume — extend
+    # regardless of why the walk stopped.
+    mesh_z_lo = float(verts[:, 2].min())
+    mesh_z_hi = float(verts[:, 2].max())
+    z_step = 210.0
+    if not extend_lo and acc_probe:
+        lo_z = min(raw[i][0] for i in acc_probe)
+        if lo_z - mesh_z_lo < z_step * 3:
+            extend_lo = True
+    if not extend_hi and acc_probe:
+        hi_z = max(raw[i][0] for i in acc_probe)
+        if mesh_z_hi - hi_z < z_step * 3:
+            extend_hi = True
 
     # Second walk: use tight cutoff for bounded sides, low for unbounded.
     # If both sides have the same cutoff, one walk suffices.
