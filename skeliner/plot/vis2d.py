@@ -14,7 +14,7 @@ from scipy.stats import binned_statistic_2d
 from ..dataclass import Skeleton
 
 __all__ = ["projection", "threeviews", "details", "node_details",
-           "z_section", "z_section_grid"]
+           "z_section", "z_section_grid", "soma_diagnostics"]
 
 
 Number = int | float
@@ -1543,5 +1543,131 @@ def z_section_grid(
     for j in range(n_levels, len(axes_flat)):
         axes_flat[j].set_visible(False)
 
+    fig.tight_layout()
+    return fig, axes
+
+
+def soma_diagnostics(
+    mesh: trimesh.Trimesh,
+    *,
+    nucleus: dict | None = None,
+    soma: "Soma | None" = None,
+    organelles: np.ndarray | None = None,
+    planes: tuple[str, str, str] = ("xy", "xz", "zy"),
+    figsize: tuple[float, float] = (12, 12),
+) -> tuple[Figure, list[Axes]]:
+    """Three orthogonal projections of soma detection results.
+
+    Shows mesh vertices in gray, soma vertices highlighted, nucleus
+    center marked, nucleus Z-range indicated, and soma ellipsoid
+    outline.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    nucleus : dict or None
+        Result from :func:`find_nucleus_center`.
+    soma : Soma or None
+        Result from any soma detection method.
+    organelles : np.ndarray or None
+        Boolean face mask of organelle faces.
+    planes : tuple of str
+        Three plane codes for the panels.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    fig, axes : Figure, list[Axes]
+    """
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+
+    # 2×2 grid: top-left=XZ, top-right=empty, bottom-left=XY, bottom-right=ZY
+    # Axes alignment: XY bottom-left shares X with XZ above, Y with ZY right.
+    fig, ax_grid = plt.subplots(2, 2, figsize=figsize)
+    # Map: XY→(1,0), XZ→(0,0), ZY→(1,1), empty→(0,1)
+    panel_pos = {"xy": (1, 0), "xz": (0, 0), "zy": (1, 1)}
+    axes = []
+    for plane in planes:
+        r, c = panel_pos[plane]
+        axes.append(ax_grid[r, c])
+    ax_grid[0, 1].set_visible(False)
+
+    for ax, plane in zip(axes, planes):
+        ix, iy = _PLANE_AXES[plane]
+        xlab, ylab = _plane_axes(plane)
+
+        # All mesh vertices — light gray
+        ax.scatter(
+            verts[:, ix], verts[:, iy],
+            c="#dddddd", s=0.3, alpha=0.2, rasterized=True, zorder=1,
+        )
+
+        # Soma vertices
+        if soma is not None and len(soma.verts) > 0:
+            sv = verts[soma.verts]
+            ax.scatter(
+                sv[:, ix], sv[:, iy],
+                c="#d4a843", s=0.8, alpha=0.5, rasterized=True, zorder=3,
+                label="soma",
+            )
+
+        # Organelle face centroids (drawn after soma, lower alpha)
+        if organelles is not None and organelles.any():
+            org_centroids = verts[faces[organelles]].mean(axis=1)
+            ax.scatter(
+                org_centroids[:, ix], org_centroids[:, iy],
+                c="red", s=0.3, alpha=0.15, rasterized=True, zorder=2,
+                label="organelles",
+            )
+            # Soma ellipsoid outline
+            ell = _soma_ellipse2d(soma, plane)
+            ell.set_edgecolor("#d4a843")
+            ell.set_linewidth(1.5)
+            ax.add_patch(ell)
+
+        # Nucleus center + z_range
+        if nucleus is not None:
+            nc = nucleus["center"]
+            ax.plot(
+                nc[ix], nc[iy], "+", color="cyan",
+                markersize=12, markeredgewidth=2, zorder=10,
+            )
+            # Z-range lines on planes that show Z
+            if 2 in (ix, iy):
+                z_lo, z_hi = nucleus["z_range"]
+                z_ax = ix if ix == 2 else iy
+                other_ax = iy if z_ax == ix else ix
+                for zv in (z_lo, z_hi):
+                    if z_ax == ix:
+                        ax.axvline(zv, color="cyan", linewidth=0.8,
+                                   alpha=0.6, linestyle="--")
+                    else:
+                        ax.axhline(zv, color="cyan", linewidth=0.8,
+                                   alpha=0.6, linestyle="--")
+
+        # Zoom to soma region with generous padding
+        if soma is not None and len(soma.verts) > 0:
+            pad = max(soma.axes) * 1.5
+            cx, cy = soma.center[ix], soma.center[iy]
+        elif nucleus is not None:
+            pad = nucleus["peak_r"] * 8
+            cx, cy = nucleus["center"][ix], nucleus["center"][iy]
+        else:
+            pad = None
+
+        if pad is not None:
+            ax.set_xlim(cx - pad, cx + pad)
+            ax.set_ylim(cy - pad, cy + pad)
+
+        ax.set_aspect("equal")
+        ax.set_xlabel(xlab)
+        ax.set_ylabel(ylab)
+        ax.set_title(plane.upper())
+        ax.grid(True, alpha=0.15)
+
+    axes[0].legend(fontsize=7, loc="upper right", markerscale=5)
     fig.tight_layout()
     return fig, axes
