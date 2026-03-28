@@ -7059,7 +7059,7 @@ def _soma_hulls(
     center: np.ndarray,
     verts: np.ndarray,
     grid_res: float = 200.0,
-) -> dict:
+) -> tuple[dict, bool, bool]:
     """Build per-Z soma hulls with neurite protrusions stripped.
 
     For each Z-level with a soma cluster, rasterizes the soma vertices,
@@ -7068,7 +7068,11 @@ def _soma_hulls(
     protrusions).  The convex hull is built from the surviving
     (soma-only) grid cells.
 
-    Returns a dict mapping raw-index → Shapely Polygon.
+    Returns ``(hulls, extend_lo, extend_hi)`` where *hulls* is a dict
+    mapping raw-index → Shapely Polygon, and *extend_lo* / *extend_hi*
+    indicate whether the soma extends to the mesh boundary on each side
+    (True = nothing beyond the soma, extend to mesh edge; False = soma
+    is bounded by neurites, don't extend).
     """
     from scipy.ndimage import (binary_dilation, binary_erosion,
                                 binary_fill_holes, distance_transform_edt)
@@ -7146,13 +7150,6 @@ def _soma_hulls(
     peak_area = max(chain_areas) if chain_areas else 0
     max_r = np.sqrt(peak_area / np.pi) if peak_area > 0 else 5000
     max_dist = max_r * 1.5
-    # Area threshold: levels whose hull area drops below this are
-    # neurite-sized, not soma.  Neurite cross-sections are typically
-    # ~100× smaller than the soma peak.  A cutoff at 5% of peak
-    # cleanly separates them while keeping levels where the soma is
-    # cut off by the segmentation volume boundary.
-    area_cutoff = peak_area * 0.05
-
     # Collect all levels with hulls, sorted by index
     hull_levels = sorted(hulls.keys())
 
@@ -7161,41 +7158,92 @@ def _soma_hulls(
     chain_positions = [pos for pos, i in enumerate(hull_levels)
                        if i in chain_set]
     if not chain_positions:
-        return {}
+        return {}, False, False
     mid_lo = min(chain_positions)
     mid_hi = max(chain_positions)
 
-    # Walk outward: include levels whose area and centroid are
-    # still soma-like.  Stop at the first level that fails.
-    accepted = set()
-    for pos in range(mid_lo, mid_hi + 1):
-        accepted.add(hull_levels[pos])
+    def _walk(cutoff):
+        """Walk outward from the chain, return (accepted, ext_lo, ext_hi)."""
+        acc = set()
+        for pos in range(mid_lo, mid_hi + 1):
+            acc.add(hull_levels[pos])
 
-    # Walk downward
-    for pos in range(mid_lo - 1, -1, -1):
-        i = hull_levels[pos]
-        p = hulls[i]
-        if p.area < area_cutoff:
-            break
-        cx, cy = p.centroid.x, p.centroid.y
-        dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
-        if dist > max_dist:
-            break
-        accepted.add(i)
+        e_lo = True
+        for pos in range(mid_lo - 1, -1, -1):
+            i = hull_levels[pos]
+            p = hulls[i]
+            if p.area < cutoff:
+                e_lo = False
+                break
+            cx, cy = p.centroid.x, p.centroid.y
+            dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
+            if dist > max_dist:
+                e_lo = False
+                break
+            acc.add(i)
 
-    # Walk upward
-    for pos in range(mid_hi + 1, len(hull_levels)):
-        i = hull_levels[pos]
-        p = hulls[i]
-        if p.area < area_cutoff:
-            break
-        cx, cy = p.centroid.x, p.centroid.y
-        dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
-        if dist > max_dist:
-            break
-        accepted.add(i)
+        e_hi = True
+        for pos in range(mid_hi + 1, len(hull_levels)):
+            i = hull_levels[pos]
+            p = hulls[i]
+            if p.area < cutoff:
+                e_hi = False
+                break
+            cx, cy = p.centroid.x, p.centroid.y
+            dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
+            if dist > max_dist:
+                e_hi = False
+                break
+            acc.add(i)
 
-    return {i: hulls[i] for i in accepted}
+        return acc, e_lo, e_hi
+
+    # Two area cutoffs derived from the data:
+    # - Low cutoff (5% of peak): for sides where the soma extends to
+    #   the mesh boundary — keeps levels that are still clearly soma.
+    # - High cutoff (50% of min chain area): for sides bounded by
+    #   neurites — stops before neurite-sized levels.
+    cutoff_lo = peak_area * 0.05
+    min_chain_area = min(chain_areas) if chain_areas else peak_area
+    cutoff_hi = min_chain_area * 0.5
+
+    # First walk with low cutoff to determine which sides are bounded.
+    _, extend_lo, extend_hi = _walk(cutoff_lo)
+
+    # Second walk: use tight cutoff for bounded sides, low for unbounded.
+    # If both sides have the same cutoff, one walk suffices.
+    if extend_lo == extend_hi:
+        cutoff = cutoff_lo if extend_lo else cutoff_hi
+        accepted, _, _ = _walk(cutoff)
+    else:
+        # Different cutoffs per side — walk with tight cutoff, then
+        # re-extend the unbounded side with the low cutoff.
+        accepted, _, _ = _walk(cutoff_hi)
+        # Re-walk the unbounded side with the low cutoff
+        if extend_lo:
+            for pos in range(mid_lo - 1, -1, -1):
+                i = hull_levels[pos]
+                p = hulls[i]
+                if p.area < cutoff_lo:
+                    break
+                cx, cy = p.centroid.x, p.centroid.y
+                dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
+                if dist > max_dist:
+                    break
+                accepted.add(i)
+        if extend_hi:
+            for pos in range(mid_hi + 1, len(hull_levels)):
+                i = hull_levels[pos]
+                p = hulls[i]
+                if p.area < cutoff_lo:
+                    break
+                cx, cy = p.centroid.x, p.centroid.y
+                dist = np.sqrt((cx - center[0]) ** 2 + (cy - center[1]) ** 2)
+                if dist > max_dist:
+                    break
+                accepted.add(i)
+
+    return {i: hulls[i] for i in accepted}, extend_lo, extend_hi
 
 
 def find_soma_from_nucleus(
@@ -7254,7 +7302,7 @@ def find_soma_from_nucleus(
             f"r={peak_r:.0f}nm, {n_chain} Z-levels"
         )
 
-    soma_hulls = _soma_hulls(raw, best, nc, verts, grid_res)
+    soma_hulls, extend_lo, extend_hi = _soma_hulls(raw, best, nc, verts, grid_res)
 
     from shapely import prepare
 
@@ -7274,12 +7322,12 @@ def find_soma_from_nucleus(
             print(f"{_p} no soma contours found")
         return None
 
-    # Expand each hull by 20% to capture surface faces at the
-    # contour edge (organelle folds, junction clipping margin).
+    # Small expansion to account for grid-resolution tolerance.
+    # The hull is built from grid cell centres (grid_res=200nm), so
+    # surface faces up to ~1 cell away may be just outside.
     expanded_polys: list[tuple[float, "Polygon"]] = []
     for z_val, poly in hull_polys:
-        r_eq = np.sqrt(poly.area / np.pi)
-        ep = poly.buffer(r_eq * 0.2)
+        ep = poly.buffer(grid_res)
         if not ep.is_valid:
             ep = ep.buffer(0)
         prepare(ep)
@@ -7289,14 +7337,14 @@ def find_soma_from_nucleus(
     z_lo, z_hi = hull_z.min(), hull_z.max()
     n_z_hit = len(expanded_polys)
 
-    # Extend the classification range to the mesh boundary when the
-    # soma hull is still large at the edge — the soma is cut off by
-    # the segmentation volume, not by a natural taper.  Faces beyond
-    # the last hull are tested against the nearest (edge) hull.
-    mesh_z_lo = float(verts[:, 2].min())
-    mesh_z_hi = float(verts[:, 2].max())
-    z_lo = min(z_lo, mesh_z_lo)
-    z_hi = max(z_hi, mesh_z_hi)
+    # Extend the classification range to the mesh boundary on sides
+    # where the soma walk didn't encounter a natural taper (nothing
+    # beyond the soma — it's cut off by the segmentation volume).
+    # Faces beyond the last hull are tested against the nearest hull.
+    if extend_lo:
+        z_lo = float(verts[:, 2].min())
+    if extend_hi:
+        z_hi = float(verts[:, 2].max())
 
     # Classify faces: centroid inside the nearest Z-level's contour → soma.
     faces = np.asarray(mesh.faces)
