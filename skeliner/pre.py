@@ -1795,6 +1795,17 @@ def find_soma_via_ring_cutoff(
             cutoff = lv
             break
 
+    # Under-detection guard: the soma must at least span the nucleus
+    # Z-extent.  If it doesn't, extend the cutoff.
+    min_cutoff = max(int(z_span / avg_edge), 1)
+    if cutoff < min_cutoff:
+        if verbose:
+            print(
+                f"[skeliner.pre] Soma (ring): cutoff {cutoff} < "
+                f"min_cutoff {min_cutoff} (z_span/avg_edge), extending"
+            )
+        cutoff = min_cutoff
+
     if verbose:
         print(
             f"[skeliner.pre] Soma (ring): peak ring {peak_ring}, "
