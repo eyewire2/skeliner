@@ -288,7 +288,7 @@
                         <button class="soma-opt" data-method="z_contour" style="display:block;width:100%;text-align:left;margin-bottom:2px">Z-contour</button>
                         <button class="soma-opt" data-method="new" style="display:block;width:100%;text-align:left;margin-bottom:2px">New</button>
                         <button class="soma-opt" data-method="alt" style="display:block;width:100%;text-align:left;margin-bottom:2px">Alt</button>
-                        <button class="soma-opt" data-method="deprecated" style="display:block;width:100%;text-align:left">Old</button>
+                        <button class="soma-opt" data-method="ring_cutoff" style="display:block;width:100%;text-align:left">Ring cutoff</button>
                     </div>
                 </span>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
@@ -1585,7 +1585,7 @@ let meshCentroid = [0, 0, 0];
 
             async function runDetectSoma(method = "new") {
                 const btn = document.getElementById("detectSomaBtn");
-                const label = method === "deprecated" ? "old" : "new";
+                const label = method === "new" ? "new" : method;
                 btn.textContent = `Detecting (${label})...`;
                 btn.disabled = true;
                 try {

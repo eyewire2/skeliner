@@ -1625,24 +1625,19 @@ def _assign_soma_verts(
     return soma
 
 
-def find_soma_deprecated(
+def find_soma_via_ring_cutoff(
     mesh: trimesh.Trimesh,
     *,
     organelles: np.ndarray | None = None,
     verbose: bool = False,
     mesh_stats: tuple | None = None,
 ) -> Soma | None:
-    """**Deprecated** — use :func:`find_soma` instead.
+    """Soma detection via BFS ring analysis + Otsu cutoff.
 
-    Original soma detection via BFS + Otsu ring cutoff.  Replaced by
-    the per-tip neurite exclusion approach which handles branching
-    neurites and non-monotonic tube widths.
-
-    Organelles (mitochondria, ER, nucleus membrane) are densely packed
-    inside the soma.  Their centroids cluster tightly in 3-D, giving a
-    robust soma centre.  A BFS flood on the main-component surface
-    grows outward from that centre; the soma boundary is where the
-    largest connected ring component peaks and drops (Otsu).
+    Uses :func:`find_nucleus_center` to locate the soma centre, then
+    grows a BFS flood on the main-component surface outward from that
+    centre.  The soma boundary is where the largest connected ring
+    component peaks and drops (Otsu on post-peak sizes).
 
     All internal thresholds are derived from the mesh data.
 
@@ -1664,7 +1659,8 @@ def find_soma_deprecated(
     Returns
     -------
     Soma or None
-        Fitted ellipsoidal soma, or *None* if too few indicators exist.
+        Fitted ellipsoidal soma, or *None* if no nucleus is found or
+        too few indicators exist.
     """
     from collections import deque
 
@@ -1673,83 +1669,27 @@ def find_soma_deprecated(
     else:
         labels, main = _face_edge_components(mesh)
 
-    # ── 1. Locate organelle clusters and compute centroids ──────
+    # ── 1. Find soma centre via nucleus detection ──────────────
+    nuc = find_nucleus_center(mesh, verbose=verbose)
+    if nuc is None:
+        if verbose:
+            print("[skeliner.pre] Soma (ring): no nucleus found")
+        return None
+    center = nuc["center"]
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma (ring): nucleus center="
+            f"({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})"
+        )
+
+    # ── 1b. Organelle mask (needed for BFS adjacency) ──────────
     if organelles is None:
         pocket, isolated = find_organelles(mesh, verbose=verbose)
         organelles = pocket | isolated
     if organelles.sum() == 0:
         if verbose:
-            print("[skeliner.pre] Soma: no organelles found")
+            print("[skeliner.pre] Soma (ring): no organelles found")
         return None
-
-    org_fi = np.where(organelles)[0]
-    org_labels, _ = _face_edge_components(
-        trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces[org_fi], process=False)
-    )
-    centroids = []
-    for cid in np.unique(org_labels):
-        local_fi = org_fi[org_labels == cid]
-        verts = np.unique(mesh.faces[local_fi])
-        centroids.append(mesh.vertices[verts].mean(axis=0))
-
-    centroids = np.asarray(centroids)
-    if verbose:
-        print(
-            f"[skeliner.pre] Soma: {organelles.sum():,} organelle faces, "
-            f"{len(centroids)} clusters"
-        )
-    if len(centroids) < 3:
-        if verbose:
-            print("[skeliner.pre] Soma: too few organelle clusters")
-        return None
-
-    # ── 1b. Find the dense cluster of fragments (soma) ──────────
-    #        Build a proximity graph: Otsu on nearest-neighbour
-    #        distances gives a data-driven radius.  The largest
-    #        connected component is the soma fragment cluster.
-
-    tree = KDTree(centroids)
-    dd, _ = tree.query(centroids, k=min(2, len(centroids)))
-    nn_dists = dd[:, 1] if dd.ndim > 1 else dd
-    nn_thresh, _ = _otsu_threshold(nn_dists)
-
-    pairs = tree.query_pairs(r=nn_thresh)
-    prox_adj: dict[int, set[int]] = defaultdict(set)
-    for i, j in pairs:
-        prox_adj[i].add(j)
-        prox_adj[j].add(i)
-
-    visited_prox: set[int] = set()
-    best_comp: list[int] = []
-    for start in range(len(centroids)):
-        if start in visited_prox:
-            continue
-        comp: list[int] = []
-        pq = deque([start])
-        while pq:
-            v = pq.popleft()
-            if v in visited_prox:
-                continue
-            visited_prox.add(v)
-            comp.append(v)
-            for nv in prox_adj[v]:
-                if nv not in visited_prox:
-                    pq.append(nv)
-        if len(comp) > len(best_comp):
-            best_comp = comp
-
-    core = centroids[best_comp]
-    if len(core) < 3:
-        if verbose:
-            print("[skeliner.pre] Soma: no dense fragment cluster found")
-        return None
-
-    center = np.median(core, axis=0)
-    if verbose:
-        print(
-            f"[skeliner.pre] Soma: dense cluster {len(core)}/{len(centroids)} "
-            f"fragments, nn_thresh={nn_thresh:.0f}"
-        )
 
     # ── 2. Build main-component vertex adjacency ─────────────────────
     if verbose:
@@ -2176,14 +2116,13 @@ def find_soma_deprecated(
 
     if verbose:
         print(
-            f"[skeliner.pre] Soma: center=["
+            f"[skeliner.pre] Soma (ring): center=["
             f"{soma.center[0]:.0f}, {soma.center[1]:.0f}, "
             f"{soma.center[2]:.0f}], "
             f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
             f"{soma.axes[2]:.0f}], "
             f"{len(soma.verts):,} surface verts "
-            f"({len(core)}/{len(centroids)} indicator fragments, "
-            f"cutoff ring {cutoff})"
+            f"(cutoff ring {cutoff})"
         )
 
     return soma

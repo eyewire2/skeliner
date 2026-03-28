@@ -1030,7 +1030,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         """Run soma detection and write result to annotations.
 
         Accepts optional JSON body ``{"method": "new"}`` or
-        ``{"method": "deprecated"}``.  Defaults to the new per-tip
+        ``{"method": "ring_cutoff"}``.  Defaults to the new per-tip
         neurite-exclusion method.
         """
         if mesh_state["mesh"] is None:
@@ -1046,9 +1046,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         except Exception:
             pass
 
-        if method == "deprecated":
-            from skeliner.pre import find_soma_deprecated as _find
-            label_prefix = "soma (deprecated)"
+        if method == "ring_cutoff":
+            from skeliner.pre import find_soma_via_ring_cutoff as _find
+            label_prefix = "soma (ring_cutoff)"
             color = [0.9, 0.7, 0.3]
         elif method == "alt":
             from skeliner.pre import find_soma_alt as _find
