@@ -1247,11 +1247,12 @@ def node_details(
 
 def z_section(
     mesh: trimesh.Trimesh,
-    z: float,
+    z: float | None = None,
     *,
     z_tol: float = 150.0,
     organelles: np.ndarray | None = None,
     nucleus: dict | None = None,
+    soma_hull: bool = False,
     ax: Axes | None = None,
     figsize: tuple[float, float] = (10, 10),
 ) -> tuple[Figure, Axes]:
@@ -1275,6 +1276,10 @@ def z_section(
     nucleus : dict or None
         Result dict from :func:`find_nucleus_center`.  If provided,
         the per-Z void circle is drawn at the nearest matching slice.
+    soma_hull : bool
+        If True, apply fill + morphological opening to strip neurite
+        protrusions before building the outer contour hull.  This
+        matches the hull computation used by ``find_soma_from_nucleus``.
     ax : Axes or None
         Matplotlib axes to draw on.  Created if None.
     figsize : tuple
@@ -1284,6 +1289,12 @@ def z_section(
     -------
     fig, ax : Figure, Axes
     """
+    if z is None:
+        if nucleus is not None:
+            z = nucleus["center"][2]
+        else:
+            raise ValueError("z must be provided when nucleus is None")
+
     from scipy.ndimage import binary_dilation, label
     from scipy.spatial import ConvexHull
 
@@ -1316,30 +1327,14 @@ def z_section(
             ax.scatter(oc[:, 0], oc[:, 1], c="red", s=2, alpha=0.4,
                        zorder=2, rasterized=True, label="organelles")
 
-    # Outer contour — use pre-computed constrained hull from nucleus
-    # dict when available; otherwise fall back to local convex hull.
+    # Outer contour — rasterize, find largest cluster, convex hull.
+    # When soma_hull=True, fill interior + morphological open to strip
+    # neurite protrusions before hull (matches _soma_hulls()).
     soma_pts = None
-    hull_poly = None  # Shapely polygon for clipping inner contour
-    soma_hulls = nucleus.get("soma_hulls") if nucleus is not None else None
-    if soma_hulls is not None:
-        # Find the nearest Z-level hull
-        hull_zs = np.array(sorted(soma_hulls.keys()))
-        if len(hull_zs) > 0:
-            nearest_z = hull_zs[np.argmin(np.abs(hull_zs - z))]
-            hull_poly = soma_hulls[nearest_z]
-            if hull_poly is not None and hasattr(hull_poly, "exterior"):
-                cc = np.array(hull_poly.exterior.coords)
-                ax.plot(cc[:, 0], cc[:, 1], color="green",
-                        linewidth=2.5, zorder=5, label="outer contour")
-                # Build soma_pts for inner contour sweep
-                from shapely.geometry import Point as _Pt
-                soma_pts = np.array([
-                    p for p in pts_xy
-                    if hull_poly.contains(_Pt(p[0], p[1]))
-                ])
-    if soma_pts is None and len(pts_xy) >= 4:
+    if len(pts_xy) >= 4:
         try:
             grid_res = 200.0
+            struct3 = np.ones((3, 3), dtype=bool)
             xy_min = pts_xy.min(axis=0) - grid_res * 3
             nx = int((pts_xy[:, 0].max() - xy_min[0] + grid_res * 6)
                      / grid_res) + 1
@@ -1352,20 +1347,57 @@ def z_section(
                 0, ny - 1)
             occ[ix, iy] = True
 
-            dilated = binary_dilation(occ, np.ones((3, 3), dtype=bool))
+            dilated = binary_dilation(occ, struct3)
             labeled, n_labels = label(dilated)
             if n_labels > 0:
                 sizes = np.bincount(labeled.ravel())[1:]
                 vert_labels = labeled[ix, iy]
                 lid = int(np.argmax(sizes)) + 1
+                soma_region = labeled == lid
                 soma_mask = vert_labels == lid
-                soma_pts = pts_xy[soma_mask]
-                if len(soma_pts) >= 4:
-                    hull = ConvexHull(soma_pts)
-                    hv = soma_pts[hull.vertices]
-                    hv_closed = np.vstack([hv, hv[0:1]])
-                    ax.plot(hv_closed[:, 0], hv_closed[:, 1], color="green",
-                            linewidth=2.5, zorder=5, label="outer contour")
+
+                if soma_hull:
+                    from scipy.ndimage import (binary_erosion,
+                                               binary_fill_holes,
+                                               distance_transform_edt)
+                    closed = binary_dilation(occ & soma_region, struct3,
+                                             iterations=2)
+                    closed = binary_erosion(closed, struct3, iterations=2)
+                    filled = binary_fill_holes(closed)
+                    dt = distance_transform_edt(filled)
+                    peak_dist = dt.max()
+                    if peak_dist >= 6:
+                        r = max(int(peak_dist * 0.3), 3)
+                        se = np.zeros((2 * r + 1, 2 * r + 1), dtype=bool)
+                        yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
+                        se[xx ** 2 + yy ** 2 <= r ** 2] = True
+                        opened = binary_erosion(filled, se)
+                        opened = binary_dilation(opened, se)
+                        if opened.any():
+                            gi, gj = np.where(opened)
+                            hull_pts = np.column_stack([
+                                xy_min[0] + gi * grid_res + grid_res / 2,
+                                xy_min[1] + gj * grid_res + grid_res / 2,
+                            ])
+                            hull = ConvexHull(hull_pts)
+                            hv = hull_pts[hull.vertices]
+                            hv_closed = np.vstack([hv, hv[0:1]])
+                            ax.plot(hv_closed[:, 0], hv_closed[:, 1],
+                                    color="green", linewidth=2.5, zorder=5,
+                                    label="outer contour")
+                            soma_mask = soma_mask & opened[ix, iy]
+                            soma_pts = pts_xy[soma_mask]
+
+                # Fallback: raw convex hull of largest cluster
+                if soma_pts is None:
+                    soma_pts = pts_xy[soma_mask]
+                    if len(soma_pts) >= 4:
+                        hull = ConvexHull(soma_pts)
+                        hv = soma_pts[hull.vertices]
+                        hv_closed = np.vstack([hv, hv[0:1]])
+                        ax.plot(hv_closed[:, 0], hv_closed[:, 1],
+                                color="green", linewidth=2.5, zorder=5,
+                                label="outer contour")
         except Exception:
             pass
 
@@ -1449,6 +1481,7 @@ def z_section_grid(
     z_span: float | None = None,
     z_tol: float = 150.0,
     organelles: np.ndarray | None = None,
+    soma_hull: bool = False,
     figsize: tuple[float, float] | None = None,
 ) -> tuple[Figure, np.ndarray]:
     """Plot a grid of Z cross-sections spanning the nucleus Z-range.
@@ -1503,6 +1536,7 @@ def z_section_grid(
             z_tol=z_tol,
             organelles=organelles,
             nucleus=nucleus,
+            soma_hull=soma_hull,
             ax=axes_flat[i],
         )
 
