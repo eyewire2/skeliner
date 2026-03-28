@@ -1682,18 +1682,14 @@ def find_soma_via_ring_cutoff(
             f"({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})"
         )
 
-    # ── 1b. Organelle mask (needed for BFS adjacency) ──────────
+    # ── 1b. Organelle mask (for cleaner BFS adjacency) ──────────
     if organelles is None:
         pocket, isolated = find_organelles(mesh, verbose=verbose)
         organelles = pocket | isolated
-    if organelles.sum() == 0:
-        if verbose:
-            print("[skeliner.pre] Soma (ring): no organelles found")
-        return None
 
     # ── 2. Build main-component vertex adjacency ─────────────────────
     if verbose:
-        print("[skeliner.pre] Soma: building vertex adjacency...")
+        print("[skeliner.pre] Soma (ring): building vertex adjacency...")
     main_fi = np.where(labels == main)[0]
     adj: dict[int, list[int]] = defaultdict(list)
     for fi in main_fi:
@@ -1707,7 +1703,7 @@ def find_soma_via_ring_cutoff(
     # Organelle pockets inside the soma create topological shortcuts
     # that fragment ring components and cause premature cutoff.
     adj_bfs: dict[int, list[int]] = defaultdict(list)
-    non_org_main_fi = main_fi[~organelles[main_fi]]
+    non_org_main_fi = main_fi[~organelles[main_fi]] if organelles.any() else main_fi
     for fi in non_org_main_fi:
         v = mesh.faces[fi]
         for i in range(3):
@@ -1786,41 +1782,11 @@ def find_soma_via_ring_cutoff(
             cutoff = lv
             break
 
-    # ── 4b. Validate: is the wide region a localized bulge (soma)?
-    #        Otsu splits ring component sizes into wide vs narrow.
-    #        spread_ratio = std(wide ring positions) / std(all ring positions).
-    #        For a soma this is small (wide rings concentrate at one spot).
-    #        For a uniform-width cell it approaches 1.0.
-    #        Tested on 28 cells (BCs + SACs): soma 0.03–0.21, no-soma 0.46–1.04.
-    nonzero_mask = largest_comp_size > 0
-    nonzero = largest_comp_size[nonzero_mask]
-    spread_ratio = 1.0  # default: assume no soma
-    if len(nonzero) >= 3:
-        width_thresh, _ = _otsu_threshold(nonzero)
-        above_indices = np.where(nonzero_mask & (largest_comp_size > width_thresh))[
-            0
-        ].astype(float)
-        all_indices = np.where(nonzero_mask)[0].astype(float)
-
-        if len(above_indices) >= 2 and np.std(all_indices) > 0:
-            spread_ratio = float(np.std(above_indices) / np.std(all_indices))
-
-    # Reject if spread_ratio is too high (wide rings not localized).
-    # Use Otsu on [spread_ratio, 1.0 - spread_ratio] to decide:
-    # if spread_ratio is closer to 0 than to 1, it's concentrated.
     if verbose:
         print(
-            f"[skeliner.pre] Soma: peak ring {peak_ring}, "
-            f"cutoff ring {cutoff}/{max_ring}, "
-            f"spread_ratio={spread_ratio:.3f}"
+            f"[skeliner.pre] Soma (ring): peak ring {peak_ring}, "
+            f"cutoff ring {cutoff}/{max_ring}"
         )
-    if spread_ratio > 1.0 / 3:
-        if verbose:
-            print(
-                f"[skeliner.pre] Soma: no localized bulge "
-                f"(spread_ratio={spread_ratio:.3f})"
-            )
-        return None
 
     # ── 5. Fit ellipsoid from BFS ring vertices ────────────────────
     bfs_set: set[int] = set()
@@ -2113,6 +2079,27 @@ def find_soma_via_ring_cutoff(
                     soma.verts = sv
             else:
                 soma.verts = sv
+
+    # ── 7. Exclude organelle vertices from final soma ───────────
+    if organelles.any():
+        org_verts = set(np.unique(mesh.faces[organelles]).tolist())
+        soma_set = set(soma.verts.tolist()) - org_verts
+        n_removed = len(soma.verts) - len(soma_set)
+        if n_removed > 0:
+            sv = np.fromiter(sorted(soma_set), dtype=np.intp)
+            if len(sv) >= 4:
+                try:
+                    soma = Soma.fit(mesh.vertices[sv], verts=sv)
+                except ValueError:
+                    soma.verts = sv
+            else:
+                soma.verts = sv
+            if verbose:
+                print(
+                    f"[skeliner.pre] Soma (ring): excluded "
+                    f"{n_removed:,} organelle verts → "
+                    f"{len(soma.verts):,}"
+                )
 
     if verbose:
         print(
