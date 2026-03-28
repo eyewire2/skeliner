@@ -1551,7 +1551,7 @@ def soma_diagnostics(
     mesh: trimesh.Trimesh,
     *,
     nucleus: dict | None = None,
-    soma: "Soma | None" = None,
+    soma: object = None,
     organelles: np.ndarray | None = None,
     planes: tuple[str, str, str] = ("xy", "xz", "zy"),
     figsize: tuple[float, float] = (12, 12),
