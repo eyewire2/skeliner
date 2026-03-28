@@ -1,6 +1,6 @@
 """skeliner.pre – mesh preprocessing utilities."""
 
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import igraph as ig
 import numpy as np
@@ -1486,7 +1486,6 @@ def _assign_soma_verts(
     verbose : bool, default False
         Print progress.
     """
-    from collections import deque
 
     _log = "[skeliner.pre]   soma verts:"
 
@@ -1662,7 +1661,6 @@ def find_soma_via_ring_cutoff(
         Fitted ellipsoidal soma, or *None* if no nucleus is found or
         too few indicators exist.
     """
-    from collections import deque
 
     if mesh_stats is not None:
         _, labels, main, _ = mesh_stats
@@ -1682,7 +1680,7 @@ def find_soma_via_ring_cutoff(
             f"({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})"
         )
 
-    # ── 1b. Organelle mask (for cleaner BFS adjacency) ──────────
+    # ── 1b. Organelle mask (for excluding from final soma) ──────
     if organelles is None:
         pocket, isolated = find_organelles(mesh, verbose=verbose)
         organelles = pocket | isolated
@@ -1699,35 +1697,44 @@ def find_soma_via_ring_cutoff(
             adj[a].append(b)
             adj[b].append(a)
 
-    # BFS adjacency: external surface only (exclude organelle faces).
-    # Organelle pockets inside the soma create topological shortcuts
-    # that fragment ring components and cause premature cutoff.
-    adj_bfs: dict[int, list[int]] = defaultdict(list)
-    non_org_main_fi = main_fi[~organelles[main_fi]] if organelles.any() else main_fi
-    for fi in non_org_main_fi:
-        v = mesh.faces[fi]
-        for i in range(3):
-            a, b = int(v[i]), int(v[(i + 1) % 3])
-            adj_bfs[a].append(b)
-            adj_bfs[b].append(a)
-
-    # ── 3. BFS from nearest vertex to centre (no hard cap) ───────
+    # ── 3. BFS from nucleus region (symmetric seed) ────────────
+    #       Seed ring 0 with all main-component vertices inside
+    #       the nucleus ellipsoid (peak_r in XY, z_range half-span
+    #       in Z).  This creates a symmetric wavefront at the pocket
+    #       mouth instead of starting from one side of the pocket wall.
     if verbose:
-        print("[skeliner.pre] Soma: BFS ring analysis...")
-    bfs_verts = np.fromiter(adj_bfs.keys(), dtype=np.intp)
-    seed = int(
-        bfs_verts[np.argmin(np.linalg.norm(mesh.vertices[bfs_verts] - center, axis=1))]
-    )
+        print("[skeliner.pre] Soma (ring): BFS ring analysis...")
+    all_main_verts = np.fromiter(adj.keys(), dtype=np.intp)
+    pos = mesh.vertices[all_main_verts]
+    rx = ry = nuc["peak_r"]
+    rz = (nuc["z_range"][1] - nuc["z_range"][0]) / 2
+    d = pos - center
+    ellip_dist = (d[:, 0] / rx) ** 2 + (d[:, 1] / ry) ** 2 + (d[:, 2] / rz) ** 2
+    seed_mask = ellip_dist <= 1.0
+    seed_verts = all_main_verts[seed_mask]
+    if len(seed_verts) == 0:
+        # Fallback: single nearest vertex
+        seed_verts = all_main_verts[np.argmin(ellip_dist)].reshape(1)
 
-    ring_level: dict[int, int] = {seed: 0}
-    queue: deque[int] = deque([seed])
+    ring_level: dict[int, int] = {}
+    queue: deque[int] = deque()
     ring_verts: dict[int, list[int]] = defaultdict(list)
-    ring_verts[0].append(seed)
+    for sv in seed_verts:
+        vi = int(sv)
+        ring_level[vi] = 0
+        queue.append(vi)
+        ring_verts[0].append(vi)
+    if verbose:
+        print(
+            f"[skeliner.pre] Soma (ring): seed ring 0: "
+            f"{len(seed_verts)} verts (nucleus ellipsoid "
+            f"rx={rx:.0f}, rz={rz:.0f})"
+        )
 
     while queue:
         v = queue.popleft()
         lv = ring_level[v]
-        for nv in adj_bfs[v]:
+        for nv in adj[v]:
             if nv not in ring_level:
                 ring_level[nv] = lv + 1
                 queue.append(nv)
@@ -1762,14 +1769,15 @@ def find_soma_via_ring_cutoff(
                     continue
                 visited_ring.add(v)
                 size += 1
-                for nv in adj_bfs[v]:
+                for nv in adj[v]:
                     if nv in ring_set and nv not in visited_ring:
                         rq.append(nv)
             if size > max_comp:
                 max_comp = size
         largest_comp_size[lv] = max_comp
 
-    peak_ring = int(np.argmax(largest_comp_size))
+    # Skip ring 0 (the injected seed set, not a natural BFS ring)
+    peak_ring = 1 + int(np.argmax(largest_comp_size[1:]))
     post_peak = largest_comp_size[peak_ring:]
     if len(post_peak) > 1:
         count_thresh, _ = _otsu_threshold(post_peak)
@@ -1789,6 +1797,7 @@ def find_soma_via_ring_cutoff(
         )
 
     # ── 5. Fit ellipsoid from BFS ring vertices ────────────────────
+    #       Include ring 0 (nucleus seed) in the soma vertex set.
     bfs_set: set[int] = set()
     for lv in range(cutoff + 1):
         bfs_set.update(ring_verts[lv])
@@ -2141,7 +2150,6 @@ def find_soma(
          exclusion handles shared branches automatically.
       4. Fit ellipsoid to the cleaned set
     """
-    from collections import deque
 
     if mesh_stats is not None:
         _, labels, main, _ = mesh_stats
@@ -2569,7 +2577,6 @@ def find_soma_alt(
       3. Per-tip neurite exclusion (same as find_soma).
       4. Fit ellipsoid (same as find_soma).
     """
-    from collections import deque
 
     if mesh_stats is not None:
         _, labels, main, _ = mesh_stats
@@ -3222,7 +3229,6 @@ def find_gaps(
     # Build face adjacency for BFS-based tip selection
     if verbose:
         print("[skeliner.pre] Gaps: building face adjacency...")
-    from collections import deque as _deque
 
     non_degen = _non_degenerate(mesh.faces)
     edge_to_faces_gap: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -3869,7 +3875,6 @@ def _rim_enclosed_area(
     For each closed loop: project vertices onto a best-fit plane, then
     compute polygon area via the shoelace formula.
     """
-    from collections import defaultdict, deque
 
     if not boundary_edges:
         return 0.0
@@ -3945,7 +3950,6 @@ def _rim_enclosed_area(
 
 def _count_edge_loops(edges: list[tuple[int, int]]) -> int:
     """Count connected components of an edge list."""
-    from collections import defaultdict, deque
 
     if not edges:
         return 0
@@ -3999,7 +4003,6 @@ def find_rims(
     list[list[tuple[int, int]]]
         One list of edges per pocket rim.
     """
-    from collections import defaultdict, deque
 
     if mesh_stats is not None:
         outward_dots, _, _, main_face_mask = mesh_stats
@@ -4116,7 +4119,6 @@ def find_pocket_mouths(
         One list of edges per pocket mouth (original rim edges +
         closure edges).  Same format as *find_rims*.
     """
-    from collections import deque
 
     if mesh_stats is not None:
         outward_dots, _, _, main_face_mask = mesh_stats
@@ -4380,7 +4382,6 @@ def find_pocket_organelles(
     np.ndarray
         Boolean mask ``(nFaces,)`` — pocket organelle faces.
     """
-    from collections import defaultdict, deque
 
     if mesh_stats is not None:
         outward_dots, _, _, main_face_mask = mesh_stats
@@ -4601,7 +4602,6 @@ def find_pocket_organelles_alt(
     np.ndarray
         Boolean mask ``(nFaces,)`` — pocket organelle faces.
     """
-    from collections import deque
 
     if mesh_stats is not None:
         outward_dots, _, _, main_face_mask = mesh_stats
@@ -5315,7 +5315,6 @@ def _split_fan_vertices(
 
     Returns a new mesh with split vertices (more vertices, same faces).
     """
-    from collections import deque
 
     _good = _non_degenerate(mesh.faces)
     vert_to_face: list[list[int]] = [[] for _ in range(len(mesh.vertices))]
@@ -7263,7 +7262,7 @@ def find_soma_via_z_contour(
 
     from shapely import prepare
 
-    hull_polys: list[tuple[float, "Polygon"]] = []
+    hull_polys: list[tuple[float, object]] = []
     for i in sorted(soma_hulls.keys()):
         poly = soma_hulls[i]
         if poly is None or poly.is_empty:
@@ -7282,7 +7281,7 @@ def find_soma_via_z_contour(
     # Small expansion to account for grid-resolution tolerance.
     # The hull is built from grid cell centres (grid_res=200nm), so
     # surface faces up to ~1 cell away may be just outside.
-    expanded_polys: list[tuple[float, "Polygon"]] = []
+    expanded_polys: list[tuple[float, object]] = []
     for z_val, poly in hull_polys:
         ep = poly.buffer(grid_res)
         if not ep.is_valid:
