@@ -1279,7 +1279,7 @@ def z_section(
     soma_hull : bool
         If True, apply fill + morphological opening to strip neurite
         protrusions before building the outer contour hull.  This
-        matches the hull computation used by ``find_soma_from_nucleus``.
+        matches the hull computation used by ``find_soma_via_z_contour``.
     ax : Axes or None
         Matplotlib axes to draw on.  Created if None.
     figsize : tuple

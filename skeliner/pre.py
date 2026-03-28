@@ -19,7 +19,7 @@ __all__ = [
     "find_nucleus_center",
     "find_offsets",
     "find_soma",
-    "find_soma_from_nucleus",
+    "find_soma_via_z_contour",
     "find_soma_void",
     "preprocess",
     "PreprocessResult",
@@ -6575,7 +6575,7 @@ def preprocess(
 
 
 # =====================================================================
-#  Z-slice helpers (shared by find_nucleus_center & find_soma_from_nucleus)
+#  Z-slice helpers (shared by find_nucleus_center & find_soma_via_z_contour)
 # =====================================================================
 
 
@@ -6792,7 +6792,7 @@ def find_nucleus_center(
     }
 
 
-#  find_soma_from_nucleus — soma detection using nucleus center
+#  find_soma_via_z_contour — soma detection using Z-slice contours
 # =====================================================================
 
 
@@ -7272,7 +7272,7 @@ def _soma_hulls(
     return {i: hulls[i] for i in accepted}, extend_lo, extend_hi
 
 
-def find_soma_from_nucleus(
+def find_soma_via_z_contour(
     mesh: trimesh.Trimesh,
     *,
     organelles: np.ndarray | None = None,
@@ -7307,7 +7307,7 @@ def find_soma_from_nucleus(
     """
     from shapely.geometry import Point
 
-    _p = "[find_soma_from_nucleus]"
+    _p = "[find_soma_via_z_contour]"
 
     verts = np.asarray(mesh.vertices, dtype=np.float64)
     if verbose:
