@@ -1697,24 +1697,23 @@ def find_soma_via_ring_cutoff(
             adj[a].append(b)
             adj[b].append(a)
 
-    # ── 3. BFS from nucleus region (symmetric seed) ────────────
-    #       Seed ring 0 with all main-component vertices inside
-    #       the nucleus ellipsoid (peak_r in XY, z_range half-span
-    #       in Z).  This creates a symmetric wavefront at the pocket
-    #       mouth instead of starting from one side of the pocket wall.
+    # ── 3. BFS from soma surface at nucleus mid-Z ──────────────
+    #       Seed ring 0 with soma-cluster vertices at the nucleus
+    #       center Z-level (from find_nucleus_center).  These are
+    #       outer-surface vertices, tilt-invariant, and form a
+    #       symmetric band around the soma cross-section.
     if verbose:
         print("[skeliner.pre] Soma (ring): BFS ring analysis...")
     all_main_verts = np.fromiter(adj.keys(), dtype=np.intp)
-    pos = mesh.vertices[all_main_verts]
-    rx = ry = nuc["peak_r"]
-    rz = (nuc["z_range"][1] - nuc["z_range"][0]) / 2
-    d = pos - center
-    ellip_dist = (d[:, 0] / rx) ** 2 + (d[:, 1] / ry) ** 2 + (d[:, 2] / rz) ** 2
-    seed_mask = ellip_dist <= 1.0
-    seed_verts = all_main_verts[seed_mask]
+    main_set = set(adj.keys())
+    seed_vi = nuc.get("soma_seed_vi", np.array([], dtype=np.intp))
+    # Keep only seeds that are on the main component
+    seed_verts = np.array([v for v in seed_vi if v in main_set], dtype=np.intp)
     if len(seed_verts) == 0:
-        # Fallback: single nearest vertex
-        seed_verts = all_main_verts[np.argmin(ellip_dist)].reshape(1)
+        # Fallback: single nearest vertex to nucleus center
+        seed_verts = all_main_verts[
+            np.argmin(np.linalg.norm(mesh.vertices[all_main_verts] - center, axis=1))
+        ].reshape(1)
 
     ring_level: dict[int, int] = {}
     queue: deque[int] = deque()
@@ -1727,8 +1726,7 @@ def find_soma_via_ring_cutoff(
     if verbose:
         print(
             f"[skeliner.pre] Soma (ring): seed ring 0: "
-            f"{len(seed_verts)} verts (nucleus ellipsoid "
-            f"rx={rx:.0f}, rz={rz:.0f})"
+            f"{len(seed_verts)} verts (soma surface at mid-Z)"
         )
 
     while queue:
@@ -1776,8 +1774,15 @@ def find_soma_via_ring_cutoff(
                 max_comp = size
         largest_comp_size[lv] = max_comp
 
-    # Skip ring 0 (the injected seed set, not a natural BFS ring)
-    peak_ring = 1 + int(np.argmax(largest_comp_size[1:]))
+    # Skip ring 0 (the injected seed set, not a natural BFS ring).
+    # Limit peak search to rings within 3× the nucleus Z-span
+    # (converted to ring count via average edge length) — peaks
+    # beyond that are neurite artifacts, not the soma.
+    avg_edge = float(mesh.edges_unique_length.mean())
+    z_span = nuc["z_range"][1] - nuc["z_range"][0]
+    max_soma_rings = max(int(z_span * 3 / avg_edge), 10)
+    search_end = min(max_soma_rings + 1, max_ring + 1)
+    peak_ring = 1 + int(np.argmax(largest_comp_size[1:search_end]))
     post_peak = largest_comp_size[peak_ring:]
     if len(post_peak) > 1:
         count_thresh, _ = _otsu_threshold(post_peak)
@@ -1793,7 +1798,8 @@ def find_soma_via_ring_cutoff(
     if verbose:
         print(
             f"[skeliner.pre] Soma (ring): peak ring {peak_ring}, "
-            f"cutoff ring {cutoff}/{max_ring}"
+            f"cutoff ring {cutoff}/{max_ring} "
+            f"(peak search limit {search_end})"
         )
 
     # ── 5. Fit ellipsoid from BFS ring vertices ────────────────────
@@ -6713,12 +6719,21 @@ def find_nucleus_center(
             f"peak_r={peak_r:.0f} nm, {len(best)} Z-levels"
         )
 
+    # Soma-cluster vertex indices at the mid-chain Z-level.
+    # These are outer-surface vertices (not void/pocket), suitable
+    # as BFS seeds for soma detection.
+    mid_i = best[len(best) // 2]
+    mid_vi = raw[mid_i][5]       # vert_indices at this Z
+    mid_sm = raw[mid_i][6]       # soma_mask (bool over vert_indices)
+    soma_seed_vi = mid_vi[mid_sm] if mid_sm is not None else np.array([], dtype=np.intp)
+
     return {
         "center": center,
         "z_range": (z_lo, z_hi),
         "peak_r": peak_r,
         "slices": slices_numeric,
         "contours": contours,
+        "soma_seed_vi": soma_seed_vi,
     }
 
 
