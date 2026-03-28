@@ -6802,6 +6802,7 @@ def _z_scan(
     z_tol: float = 150.0,
     min_void_r: float = 500.0,
     max_shift: float = 3000.0,
+    retry_broken: bool = True,
 ) -> tuple[list[tuple], list[int] | None, np.ndarray | None]:
     """Shared Z-scan: cluster + void detection + spatial coherence.
 
@@ -6891,6 +6892,16 @@ def _z_scan(
         return raw, None, None
 
     best = max(runs, key=len)
+
+    if not retry_broken:
+        slices = np.array(
+            [(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best]
+        )
+        center = np.array(
+            [np.nanmean(slices[:, 1]), np.nanmean(slices[:, 2]),
+             np.mean(slices[:, 0])]
+        )
+        return raw, best, center
 
     # --- Pass 2: hull-guided void detection for broken Z-levels ---
     # When the soma ring has a gap (surface hole), the 4-ray enclosure
