@@ -7053,83 +7053,92 @@ def _z_scan(
     return raw, best, center
 
 
-def _constrain_hulls(
+def _soma_hulls(
     raw: list[tuple],
     best: list[int],
     center: np.ndarray,
     verts: np.ndarray,
+    grid_res: float = 200.0,
 ) -> dict:
-    """Neighbor-intersection hull constraining (expensive).
+    """Build per-Z soma hulls with neurite protrusions stripped.
 
-    At some Z-levels neurites sprout horizontally from the soma,
-    inflating the convex hull well beyond the true soma boundary.
-    This function clips each level's hull by intersecting it with
-    slightly expanded hulls from ±K neighboring levels — regions
-    that only appear at one level (neurite protrusions) get cut,
-    while the shared soma core is preserved.
+    For each Z-level with a soma cluster, rasterizes the soma vertices,
+    fills the ring interior to form a solid disk, then applies
+    morphological opening to remove thin structures (neurite
+    protrusions).  The convex hull is built from the surviving
+    (soma-only) grid cells.
 
     Returns a dict mapping raw-index → Shapely Polygon.
     """
+    from scipy.ndimage import (binary_dilation, binary_erosion,
+                                binary_fill_holes, distance_transform_edt)
     from scipy.spatial import ConvexHull
     from shapely.geometry import Polygon as _Poly
 
-    # Ordered list of all levels with soma data
     soma_levels = [
         i for i in range(len(raw)) if raw[i][6] is not None and raw[i][6].sum() >= 4
     ]
 
-    local_hulls: dict[int, _Poly] = {}
+    hulls: dict[int, _Poly] = {}
+    struct3 = np.ones((3, 3), dtype=bool)
+
     for i in soma_levels:
         sm = raw[i][6]
         vi = raw[i][5]
         soma_pts = verts[vi[sm], :2]
         if len(soma_pts) < 4:
             continue
+
+        # Rasterize soma vertices
+        xy_min = soma_pts.min(axis=0) - grid_res * 3
+        nx = int((soma_pts[:, 0].max() - xy_min[0] + grid_res * 6) / grid_res) + 1
+        ny = int((soma_pts[:, 1].max() - xy_min[1] + grid_res * 6) / grid_res) + 1
+        occ = np.zeros((nx, ny), dtype=bool)
+        ix = ((soma_pts[:, 0] - xy_min[0]) / grid_res).astype(int).clip(0, nx - 1)
+        iy = ((soma_pts[:, 1] - xy_min[1]) / grid_res).astype(int).clip(0, ny - 1)
+        occ[ix, iy] = True
+
+        # Close ring gaps → fill interior → open to strip neurites.
+        closed = binary_dilation(occ, struct3, iterations=2)
+        closed = binary_erosion(closed, struct3, iterations=2)
+        filled = binary_fill_holes(closed)
+        dt = distance_transform_edt(filled)
+        peak_dist = dt.max()
+
+        if peak_dist >= 6:
+            r = max(int(peak_dist * 0.3), 3)
+            se = np.zeros((2 * r + 1, 2 * r + 1), dtype=bool)
+            yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
+            se[xx ** 2 + yy ** 2 <= r ** 2] = True
+            opened = binary_erosion(filled, se)
+            opened = binary_dilation(opened, se)
+            if opened.any():
+                # Build hull from opened grid cell centres
+                gi, gj = np.where(opened)
+                hull_pts = np.column_stack([
+                    xy_min[0] + gi * grid_res + grid_res / 2,
+                    xy_min[1] + gj * grid_res + grid_res / 2,
+                ])
+                try:
+                    h = ConvexHull(hull_pts)
+                    p = _Poly(hull_pts[h.vertices])
+                    if p.is_valid:
+                        hulls[i] = p
+                        continue
+                except Exception:
+                    pass
+
+        # Fallback: raw convex hull (opening too small or failed)
         try:
             h = ConvexHull(soma_pts)
             p = _Poly(soma_pts[h.vertices])
             if p.is_valid:
-                local_hulls[i] = p
+                hulls[i] = p
         except Exception:
             pass
 
-    # Filter soma_levels to those with hulls
-    soma_levels = [i for i in soma_levels if i in local_hulls]
-
-    constrained_hulls: dict[int, _Poly] = {}
-    K = 3  # neighbor half-window
-
-    for pos, i in enumerate(soma_levels):
-        local = local_hulls[i]
-
-        # Collect neighbor hulls at ±1..K steps
-        neighbors = []
-        for d in range(-K, K + 1):
-            if d == 0:
-                continue
-            nb_pos = pos + d
-            if 0 <= nb_pos < len(soma_levels):
-                neighbors.append(local_hulls[soma_levels[nb_pos]])
-
-        if not neighbors:
-            constrained_hulls[i] = local
-            continue
-
-        # Intersect local hull with each neighbor (slightly expanded).
-        # The expansion accommodates legitimate Z-to-Z growth.
-        result = local
-        for nb in neighbors:
-            nb_r = np.sqrt(nb.area / np.pi)
-            expanded_nb = nb.buffer(nb_r * 0.15)
-            clipped = result.intersection(expanded_nb)
-            if not clipped.is_empty and clipped.area > local.area * 0.3:
-                result = clipped
-
-        constrained_hulls[i] = result
-
     # Keep only levels within 1.96× the nucleus Z-range AND whose
-    # hull centroid is near the nucleus XY.  Levels dominated by
-    # neurites have centroids far from the nucleus.
+    # hull centroid is near the nucleus XY.
     nuc_z_lo = raw[best[0]][0]
     nuc_z_hi = raw[best[-1]][0]
     nuc_z_span = (nuc_z_hi - nuc_z_lo) * 1.96
@@ -7137,14 +7146,12 @@ def _constrain_hulls(
     soma_z_lo = nuc_z_mid - nuc_z_span / 2
     soma_z_hi = nuc_z_mid + nuc_z_span / 2
 
-    # Peak soma radius from chain hulls
-    chain_areas = [constrained_hulls[i].area for i in best
-                   if i in constrained_hulls]
+    chain_areas = [hulls[i].area for i in best if i in hulls]
     max_r = np.sqrt(max(chain_areas) / np.pi) if chain_areas else 5000
     max_dist = max_r * 1.5
 
     filtered = {}
-    for i, p in constrained_hulls.items():
+    for i, p in hulls.items():
         if not (soma_z_lo <= raw[i][0] <= soma_z_hi):
             continue
         cx, cy = p.centroid.x, p.centroid.y
@@ -7165,10 +7172,10 @@ def find_soma_from_nucleus(
 ) -> "Soma | None":
     """Detect the soma by first locating the nucleus void.
 
-    Single-pass Z-scan: finds the nucleus void via spatial coherence,
-    then classifies faces whose centroids fall inside the per-Z
-    constrained contours as soma.  Returns the same ``Soma`` type
-    as :func:`find_soma`.
+    Uses :func:`_z_scan` (fast) to find the nucleus, then builds
+    per-Z soma hulls with neurite protrusions stripped via
+    morphological opening.  Classifies faces whose centroids fall
+    inside the per-Z hulls as soma.
 
     Parameters
     ----------
@@ -7211,13 +7218,13 @@ def find_soma_from_nucleus(
             f"r={peak_r:.0f}nm, {n_chain} Z-levels"
         )
 
-    constrained_hulls = _constrain_hulls(raw, best, nc, verts)
+    soma_hulls = _soma_hulls(raw, best, nc, verts, grid_res)
 
     from shapely import prepare
 
     hull_polys: list[tuple[float, "Polygon"]] = []
-    for i in sorted(constrained_hulls.keys()):
-        poly = constrained_hulls[i]
+    for i in sorted(soma_hulls.keys()):
+        poly = soma_hulls[i]
         if poly is None or poly.is_empty:
             continue
         if not poly.is_valid:
