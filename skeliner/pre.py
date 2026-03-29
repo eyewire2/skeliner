@@ -2158,10 +2158,10 @@ def break_at_soma(
     Removes soma + organelle faces, finds connected components of
     the remainder, and classifies each as:
 
-    - **missed soma** — boundary is mostly soma faces, absorbed back
-      into soma verts (ellipsoid refitted).
-    - **missed organelle** — boundary is entirely organelle faces,
-      absorbed into the organelle mask.
+    - **missed organelle** — thin fold with high boundary-to-face
+      ratio (> 0.1), absorbed into the organelle mask.
+    - **missed soma** — mostly soma boundary, negligible neurite
+      contact, absorbed back into soma verts (ellipsoid refitted).
     - **neurite** — everything else (dendrites, axon, stumps).
 
     Parameters
@@ -2198,7 +2198,14 @@ def break_at_soma(
         if s >= 2:
             soma_face[fi] = True
 
-    exclude = soma_face | organelle
+    # --- exclude soma, organelle, and zero-area (degenerate) faces ---
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    face_area = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
+    degenerate = face_area == 0
+
+    exclude = soma_face | organelle | degenerate
     remain_fi = np.where(~exclude)[0]
 
     if len(remain_fi) == 0:
@@ -2272,29 +2279,28 @@ def break_at_soma(
                             n_other += 1
 
         total = n_org + n_soma + n_other
-        if total == 0:
-            # isolated fragment (no boundary neighbours at all)
-            if len(comp) <= 10:
-                continue  # degenerate noise
-            neurites.append(comp)
-            continue
+        if len(comp) <= 10 or total == 0:
+            continue  # degenerate noise
 
-        org_frac = n_org / total
         soma_frac = n_soma / total
 
-        if org_frac == 1.0:
-            # entirely enclosed by organelle → missed organelle
+        # Pockets are thin folds — almost every face touches the
+        # boundary (boundary/face >> 0.1).  Neurites and soma patches
+        # are thick surfaces (boundary/face << 0.1).
+        boundary_per_face = total / len(comp)
+
+        if boundary_per_face > 0.1:
+            # thin fold — missed organelle pocket
             organelle_expanded[comp] = True
             if verbose:
                 print(
                     f"break_at_soma: absorbed {len(comp)} faces "
-                    f"as missed organelle"
+                    f"as missed organelle (b/f={boundary_per_face:.2f})"
                 )
-        elif soma_frac > 0.5 and n_other == 0:
-            # boundary is soma (+ maybe some organelle), no neurite contact
-            # → missed soma patch
-            comp_vi = np.unique(faces[comp]).tolist()
-            extra_soma_vi.extend(comp_vi)
+        elif soma_frac > 0.5 and n_other / total < 0.1:
+            # mostly soma boundary, negligible neurite contact
+            comp_vi = np.unique(faces[comp])
+            extra_soma_vi.extend(comp_vi.tolist())
             if verbose:
                 print(
                     f"break_at_soma: absorbed {len(comp)} faces "

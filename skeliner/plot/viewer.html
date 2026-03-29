@@ -325,6 +325,7 @@
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
                     <span style="color: #888; margin-left: 12px">Mesh:</span>
                     <button id="alignOffsetsBtn" style="margin-left: 4px">Align</button>
+                    <button id="breakAtSomaBtn" style="margin-left: 4px">Break</button>
                     <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
                 </span>
                 <span style="margin-left: 12px">
@@ -739,6 +740,7 @@ let meshCentroid = [0, 0, 0];
                     if (e.shiftKey) _alignDismissed = true;
                     runAlignOffsets();
                 });
+                document.getElementById("breakAtSomaBtn").addEventListener("click", runBreakAtSoma);
                 document.getElementById("compactMeshBtn").addEventListener("click", runCompactMesh);
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
                 document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
@@ -1728,6 +1730,29 @@ let meshCentroid = [0, 0, 0];
                 } finally {
                     setTimeout(() => {
                         btn.textContent = "Align";
+                        btn.disabled = false;
+                    }, 3000);
+                }
+            }
+
+            async function runBreakAtSoma() {
+                const btn = document.getElementById("breakAtSomaBtn");
+                btn.textContent = "Breaking...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/break_at_soma", { method: "POST" });
+                    const data = await resp.json();
+                    if (data.ok) {
+                        btn.textContent = `Break (${data.nNeurites} neurites)`;
+                        fetchAnnotations();
+                    } else {
+                        btn.textContent = data.error || "Error";
+                    }
+                } catch (e) {
+                    btn.textContent = "Error";
+                } finally {
+                    setTimeout(() => {
+                        btn.textContent = "Break";
                         btn.disabled = false;
                     }, 3000);
                 }

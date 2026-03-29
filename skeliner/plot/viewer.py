@@ -1781,6 +1781,114 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         return JSONResponse({"ok": True})
 
+    async def do_break_at_soma(request):
+        """Break mesh at soma: classify components, expand soma + organelles."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        soma = mesh_state.get("soma")
+        if soma is None:
+            return JSONResponse(
+                {"ok": False, "error": "Run soma detection first"}, status_code=400
+            )
+        org_mask = mesh_state.get("organelles")
+        if org_mask is None:
+            return JSONResponse(
+                {"ok": False, "error": "Run organelle detection first"},
+                status_code=400,
+            )
+
+        from skeliner.pre import break_at_soma
+
+        mesh = mesh_state["mesh"]
+
+        def _run():
+            return break_at_soma(mesh, soma, org_mask, verbose=True)
+
+        new_soma, new_org, neurites = await _run_with_log(_run)
+
+        mesh_state["soma"] = new_soma
+        mesh_state["organelles"] = new_org
+
+        # Build annotations
+        centroid = mesh_state["centroid"]
+        faces = mesh.faces
+
+        soma_vset = set(int(v) for v in new_soma.verts)
+        soma_faces = [
+            int(fi)
+            for fi in range(len(faces))
+            if sum(1 for v in faces[fi] if int(v) in soma_vset) >= 2
+        ]
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+
+        # Replace all highlights and ellipsoids with break_at_soma results
+        highlights = []
+        highlights.append(
+            {
+                "faces": soma_faces,
+                "color": [0.9, 0.5, 0.9],
+                "label": f"soma ({len(soma_faces):,}f, {len(new_soma.verts):,}v)",
+            }
+        )
+
+        org_only = new_org & ~np.array(
+            [
+                sum(1 for v in faces[fi] if int(v) in soma_vset) >= 2
+                for fi in range(len(faces))
+            ],
+            dtype=bool,
+        )
+        highlights.append(
+            {
+                "faces": np.where(org_only)[0].tolist(),
+                "color": [1.0, 0.8, 0.0],
+                "label": f"organelles ({int(org_only.sum()):,}f)",
+            }
+        )
+
+        neurite_colors = [
+            [0.2, 0.6, 1.0],
+            [0.3, 1.0, 0.3],
+            [1.0, 0.4, 0.1],
+            [0.0, 0.9, 0.9],
+            [1.0, 0.2, 0.6],
+        ]
+        for i, nf in enumerate(neurites):
+            c = neurite_colors[i % len(neurite_colors)]
+            highlights.append(
+                {
+                    "faces": nf.tolist(),
+                    "color": c,
+                    "label": f"neurite {i} ({len(nf):,}f)",
+                }
+            )
+
+        ann["highlights"] = highlights
+        ann["ellipsoids"] = [
+            {
+                "center": (new_soma.center - centroid).tolist(),
+                "axes": new_soma.axes.tolist(),
+                "R": new_soma.R.tolist(),
+                "color": [0.9, 0.5, 0.9],
+            }
+        ]
+
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "nNeurites": len(neurites),
+                "somaVerts": len(new_soma.verts),
+                "orgFaces": int(new_org.sum()),
+            }
+        )
+
     async def do_compact_mesh(request):
         """Compact mesh: remove degenerate faces, reindex vertices, remap annotations."""
         if mesh_state["mesh"] is None:
@@ -2479,6 +2587,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/edit_vertices", edit_vertices, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/align_offsets", do_align_offsets, methods=["POST"]),
+            Route("/break_at_soma", do_break_at_soma, methods=["POST"]),
             Route("/compact_mesh", do_compact_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
