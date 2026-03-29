@@ -2199,8 +2199,9 @@ def break_at_soma(
 ) -> tuple[Soma, np.ndarray, list[np.ndarray]]:
     """Break the mesh at the soma and classify the pieces.
 
-    Removes soma + organelle faces, finds connected components of
-    the remainder, and classifies each as:
+    Removes soma +
+    organelle faces, finds connected components of the remainder,
+    and classifies each as:
 
     - **missed organelle** — not reachable from the main mesh body
       without crossing organelle faces (topologically trapped).
@@ -2249,15 +2250,42 @@ def break_at_soma(
             soma_face[fi] = True
 
     # --- Phase 1: reachability without crossing organelle ---
-    # Connected components on all non-organelle usable faces.
-    # The largest component is the "main body" — anything not in it
-    # is topologically trapped by organelle.
+    # For each mesh component, find its largest non-organelle body.
+    # Faces not in their component's body are trapped by organelle.
+    # This is per-component so disconnected neurite fragments are
+    # handled correctly (each has its own reachable body).
     non_org = usable & ~organelle
     ef_non_org = _build_edge_to_faces(faces, non_org)
     non_org_fi = np.where(non_org)[0]
     non_org_comps = _face_components(faces, ef_non_org, non_org_fi)
 
-    main_body = set(non_org_comps[0].tolist()) if non_org_comps else set()
+    # Label every non-org face with its non-org component id.
+    # The largest non-org component within each mesh component is
+    # that component's "body".
+    non_org_label = np.full(nF, -1, dtype=np.intp)
+    for ci, comp in enumerate(non_org_comps):
+        non_org_label[comp] = ci
+
+    # For each mesh component, find its largest non-org sub-component.
+    # Use usable-face edge components as the mesh components.
+    ef_usable = _build_edge_to_faces(faces, usable)
+    usable_fi = np.where(usable)[0]
+    mesh_comps = _face_components(faces, ef_usable, usable_fi)
+
+    body_labels: set[int] = set()
+    for mc in mesh_comps:
+        # non-org labels present in this mesh component
+        labels_in_mc = non_org_label[mc]
+        labels_in_mc = labels_in_mc[labels_in_mc >= 0]
+        if len(labels_in_mc) == 0:
+            continue
+        unique, counts = np.unique(labels_in_mc, return_counts=True)
+        body_labels.add(int(unique[counts.argmax()]))
+
+    reachable = np.zeros(nF, dtype=bool)
+    for ci, comp in enumerate(non_org_comps):
+        if ci in body_labels:
+            reachable[comp] = True
 
     # --- Phase 2: break at soma + organelle ---
     remain = usable & ~soma_face & ~organelle
@@ -2280,8 +2308,8 @@ def break_at_soma(
         if len(comp) <= 100:
             continue
 
-        # Reachability: is any face in the main body?
-        in_main = any(int(fi) in main_body for fi in comp)
+        # Reachability: is any face in its mesh component's body?
+        in_main = reachable[comp].any()
 
         if not in_main:
             # trapped by organelle
