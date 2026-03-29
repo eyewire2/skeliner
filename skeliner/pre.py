@@ -2146,6 +2146,50 @@ def find_soma_via_ring_cutoff(
     return soma
 
 
+def _build_edge_to_faces(faces, mask):
+    """Edge→face map for faces where *mask* is True."""
+    fi_idx = np.where(mask)[0]
+    gf = faces[fi_idx]
+    result: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for col_a, col_b in ((0, 1), (1, 2), (0, 2)):
+        va = gf[:, col_a].astype(np.intp)
+        vb = gf[:, col_b].astype(np.intp)
+        lo = np.minimum(va, vb)
+        hi = np.maximum(va, vb)
+        for k in range(len(fi_idx)):
+            result[(int(lo[k]), int(hi[k]))].append(int(fi_idx[k]))
+    return result
+
+
+def _face_components(faces, edge_to_faces, face_indices):
+    """BFS connected components on a subset of faces."""
+    fi_set = set(face_indices.tolist()) if hasattr(face_indices, 'tolist') \
+        else set(face_indices)
+    visited: set[int] = set()
+    components: list[np.ndarray] = []
+    for fi in face_indices:
+        fi = int(fi)
+        if fi in visited:
+            continue
+        comp: list[int] = []
+        q = deque([fi])
+        visited.add(fi)
+        while q:
+            cur = q.popleft()
+            comp.append(cur)
+            face = faces[cur]
+            for i in range(3):
+                a, b = int(face[i]), int(face[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                for nb in edge_to_faces[e]:
+                    if nb in fi_set and nb not in visited:
+                        visited.add(nb)
+                        q.append(nb)
+        components.append(np.array(comp, dtype=np.intp))
+    components.sort(key=len, reverse=True)
+    return components
+
+
 def break_at_soma(
     mesh: trimesh.Trimesh,
     soma: Soma,
@@ -2158,11 +2202,10 @@ def break_at_soma(
     Removes soma + organelle faces, finds connected components of
     the remainder, and classifies each as:
 
-    - **missed organelle** — thin fold with high boundary-to-face
-      ratio (> 0.1), absorbed into the organelle mask.
-    - **missed soma** — mostly soma boundary, negligible neurite
-      contact, absorbed back into soma verts (ellipsoid refitted).
-    - **neurite** — everything else (dendrites, axon, stumps).
+    - **missed organelle** — not reachable from the main mesh body
+      without crossing organelle faces (topologically trapped).
+    - **missed soma** — reachable, but boundary is mostly soma faces.
+    - **neurite** — reachable, everything else.
 
     Parameters
     ----------
@@ -2187,6 +2230,13 @@ def break_at_soma(
     verts = mesh.vertices
     nF = len(faces)
 
+    good = _non_degenerate(faces)
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    nonzero_area = np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1) > 0
+    usable = good & nonzero_area
+
     # --- soma face mask: face is soma if >=2 of 3 verts are soma ---
     soma_set = set(soma.verts.tolist())
     soma_face = np.zeros(nF, dtype=bool)
@@ -2198,107 +2248,71 @@ def break_at_soma(
         if s >= 2:
             soma_face[fi] = True
 
-    # --- exclude soma, organelle, and zero-area (degenerate) faces ---
-    v0 = verts[faces[:, 0]]
-    v1 = verts[faces[:, 1]]
-    v2 = verts[faces[:, 2]]
-    face_area = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
-    degenerate = face_area == 0
+    # --- Phase 1: reachability without crossing organelle ---
+    # Connected components on all non-organelle usable faces.
+    # The largest component is the "main body" — anything not in it
+    # is topologically trapped by organelle.
+    non_org = usable & ~organelle
+    ef_non_org = _build_edge_to_faces(faces, non_org)
+    non_org_fi = np.where(non_org)[0]
+    non_org_comps = _face_components(faces, ef_non_org, non_org_fi)
 
-    exclude = soma_face | organelle | degenerate
-    remain_fi = np.where(~exclude)[0]
+    main_body = set(non_org_comps[0].tolist()) if non_org_comps else set()
+
+    # --- Phase 2: break at soma + organelle ---
+    remain = usable & ~soma_face & ~organelle
+    remain_fi = np.where(remain)[0]
 
     if len(remain_fi) == 0:
         if verbose:
             print("break_at_soma: no remaining faces after exclusion")
         return soma, organelle, []
 
-    # --- build full edge->face map (needed for boundary classification) ---
-    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-    good = _non_degenerate(faces)
-    fi_all = np.where(good)[0]
-    gf = faces[fi_all]
-    for col_a, col_b in ((0, 1), (1, 2), (0, 2)):
-        va = gf[:, col_a].astype(np.intp)
-        vb = gf[:, col_b].astype(np.intp)
-        lo = np.minimum(va, vb)
-        hi = np.maximum(va, vb)
-        for k in range(len(fi_all)):
-            edge_to_faces[(int(lo[k]), int(hi[k]))].append(int(fi_all[k]))
+    ef_all = _build_edge_to_faces(faces, usable)
+    components = _face_components(faces, ef_all, remain_fi)
 
-    # --- connected components on remaining faces ---
-    remain_set = set(remain_fi.tolist())
-    visited: set[int] = set()
-    components: list[np.ndarray] = []
-
-    for fi in remain_fi:
-        fi = int(fi)
-        if fi in visited:
-            continue
-        comp: list[int] = []
-        q = deque([fi])
-        visited.add(fi)
-        while q:
-            cur = q.popleft()
-            comp.append(cur)
-            face = faces[cur]
-            for i in range(3):
-                a, b = int(face[i]), int(face[(i + 1) % 3])
-                e = (min(a, b), max(a, b))
-                for nb in edge_to_faces[e]:
-                    if nb in remain_set and nb not in visited:
-                        visited.add(nb)
-                        q.append(nb)
-        components.append(np.array(comp, dtype=np.intp))
-
-    components.sort(key=len, reverse=True)
-
-    # --- classify each component by boundary neighbour type ---
+    # --- classify ---
     neurites: list[np.ndarray] = []
     extra_soma_vi: list[int] = []
     organelle_expanded = organelle.copy()
 
     for comp in components:
-        comp_set = set(comp.tolist())
-        n_org = 0
-        n_soma = 0
-        n_other = 0
+        if len(comp) <= 100:
+            continue
 
+        # Reachability: is any face in the main body?
+        in_main = any(int(fi) in main_body for fi in comp)
+
+        if not in_main:
+            # trapped by organelle
+            organelle_expanded[comp] = True
+            if verbose:
+                print(
+                    f"break_at_soma: absorbed {len(comp)} faces "
+                    f"as missed organelle (trapped)"
+                )
+            continue
+
+        # Boundary analysis for soma detection
+        comp_set = set(comp.tolist())
+        n_soma = 0
+        n_total = 0
         for fi in comp:
             face = faces[fi]
             for i in range(3):
                 a, b = int(face[i]), int(face[(i + 1) % 3])
                 e = (min(a, b), max(a, b))
-                for nb in edge_to_faces[e]:
+                for nb in ef_all[e]:
                     if nb not in comp_set:
-                        if organelle[nb]:
-                            n_org += 1
-                        elif soma_face[nb]:
+                        n_total += 1
+                        if soma_face[nb]:
                             n_soma += 1
-                        else:
-                            n_other += 1
 
-        total = n_org + n_soma + n_other
-        if len(comp) <= 10 or total == 0:
-            continue  # degenerate noise
+        if n_total == 0:
+            continue
 
-        soma_frac = n_soma / total
-
-        # Pockets are thin folds — almost every face touches the
-        # boundary (boundary/face >> 0.1).  Neurites and soma patches
-        # are thick surfaces (boundary/face << 0.1).
-        boundary_per_face = total / len(comp)
-
-        if boundary_per_face > 0.1:
-            # thin fold — missed organelle pocket
-            organelle_expanded[comp] = True
-            if verbose:
-                print(
-                    f"break_at_soma: absorbed {len(comp)} faces "
-                    f"as missed organelle (b/f={boundary_per_face:.2f})"
-                )
-        elif soma_frac > 0.5 and n_other / total < 0.1:
-            # mostly soma boundary, negligible neurite contact
+        soma_frac = n_soma / n_total
+        if soma_frac > 0.5:
             comp_vi = np.unique(faces[comp])
             extra_soma_vi.extend(comp_vi.tolist())
             if verbose:
