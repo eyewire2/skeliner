@@ -2146,6 +2146,178 @@ def find_soma_via_ring_cutoff(
     return soma
 
 
+def break_at_soma(
+    mesh: trimesh.Trimesh,
+    soma: Soma,
+    organelle: np.ndarray,
+    *,
+    verbose: bool = False,
+) -> tuple[Soma, np.ndarray, list[np.ndarray]]:
+    """Break the mesh at the soma and classify the pieces.
+
+    Removes soma + organelle faces, finds connected components of
+    the remainder, and classifies each as:
+
+    - **missed soma** — boundary is mostly soma faces, absorbed back
+      into soma verts (ellipsoid refitted).
+    - **missed organelle** — boundary is entirely organelle faces,
+      absorbed into the organelle mask.
+    - **neurite** — everything else (dendrites, axon, stumps).
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+    soma : Soma
+        From ``find_soma_via_ring_cutoff`` (must have ``.verts``).
+    organelle : np.ndarray
+        (nFaces,) bool — union of pocket + isolated masks.
+    verbose : bool
+
+    Returns
+    -------
+    soma : Soma
+        Refitted ellipsoid with expanded vertex set.
+    organelle : np.ndarray
+        (nFaces,) bool — expanded organelle mask.
+    neurites : list[np.ndarray]
+        Face index arrays for each neurite component, sorted by
+        descending face count.
+    """
+    faces = np.asarray(mesh.faces)
+    verts = mesh.vertices
+    nF = len(faces)
+
+    # --- soma face mask: face is soma if >=2 of 3 verts are soma ---
+    soma_set = set(soma.verts.tolist())
+    soma_face = np.zeros(nF, dtype=bool)
+    for fi in range(nF):
+        s = 0
+        for v in faces[fi]:
+            if int(v) in soma_set:
+                s += 1
+        if s >= 2:
+            soma_face[fi] = True
+
+    exclude = soma_face | organelle
+    remain_fi = np.where(~exclude)[0]
+
+    if len(remain_fi) == 0:
+        if verbose:
+            print("break_at_soma: no remaining faces after exclusion")
+        return soma, organelle, []
+
+    # --- build full edge->face map (needed for boundary classification) ---
+    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    good = _non_degenerate(faces)
+    fi_all = np.where(good)[0]
+    gf = faces[fi_all]
+    for col_a, col_b in ((0, 1), (1, 2), (0, 2)):
+        va = gf[:, col_a].astype(np.intp)
+        vb = gf[:, col_b].astype(np.intp)
+        lo = np.minimum(va, vb)
+        hi = np.maximum(va, vb)
+        for k in range(len(fi_all)):
+            edge_to_faces[(int(lo[k]), int(hi[k]))].append(int(fi_all[k]))
+
+    # --- connected components on remaining faces ---
+    remain_set = set(remain_fi.tolist())
+    visited: set[int] = set()
+    components: list[np.ndarray] = []
+
+    for fi in remain_fi:
+        fi = int(fi)
+        if fi in visited:
+            continue
+        comp: list[int] = []
+        q = deque([fi])
+        visited.add(fi)
+        while q:
+            cur = q.popleft()
+            comp.append(cur)
+            face = faces[cur]
+            for i in range(3):
+                a, b = int(face[i]), int(face[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                for nb in edge_to_faces[e]:
+                    if nb in remain_set and nb not in visited:
+                        visited.add(nb)
+                        q.append(nb)
+        components.append(np.array(comp, dtype=np.intp))
+
+    components.sort(key=len, reverse=True)
+
+    # --- classify each component by boundary neighbour type ---
+    neurites: list[np.ndarray] = []
+    extra_soma_vi: list[int] = []
+    organelle_expanded = organelle.copy()
+
+    for comp in components:
+        comp_set = set(comp.tolist())
+        n_org = 0
+        n_soma = 0
+        n_other = 0
+
+        for fi in comp:
+            face = faces[fi]
+            for i in range(3):
+                a, b = int(face[i]), int(face[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                for nb in edge_to_faces[e]:
+                    if nb not in comp_set:
+                        if organelle[nb]:
+                            n_org += 1
+                        elif soma_face[nb]:
+                            n_soma += 1
+                        else:
+                            n_other += 1
+
+        total = n_org + n_soma + n_other
+        if total == 0:
+            # isolated fragment (no boundary neighbours at all)
+            if len(comp) <= 10:
+                continue  # degenerate noise
+            neurites.append(comp)
+            continue
+
+        org_frac = n_org / total
+        soma_frac = n_soma / total
+
+        if org_frac == 1.0:
+            # entirely enclosed by organelle → missed organelle
+            organelle_expanded[comp] = True
+            if verbose:
+                print(
+                    f"break_at_soma: absorbed {len(comp)} faces "
+                    f"as missed organelle"
+                )
+        elif soma_frac > 0.5 and n_other == 0:
+            # boundary is soma (+ maybe some organelle), no neurite contact
+            # → missed soma patch
+            comp_vi = np.unique(faces[comp]).tolist()
+            extra_soma_vi.extend(comp_vi)
+            if verbose:
+                print(
+                    f"break_at_soma: absorbed {len(comp)} faces "
+                    f"({len(comp_vi)} verts) as missed soma"
+                )
+        else:
+            neurites.append(comp)
+
+    # --- refit soma if we absorbed extra verts ---
+    if extra_soma_vi:
+        all_soma_vi = np.union1d(soma.verts, np.array(extra_soma_vi, dtype=np.intp))
+        soma = Soma.fit(verts[all_soma_vi], verts=all_soma_vi)
+
+    if verbose:
+        print(
+            f"break_at_soma: {len(neurites)} neurite components, "
+            f"soma {len(soma.verts):,} verts, "
+            f"organelle {organelle_expanded.sum():,} faces"
+        )
+
+    return soma, organelle_expanded, neurites
+
+
 def find_soma(
     mesh: trimesh.Trimesh,
     *,
