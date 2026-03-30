@@ -195,6 +195,16 @@
                 background: #2a2a3e;
                 border-color: #555;
             }
+            #detect-panel button[data-state="running"] {
+                background: #3a3020;
+                border-color: #c90;
+            }
+            #detect-panel button[data-state="done"] {
+                border-color: #4a8;
+            }
+            #detect-panel button[data-state="error"] {
+                border-color: #a44;
+            }
             #saveBtn {
                 background: #1a3a2a !important;
                 border-color: #4a8 !important;
@@ -1456,243 +1466,133 @@ let meshCentroid = [0, 0, 0];
                 scene.add(manualHighlightMesh);
             }
 
-            async function runDetectOrganelles() {
-                const btn = document.getElementById("detectOrganellesBtn");
-                btn.textContent = "Detecting...";
-                btn.disabled = true;
+            function setBtnState(btn, state) {
+                delete btn.dataset.state;
+                if (state) btn.dataset.state = state;
+                btn.disabled = state === "running";
+            }
+
+            async function _runAction(btn, fetchFn) {
+                setBtnState(btn, "running");
                 try {
-                    const resp = await fetch("/detect_organelles", { method: "POST" });
+                    const resp = await fetchFn();
                     const data = await resp.json();
-                    btn.textContent = data.ok ? `Org: ${data.nFaces}f (all)` : "Error";
+                    setBtnState(btn, data.ok ? "done" : "error");
+                    return data;
                 } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
+                    setBtnState(btn, "error");
+                    return null;
                 }
+            }
+
+            async function runDetectOrganelles() {
+                await _runAction(
+                    document.getElementById("detectOrganellesBtn"),
+                    () => fetch("/detect_organelles", { method: "POST" }),
+                );
             }
 
             async function runDetectOrganellesType(type) {
-                const btn = document.getElementById("detectOrganellesBtn");
-                btn.textContent = "Detecting...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch(`/detect_organelles?type=${type}`, { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Org: ${data.nFaces}f (${type})` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("detectOrganellesBtn"),
+                    () => fetch(`/detect_organelles?type=${type}`, { method: "POST" }),
+                );
             }
 
             async function runDetectHoles() {
-                const btn = document.getElementById("detectHolesBtn");
-                btn.textContent = "Detecting...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/detect_holes", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Holes: ${data.nHoles} (H)` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("detectHolesBtn"),
+                    () => fetch("/detect_holes", { method: "POST" }),
+                );
             }
 
             async function runDetectFusions() {
-                const btn = document.getElementById("detectFusionsBtn");
-                btn.textContent = "Detecting...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/detect_fusions", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Fusions: ${data.nClusters} (F)` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("detectFusionsBtn"),
+                    () => fetch("/detect_fusions", { method: "POST" }),
+                );
             }
 
             async function runDetectRims() {
-                const btn = document.getElementById("detectRimsBtn");
-                btn.textContent = "Detecting...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/detect_rims", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Rims: ${data.nFaces} (R)` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("detectRimsBtn"),
+                    () => fetch("/detect_rims", { method: "POST" }),
+                );
             }
 
             async function runRemoveOrganelles() {
-                const btn = document.getElementById("removeOrganellesBtn");
-                btn.textContent = "Removing...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/remove_organelles", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("removeOrganellesBtn"),
+                    () => fetch("/remove_organelles", { method: "POST" }),
+                );
             }
 
             async function runRemoveFusions() {
-                const btn = document.getElementById("removeFusionsBtn");
-                btn.textContent = "Removing...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/remove_fusions", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("removeFusionsBtn"),
+                    () => fetch("/remove_fusions", { method: "POST" }),
+                );
             }
 
             async function runDetectFragments() {
-                const btn = document.getElementById("detectFragmentsBtn");
-                btn.textContent = "Detecting...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/detect_fragments", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Fragments: ${data.nFaces.toLocaleString()}f` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("detectFragmentsBtn"),
+                    () => fetch("/detect_fragments", { method: "POST" }),
+                );
             }
 
-            async function runDetectSoma(method = "new") {
-                const btn = document.getElementById("detectSomaBtn");
-                const label = method === "new" ? "new" : method;
-                btn.textContent = `Detecting (${label})...`;
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/detect_soma", {
+            async function runDetectSoma(method = "z_contour") {
+                await _runAction(
+                    document.getElementById("detectSomaBtn"),
+                    () => fetch("/detect_soma", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ method }),
-                    });
-                    const data = await resp.json();
-                    btn.textContent = data.ok
-                        ? `Soma (${data.method}): ${data.nVerts.toLocaleString()}v`
-                        : "No soma";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                    // Reset button text after 3s
-                    setTimeout(() => { btn.textContent = "Soma \u25BE"; }, 3000);
-                }
+                    }),
+                );
             }
 
             async function runDetectDisconnected() {
-                const btn = document.getElementById("detectDisconnectedBtn");
-                btn.textContent = "Detecting...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/detect_disconnected", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Disconn: ${data.nComponents}` : "None";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("detectDisconnectedBtn"),
+                    () => fetch("/detect_disconnected", { method: "POST" }),
+                );
             }
 
             async function runDetectGaps() {
-                const btn = document.getElementById("detectGapsBtn");
-                btn.textContent = "Detecting...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/detect_gaps", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Gaps: ${data.nGaps}` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("detectGapsBtn"),
+                    () => fetch("/detect_gaps", { method: "POST" }),
+                );
             }
 
             async function runRemoveFragments() {
-                const btn = document.getElementById("removeFragmentsBtn");
-                btn.textContent = "Removing...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/remove_fragments", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Removed ${data.facesRemoved.toLocaleString()}f` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("removeFragmentsBtn"),
+                    () => fetch("/remove_fragments", { method: "POST" }),
+                );
             }
 
             async function runRemoveGaps() {
-                const btn = document.getElementById("removeGapsBtn");
-                btn.textContent = "Bridging...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/remove_gaps", { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Bridged (${data.nFaces.toLocaleString()}f)` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("removeGapsBtn"),
+                    () => fetch("/remove_gaps", { method: "POST" }),
+                );
             }
 
             async function runFillHoles(fillMethod) {
-                const btn = document.getElementById("fillHolesBtn");
                 document.getElementById("holesPopup").style.display = "none";
-                btn.textContent = "Filling...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch(`/fill_holes?method=${fillMethod}`, { method: "POST" });
-                    const data = await resp.json();
-                    btn.textContent = data.ok ? `Filled (${data.facesAfter.toLocaleString()}f)` : "Error";
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("fillHolesBtn"),
+                    () => fetch(`/fill_holes?method=${fillMethod}`, { method: "POST" }),
+                );
             }
 
             async function runUndo() {
-                const btn = document.getElementById("undoBtn");
-                btn.textContent = "Undoing...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/undo", { method: "POST" });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        btn.textContent = data.undoRemaining > 0 ? `Undo (${data.undoRemaining})` : "Undo";
-                    } else {
-                        btn.textContent = "Nothing to undo";
-                    }
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                await _runAction(
+                    document.getElementById("undoBtn"),
+                    () => fetch("/undo", { method: "POST" }),
+                );
             }
 
             let _alignDismissed = false;
@@ -1705,97 +1605,41 @@ let meshCentroid = [0, 0, 0];
                     );
                     if (!proceed) return;
                 }
-                const btn = document.getElementById("alignOffsetsBtn");
-                btn.textContent = "Aligning...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/align_offsets", { method: "POST" });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        btn.textContent = "Aligned ✓";
-                    } else {
-                        btn.textContent = data.error || "Error";
-                    }
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    setTimeout(() => {
-                        btn.textContent = "Align";
-                        btn.disabled = false;
-                    }, 3000);
-                }
+                await _runAction(
+                    document.getElementById("alignOffsetsBtn"),
+                    () => fetch("/align_offsets", { method: "POST" }),
+                );
             }
 
             async function runBreakAtSoma() {
-                const btn = document.getElementById("breakAtSomaBtn");
-                btn.textContent = "Breaking...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/break_at_soma", { method: "POST" });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        btn.textContent = `Break (${data.nNeurites} neurites)`;
-                        fetchAnnotations();
-                    } else {
-                        btn.textContent = data.error || "Error";
-                    }
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    setTimeout(() => {
-                        btn.textContent = "Break";
-                        btn.disabled = false;
-                    }, 3000);
-                }
+                const data = await _runAction(
+                    document.getElementById("breakAtSomaBtn"),
+                    () => fetch("/break_at_soma", { method: "POST" }),
+                );
+                if (data && data.ok) fetchAnnotations();
             }
 
             async function runCompactMesh() {
-                const btn = document.getElementById("compactMeshBtn");
-                btn.textContent = "Compacting...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/compact_mesh", { method: "POST" });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        btn.textContent = `Compact (${data.vertsAfter.toLocaleString()}v, ${data.facesAfter.toLocaleString()}f)`;
-                    } else {
-                        btn.textContent = data.error || "Error";
-                    }
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    setTimeout(() => {
-                        btn.textContent = "Compact";
-                        btn.disabled = false;
-                    }, 3000);
-                }
+                await _runAction(
+                    document.getElementById("compactMeshBtn"),
+                    () => fetch("/compact_mesh", { method: "POST" }),
+                );
             }
 
             async function runMergeSelected() {
                 if (manualHighlightFaces.size === 0) return;
-                const btn = document.getElementById("hlMerge");
-                btn.textContent = "Merging...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/merge_selected", {
+                const data = await _runAction(
+                    document.getElementById("hlMerge"),
+                    () => fetch("/merge_selected", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
-                    });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        btn.textContent = `Merged (${data.facesStitched}f)`;
-                        manualHighlightFaces.clear();
-                        rebuildManualHighlight();
-                        syncManualHighlight();
-                    } else {
-                        btn.textContent = data.error || "Error";
-                    }
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                    setTimeout(() => { btn.textContent = "Merge"; }, 3000);
+                    }),
+                );
+                if (data && data.ok) {
+                    manualHighlightFaces.clear();
+                    rebuildManualHighlight();
+                    syncManualHighlight();
                 }
             }
 
@@ -1991,27 +1835,15 @@ let meshCentroid = [0, 0, 0];
             }
 
             async function runSkeletonize() {
-                const btn = document.getElementById("skeletonizeBtn");
-                btn.textContent = "Running...";
-                btn.disabled = true;
-                try {
-                    const resp = await fetch("/skeletonize", {
+                const data = await _runAction(
+                    document.getElementById("skeletonizeBtn"),
+                    () => fetch("/skeletonize", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ params: getSkelParams() }),
-                    });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        btn.textContent = `${data.nNodes}n ${data.nEdges}e`;
-                        updateLoadedPanel();
-                    } else {
-                        btn.textContent = data.error || "Error";
-                    }
-                } catch (e) {
-                    btn.textContent = "Error";
-                } finally {
-                    btn.disabled = false;
-                }
+                    }),
+                );
+                if (data && data.ok) updateLoadedPanel();
             }
 
             async function runFindPath(mode) {
