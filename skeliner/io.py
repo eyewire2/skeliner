@@ -479,8 +479,12 @@ def save_soma_npz(soma: Soma, path: str | Path, *, compress: bool = True) -> Non
     )
     if soma.verts is not None:
         payload["verts"] = soma.verts.astype(np.int64, copy=False)
-    if soma.nucleus_center is not None:
-        payload["nucleus_center"] = soma.nucleus_center
+    if soma.nucleus is not None:
+        nuc = soma.nucleus
+        payload["nucleus_center"] = np.asarray(nuc["center"], dtype=np.float64)
+        payload["nucleus_peak_r"] = np.array(nuc["peak_r"], dtype=np.float64)
+        payload["nucleus_z_range"] = np.array(nuc["z_range"], dtype=np.float64)
+        payload["nucleus_slices"] = np.asarray(nuc["slices"], dtype=np.float64)
 
     save_fn = np.savez_compressed if compress else np.savez
     save_fn(path, **payload)
@@ -490,12 +494,20 @@ def load_soma_npz(path: str | Path) -> Soma:
     """Load a :class:`Soma` written by :func:`save_soma_npz`."""
     path = Path(path)
     with np.load(path, allow_pickle=False) as z:
+        nucleus = None
+        if "nucleus_center" in z:
+            nucleus = {
+                "center": z["nucleus_center"].astype(np.float64),
+                "peak_r": float(z["nucleus_peak_r"]) if "nucleus_peak_r" in z else 0.0,
+                "z_range": tuple(z["nucleus_z_range"].astype(np.float64)) if "nucleus_z_range" in z else (0.0, 0.0),
+                "slices": z["nucleus_slices"].astype(np.float64) if "nucleus_slices" in z else np.empty((0, 4)),
+            }
         return Soma(
             center=z["center"].astype(np.float64),
             axes=z["axes"].astype(np.float64),
             R=z["R"].astype(np.float64),
             verts=z["verts"].astype(np.int64) if "verts" in z else None,
-            nucleus_center=z["nucleus_center"].astype(np.float64) if "nucleus_center" in z else None,
+            nucleus=nucleus,
         )
 
 

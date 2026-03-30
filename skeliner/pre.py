@@ -1621,7 +1621,12 @@ def _assign_soma_verts(
     else:
         soma.verts = soma_verts_arr
 
-    soma.nucleus_center = center  # from find_nucleus_center
+    soma.nucleus = {
+        "center": nuc["center"],
+        "peak_r": nuc["peak_r"],
+        "z_range": nuc["z_range"],
+        "slices": nuc["slices"],
+    }
     return soma
 
 
@@ -2355,7 +2360,9 @@ def break_at_soma(
     # --- refit soma if we absorbed extra verts ---
     if extra_soma_vi:
         all_soma_vi = np.union1d(soma.verts, np.array(extra_soma_vi, dtype=np.intp))
+        prev_nucleus = soma.nucleus
         soma = Soma.fit(verts[all_soma_vi], verts=all_soma_vi)
+        soma.nucleus = prev_nucleus
 
     if verbose:
         print(
@@ -7612,7 +7619,17 @@ def find_soma_via_z_contour(
     soma_vert_set = set(faces[soma_face].ravel().tolist())
     soma_arr = np.fromiter(sorted(soma_vert_set), dtype=np.intp)
     soma = Soma.fit(mesh.vertices[soma_arr], verts=soma_arr)
-    soma.nucleus_center = nc  # from _z_scan
+
+    # Build nucleus dict from _z_scan results
+    nuc_slices = np.array(
+        [(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best]
+    )
+    soma.nucleus = {
+        "center": nc,
+        "peak_r": float(nuc_slices[:, 3].max()),
+        "z_range": (float(nuc_slices[0, 0]), float(nuc_slices[-1, 0])),
+        "slices": nuc_slices,
+    }
 
     if verbose:
         print(

@@ -192,25 +192,40 @@ def test_soma_npz_derived_fields(tmp_path):
     assert np.allclose(soma.contains(pt), loaded.contains(pt))
 
 
-def test_soma_npz_nucleus_center(tmp_path):
-    """nucleus_center survives round-trip."""
+def test_soma_npz_nucleus_roundtrip(tmp_path):
+    """Full nucleus dict survives round-trip."""
+    nucleus = {
+        "center": np.array([100.0, 200.0, 300.0]),
+        "peak_r": 1500.0,
+        "z_range": (280.0, 340.0),
+        "slices": np.array([
+            [280, 101, 201, 1200],
+            [290, 102, 202, 1400],
+            [300, 100, 200, 1500],
+            [310, 99, 199, 1300],
+            [340, 98, 198, 1000],
+        ], dtype=np.float64),
+    }
     soma = Soma(center=[10, 20, 30], axes=[5, 4, 3], R=np.eye(3),
-                nucleus_center=[100, 200, 300])
+                nucleus=nucleus)
     path = tmp_path / "soma_nuc.npz"
     save_soma_npz(soma, path)
 
     loaded = load_soma_npz(path)
-    assert np.allclose(loaded.nucleus_center, soma.nucleus_center)
+    assert np.allclose(loaded.nucleus["center"], nucleus["center"])
+    assert loaded.nucleus["peak_r"] == nucleus["peak_r"]
+    assert loaded.nucleus["z_range"] == nucleus["z_range"]
+    assert np.array_equal(loaded.nucleus["slices"], nucleus["slices"])
 
 
-def test_soma_npz_nucleus_center_none(tmp_path):
-    """Soma without nucleus_center loads as None (backward compat)."""
+def test_soma_npz_nucleus_none(tmp_path):
+    """Soma without nucleus loads as None (backward compat)."""
     soma = Soma(center=[0, 0, 0], axes=[1, 1, 1], R=np.eye(3))
     path = tmp_path / "soma_no_nuc.npz"
     save_soma_npz(soma, path)
 
     loaded = load_soma_npz(path)
-    assert loaded.nucleus_center is None
+    assert loaded.nucleus is None
 
 
 # ------------------------------------------------------------------------
