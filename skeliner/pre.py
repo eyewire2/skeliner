@@ -1621,6 +1621,7 @@ def _assign_soma_verts(
     else:
         soma.verts = soma_verts_arr
 
+    soma.nucleus_center = center  # from find_nucleus_center
     return soma
 
 
@@ -7611,6 +7612,7 @@ def find_soma_via_z_contour(
     soma_vert_set = set(faces[soma_face].ravel().tolist())
     soma_arr = np.fromiter(sorted(soma_vert_set), dtype=np.intp)
     soma = Soma.fit(mesh.vertices[soma_arr], verts=soma_arr)
+    soma.nucleus_center = nc  # from _z_scan
 
     if verbose:
         print(

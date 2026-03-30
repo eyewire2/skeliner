@@ -479,6 +479,8 @@ def save_soma_npz(soma: Soma, path: str | Path, *, compress: bool = True) -> Non
     )
     if soma.verts is not None:
         payload["verts"] = soma.verts.astype(np.int64, copy=False)
+    if soma.nucleus_center is not None:
+        payload["nucleus_center"] = soma.nucleus_center
 
     save_fn = np.savez_compressed if compress else np.savez
     save_fn(path, **payload)
@@ -493,6 +495,7 @@ def load_soma_npz(path: str | Path) -> Soma:
             axes=z["axes"].astype(np.float64),
             R=z["R"].astype(np.float64),
             verts=z["verts"].astype(np.int64) if "verts" in z else None,
+            nucleus_center=z["nucleus_center"].astype(np.float64) if "nucleus_center" in z else None,
         )
 
 

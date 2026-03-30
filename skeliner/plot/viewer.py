@@ -1047,9 +1047,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     async def detect_soma(request):
         """Run soma detection and write result to annotations.
 
-        Accepts optional JSON body ``{"method": "new"}`` or
-        ``{"method": "ring_cutoff"}``.  Defaults to the new per-tip
-        neurite-exclusion method.
+        Accepts optional JSON body ``{"method": "z_contour"}`` or
+        ``{"method": "ring_cutoff"}``.  Defaults to z_contour.
         """
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1057,10 +1056,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             )
 
         # Parse method choice from request body (POST with JSON)
-        method = "new"
+        method = "z_contour"
         try:
             body = await request.json()
-            method = body.get("method", "new")
+            method = body.get("method", "z_contour")
         except Exception:
             pass
 
@@ -1068,18 +1067,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             from skeliner.pre import find_soma_via_ring_cutoff as _find
             label_prefix = "soma (ring_cutoff)"
             color = [0.9, 0.7, 0.3]
-        elif method == "alt":
-            from skeliner.pre import find_soma_alt as _find
-            label_prefix = "soma (alt)"
-            color = [0.3, 0.9, 0.7]
-        elif method == "z_contour":
+        else:
             from skeliner.pre import find_soma_via_z_contour as _find
             label_prefix = "soma (z_contour)"
             color = [0.85, 0.65, 0.13]
-        else:
-            from skeliner.pre import find_soma as _find
-            label_prefix = "soma"
-            color = [0.9, 0.5, 0.9]
 
         mesh = mesh_state["mesh"]
         if method == "z_contour":

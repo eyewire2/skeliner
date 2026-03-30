@@ -74,12 +74,16 @@ class Soma:
         axes expressed in world space.
     verts  : optional (N,) int64
         Mesh-vertex IDs belonging to the soma surface.
+    nucleus_center : optional (3,) float
+        XYZ world-space coordinates of the nucleus void center,
+        if detected during soma detection.
     """
 
     center: np.ndarray  # (3,)
     axes: np.ndarray  # (3,)
     R: np.ndarray  # (3,3)
     verts: np.ndarray | None = None  # (N,)
+    nucleus_center: np.ndarray | None = None  # (3,)
 
     # ---- cached helper (not part of the public API) -----------------------
     _W: np.ndarray = field(init=False, repr=False)  # (3,3) affine map
@@ -91,6 +95,9 @@ class Soma:
         self.center = np.asarray(self.center, dtype=np.float64).reshape(3)
         self.axes = np.asarray(self.axes, dtype=np.float64).reshape(3)
         self.R = np.asarray(self.R, dtype=np.float64).reshape(3, 3)
+
+        if self.nucleus_center is not None:
+            self.nucleus_center = np.asarray(self.nucleus_center, dtype=np.float64).reshape(3)
 
         # ---- fast safety checks -----------------------------------------
         if not np.all(np.diff(self.axes) <= 0):

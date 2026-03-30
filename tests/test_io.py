@@ -12,7 +12,10 @@ import numpy as np
 import pytest
 
 from skeliner import Skeleton, Soma, dx, skeletonize
-from skeliner.io import load_mesh, load_skeleton_npz, load_soma_npz, load_skeleton_swc, save_soma_npz
+from skeliner.io import (
+    load_mesh, load_skeleton_npz, load_soma_npz, load_skeleton_swc,
+    save_soma_npz, save_organelles_npz, load_organelles_npz,
+)
 
 SAMPLES_DIR = Path(__file__).parent / "data" 
 
@@ -189,6 +192,27 @@ def test_soma_npz_derived_fields(tmp_path):
     assert np.allclose(soma.contains(pt), loaded.contains(pt))
 
 
+def test_soma_npz_nucleus_center(tmp_path):
+    """nucleus_center survives round-trip."""
+    soma = Soma(center=[10, 20, 30], axes=[5, 4, 3], R=np.eye(3),
+                nucleus_center=[100, 200, 300])
+    path = tmp_path / "soma_nuc.npz"
+    save_soma_npz(soma, path)
+
+    loaded = load_soma_npz(path)
+    assert np.allclose(loaded.nucleus_center, soma.nucleus_center)
+
+
+def test_soma_npz_nucleus_center_none(tmp_path):
+    """Soma without nucleus_center loads as None (backward compat)."""
+    soma = Soma(center=[0, 0, 0], axes=[1, 1, 1], R=np.eye(3))
+    path = tmp_path / "soma_no_nuc.npz"
+    save_soma_npz(soma, path)
+
+    loaded = load_soma_npz(path)
+    assert loaded.nucleus_center is None
+
+
 # ------------------------------------------------------------------------
 #  Skeleton classmethod round-trips
 # ------------------------------------------------------------------------
@@ -214,3 +238,64 @@ def test_skeleton_from_npz(tmp_path, reference_mesh):
     assert loaded.edges.shape == skel.edges.shape
     assert np.allclose(loaded.soma.center, skel.soma.center)
     assert np.allclose(loaded.soma.axes, skel.soma.axes)
+
+
+# ------------------------------------------------------------------------
+#  Organelles NPZ round-trips
+# ------------------------------------------------------------------------
+def test_organelles_npz_full_roundtrip(tmp_path):
+    """All masks + mesh stats survive round-trip."""
+    nF = 1000
+    pocket = np.zeros(nF, dtype=bool)
+    pocket[:100] = True
+    isolated = np.zeros(nF, dtype=bool)
+    isolated[200:250] = True
+    expanded = np.zeros(nF, dtype=bool)
+    expanded[500:520] = True
+
+    outward_dots = np.random.default_rng(42).uniform(-1, 1, nF)
+    face_comp = np.random.default_rng(42).integers(0, 5, nF)
+    main_ci = 0
+    mesh_stats = (outward_dots, face_comp, main_ci, face_comp == main_ci)
+
+    path = tmp_path / "org_full.npz"
+    save_organelles_npz(pocket, isolated, expanded=expanded,
+                        mesh_stats=mesh_stats, path=path)
+
+    d = load_organelles_npz(path)
+    assert np.array_equal(d["pocket"], pocket)
+    assert np.array_equal(d["isolated"], isolated)
+    assert np.array_equal(d["expanded"], expanded)
+    assert np.allclose(d["outward_dots"], outward_dots)
+    assert np.array_equal(d["face_comp"], face_comp)
+    assert int(d["main_ci"]) == main_ci
+
+
+def test_organelles_npz_masks_only(tmp_path):
+    """Round-trip without mesh stats."""
+    nF = 500
+    pocket = np.ones(nF, dtype=bool)
+    isolated = np.zeros(nF, dtype=bool)
+
+    path = tmp_path / "org_masks.npz"
+    save_organelles_npz(pocket, isolated, path=path)
+
+    d = load_organelles_npz(path)
+    assert np.array_equal(d["pocket"], pocket)
+    assert np.array_equal(d["isolated"], isolated)
+    assert d["expanded"].sum() == 0  # defaults to zeros
+    assert "outward_dots" not in d
+
+
+def test_organelles_npz_backward_compat(tmp_path):
+    """Old files without 'expanded' key load with zeros fallback."""
+    nF = 100
+    pocket = np.ones(nF, dtype=bool)
+    isolated = np.zeros(nF, dtype=bool)
+    # Simulate old format: no expanded key
+    path = tmp_path / "org_old.npz"
+    np.savez_compressed(path, pocket=pocket, isolated=isolated)
+
+    d = load_organelles_npz(path)
+    assert np.array_equal(d["pocket"], pocket)
+    assert np.array_equal(d["expanded"], np.zeros(nF, dtype=bool))
