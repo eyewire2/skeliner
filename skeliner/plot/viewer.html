@@ -418,45 +418,29 @@
                     background: #111; color: #eee; border: 1px solid #555; border-radius: 3px;
                 " />
             </div>
-            <div style="color: #888; margin-bottom: 6px">Mesh</div>
-            <div style="margin-bottom: 12px">
-                <button id="saveMeshObj" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
-                    OBJ
-                </button>
+            <div style="display:flex;gap:12px;margin-bottom:12px">
+                <div>
+                    <div style="color:#888;margin-bottom:4px">OBJ</div>
+                    <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Mesh</button>
+                </div>
+                <div>
+                    <div style="color:#888;margin-bottom:4px">NPZ</div>
+                    <button id="saveSkelNpz" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Skeleton</button>
+                    <button id="saveSomaNpz" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Soma</button>
+                    <button id="saveOrgMasks" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Organelles</button>
+                </div>
+                <div>
+                    <div style="color:#888;margin-bottom:4px">SWC</div>
+                    <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Skeleton</button>
+                </div>
+                <div>
+                    <div style="color:#888;margin-bottom:4px">JSON</div>
+                    <button id="saveAnnotations" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Annotations</button>
+                </div>
             </div>
-            <div style="color: #888; margin-bottom: 6px">Skeleton</div>
-            <div style="margin-bottom: 12px">
-                <button id="saveSkelSwc" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
-                    SWC
-                </button>
-                <button
-                    id="saveSkelNpz"
-                    style="font-size: 12px; cursor: pointer; padding: 6px 20px; margin-left: 8px"
-                >
-                    NPZ
-                </button>
-            </div>
-            <div style="color: #888; margin-bottom: 6px">Soma</div>
-            <div style="margin-bottom: 12px">
-                <button id="saveSomaNpz" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
-                    NPZ
-                </button>
-            </div>
-            <div style="color: #888; margin-bottom: 6px">Organelles</div>
-            <div style="margin-bottom: 12px">
-                <button id="saveOrgMasks" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
-                    Masks
-                </button>
-            </div>
-            <div style="color: #888; margin-bottom: 6px">Annotations</div>
-            <div style="margin-bottom: 12px">
-                <button id="saveAnnotations" style="font-size: 12px; cursor: pointer; padding: 6px 20px">
-                    JSON
-                </button>
-            </div>
-            <hr style="border: none; border-top: 1px solid #444; margin: 12px 0" />
+            <hr style="border:none;border-top:1px solid #444;margin:12px 0" />
             <div>
-                <button id="saveAll" style="font-size: 12px; cursor: pointer; padding: 6px 20px">All</button>
+                <button id="saveAll" style="font-size:12px;cursor:pointer;padding:6px 20px">All</button>
             </div>
             <div id="saveDialogStatus" style="margin-top: 8px; font-size: 11px; color: #6f6"></div>
         </div>
