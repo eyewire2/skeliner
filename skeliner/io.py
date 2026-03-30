@@ -13,6 +13,7 @@ from .dataclass import Skeleton, Soma
 
 __all__ = [
     "load_mesh",
+    "save_mesh",
     "load_skeleton_swc",
     "save_skeleton_swc",
     "load_skeleton_npz",
@@ -51,6 +52,15 @@ def load_mesh(filepath: str | Path) -> trimesh.Trimesh:
     mesh = trimesh.load_mesh(filepath, process=False)
 
     return mesh
+
+
+def save_mesh(mesh: trimesh.Trimesh, path: str | Path) -> None:
+    """Write a mesh to disk. Format is inferred from the file extension.
+
+    Supports any format that trimesh can export (obj, ply, stl, glb, ...).
+    """
+    path = Path(path)
+    mesh.export(str(path))
 
 
 # -----------

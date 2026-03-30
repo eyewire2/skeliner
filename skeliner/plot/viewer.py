@@ -2021,8 +2021,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         })
 
     async def export_mesh(request):
-        """Export the current mesh as a downloadable OBJ file."""
+        """Export the current mesh as a downloadable file."""
         from starlette.responses import Response
+        from skeliner.io import save_mesh
+        import tempfile
 
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2031,47 +2033,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         fmt = request.query_params.get("format", "obj")
+        prefix = request.query_params.get("prefix", "")
+        tmp = Path(tempfile.mktemp(suffix=f".{fmt}"))
         loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(
-            None, lambda: mesh.export(file_type=fmt)
-        )
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-
-        prefix = request.query_params.get("prefix", "")
-        return Response(
-            content=data,
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}mesh_cleaned.{fmt}"'},
-        )
-
-    async def export_mesh_stats(request):
-        """Save organelle precomputed data (outward_dots, face_comp, main_ci)."""
-        from starlette.responses import Response
-        import tempfile
-
-        precomputed = mesh_state.get("mesh_stats")
-        if precomputed is None:
-            return JSONResponse(
-                {"ok": False, "error": "No organelle precompute data"}, status_code=400
-            )
-
-        outward_dots, face_comp, main_ci, _ = precomputed
-        save_data = {
-            "outward_dots": outward_dots,
-            "face_comp": face_comp,
-            "main_ci": np.array(main_ci),
-        }
-
-        prefix = request.query_params.get("prefix", "")
-        tmp = Path(tempfile.mktemp(suffix=".npz"))
-        np.savez_compressed(tmp, **save_data)
+        await loop.run_in_executor(None, lambda: save_mesh(mesh, tmp))
         content = tmp.read_bytes()
         tmp.unlink(missing_ok=True)
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}mesh_stats.npz"'},
+            headers={"Content-Disposition": f'attachment; filename="{prefix}mesh_cleaned.{fmt}"'},
         )
 
     async def export_organelles(request):
@@ -2600,7 +2571,6 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/compact_mesh", do_compact_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
-            Route("/export_mesh_stats", export_mesh_stats, methods=["GET"]),
             Route("/export_organelles", export_organelles, methods=["GET"]),
             Route("/export_soma", export_soma, methods=["GET"]),
             Route("/export_annotations", export_annotations, methods=["GET"]),
