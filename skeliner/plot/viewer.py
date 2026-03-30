@@ -87,11 +87,11 @@ def _skeleton_to_buffers(skel, centroid: np.ndarray) -> dict[str, Any]:
 
 def _load_skeleton_as_nm(path: Path) -> Any:
     """Load a skeleton file and convert to nm."""
-    from skeliner.io import load_swc, load_npz
+    from skeliner.io import load_skeleton_swc, load_skeleton_npz
 
     suffix = path.suffix.lower()
     if suffix == ".swc":
-        skel = load_swc(path)
+        skel = load_skeleton_swc(path)
         # Check if unit is in meta; if not, infer from coordinate magnitude
         unit = skel.meta.get("unit", None)
         if unit is None:
@@ -108,7 +108,7 @@ def _load_skeleton_as_nm(path: Path) -> Any:
             skel.soma.axes *= 1000.0
         return skel
     elif suffix == ".npz":
-        skel = load_npz(path)
+        skel = load_skeleton_npz(path)
         unit = skel.meta.get("unit", "nm")
         if unit in ("um", "µm", "μm", "micron", "micrometer"):
             skel.nodes *= 1000.0
@@ -442,51 +442,53 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 return JSONResponse({"ok": True, "type": "mesh", "name": filename})
 
             elif suffix == ".npz" and _is_organelle_data(tmp_path):
-                data = np.load(str(tmp_path), allow_pickle=False)
+                from skeliner.io import load_organelles_npz
+                data = load_organelles_npz(tmp_path)
                 loaded = []
 
-                # Masks → organelles
-                if "pocket" in data and "isolated" in data:
-                    pocket = data["pocket"]
-                    isolated = data["isolated"]
-                    expanded = data["expanded"] if "expanded" in data else np.zeros_like(pocket)
-                    mesh_state["organelles"] = {
-                        "pocket": pocket, "isolated": isolated, "expanded": expanded,
-                    }
-                    loaded.append(f"pocket={int(pocket.sum()):,}")
-                    loaded.append(f"isolated={int(isolated.sum()):,}")
+                pocket, isolated, expanded = data["pocket"], data["isolated"], data["expanded"]
+                mesh_state["organelles"] = {
+                    "pocket": pocket, "isolated": isolated, "expanded": expanded,
+                }
+                loaded.append(f"pocket={int(pocket.sum()):,}")
+                loaded.append(f"isolated={int(isolated.sum()):,}")
+                if expanded.any():
+                    loaded.append(f"expanded={int(expanded.sum()):,}")
 
-                    # Visualize
-                    ann = {}
-                    if annotations_path.exists():
-                        ann = json.loads(annotations_path.read_text(encoding="utf-8"))
-                    if "highlights" not in ann:
-                        ann["highlights"] = []
-                    if pocket.any():
-                        ann["highlights"].append({
-                            "faces": np.where(pocket)[0].tolist(),
-                            "color": [1, 0.15, 0.15],
-                            "label": f"organelle:pocket ({int(pocket.sum()):,})",
-                        })
-                    if isolated.any():
-                        ann["highlights"].append({
-                            "faces": np.where(isolated)[0].tolist(),
-                            "color": [0.15, 0.8, 0.15],
-                            "label": f"organelle:isolated ({int(isolated.sum()):,})",
-                        })
-                    annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+                # Visualize
+                ann = {}
+                if annotations_path.exists():
+                    ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+                if "highlights" not in ann:
+                    ann["highlights"] = []
+                if pocket.any():
+                    ann["highlights"].append({
+                        "faces": np.where(pocket)[0].tolist(),
+                        "color": [1, 0.15, 0.15],
+                        "label": f"organelle:pocket ({int(pocket.sum()):,})",
+                    })
+                if isolated.any():
+                    ann["highlights"].append({
+                        "faces": np.where(isolated)[0].tolist(),
+                        "color": [0.15, 0.8, 0.15],
+                        "label": f"organelle:isolated ({int(isolated.sum()):,})",
+                    })
+                if expanded.any():
+                    ann["highlights"].append({
+                        "faces": np.where(expanded)[0].tolist(),
+                        "color": [1, 0.6, 0.15],
+                        "label": f"organelle:expanded ({int(expanded.sum()):,})",
+                    })
+                annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
-                # Precomputed → mesh_stats
-                if "outward_dots" in data and "face_comp" in data:
-                    outward_dots = data["outward_dots"]
+                # Mesh stats
+                if "outward_dots" in data:
                     face_comp = data["face_comp"]
-                    main_ci = int(data["main_ci"]) if "main_ci" in data else int(
-                        np.argmax(np.bincount(face_comp))
-                    )
+                    main_ci = int(data["main_ci"])
                     mesh_state["mesh_stats"] = (
-                        outward_dots, face_comp, main_ci, face_comp == main_ci
+                        data["outward_dots"], face_comp, main_ci, face_comp == main_ci
                     )
-                    loaded.append("precomputed")
+                    loaded.append("mesh_stats")
 
                 print(f"Loaded organelle npz: {', '.join(loaded)}")
                 await broadcast({"type": "annotations_updated"})
@@ -2075,6 +2077,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     async def export_organelles(request):
         """Save organelle masks (pocket, isolated, expanded) + mesh stats."""
         from starlette.responses import Response
+        from skeliner.io import save_organelles_npz
         import tempfile
 
         org = mesh_state.get("organelles")
@@ -2083,22 +2086,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No organelle masks"}, status_code=400
             )
 
-        save_data = {
-            "pocket": org["pocket"],
-            "isolated": org["isolated"],
-            "expanded": org["expanded"],
-        }
-
-        precomputed = mesh_state.get("mesh_stats")
-        if precomputed is not None:
-            outward_dots, face_comp, main_ci, _ = precomputed
-            save_data["outward_dots"] = outward_dots
-            save_data["face_comp"] = face_comp
-            save_data["main_ci"] = np.array(main_ci)
-
         prefix = request.query_params.get("prefix", "")
         tmp = Path(tempfile.mktemp(suffix=".npz"))
-        np.savez_compressed(tmp, **save_data)
+        save_organelles_npz(
+            org["pocket"], org["isolated"],
+            expanded=org["expanded"],
+            mesh_stats=mesh_state.get("mesh_stats"),
+            path=tmp,
+        )
         content = tmp.read_bytes()
         tmp.unlink(missing_ok=True)
         return Response(
@@ -2167,14 +2162,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 status_code=400,
             )
 
-        from skeliner.io import to_swc, to_npz
+        from skeliner.io import save_skeleton_swc, save_skeleton_npz
 
         loop = asyncio.get_event_loop()
         tmp = Path(tempfile.mktemp(suffix=f".{fmt}"))
         if fmt == "npz":
-            await loop.run_in_executor(None, lambda: to_npz(skel, tmp))
+            await loop.run_in_executor(None, lambda: save_skeleton_npz(skel, tmp))
         else:
-            await loop.run_in_executor(None, lambda: to_swc(skel, tmp))
+            await loop.run_in_executor(None, lambda: save_skeleton_swc(skel, tmp))
         content = tmp.read_bytes()
         tmp.unlink(missing_ok=True)
 

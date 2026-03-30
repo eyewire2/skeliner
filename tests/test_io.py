@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from skeliner import Skeleton, Soma, dx, skeletonize
-from skeliner.io import load_mesh, load_npz, load_soma_npz, load_swc, save_soma_npz
+from skeliner.io import load_mesh, load_skeleton_npz, load_soma_npz, load_skeleton_swc, save_soma_npz
 
 SAMPLES_DIR = Path(__file__).parent / "data" 
 
@@ -43,8 +43,8 @@ def test_io_roundtrip(reference_mesh, tmp_path):
     assert npz_path.exists()
 
     # --- read back -----------------------------------------------------
-    skel_from_swc = load_swc(swc_path)
-    skel_from_npz = load_npz(npz_path)
+    skel_from_swc = load_skeleton_swc(swc_path)
+    skel_from_npz = load_skeleton_npz(npz_path)
     assert skel_from_npz._nodes_kdtree is not None
     assert skel_from_npz._node_neighbors is not None
 
@@ -85,7 +85,7 @@ def test_swc_roundtrip_exact(fname: str, tmp_path: Path):
     assert src_path.exists(), f"missing sample file {src_path}"
 
     # 1 · load the reference skeleton
-    skel_ref = load_swc(src_path)
+    skel_ref = load_skeleton_swc(src_path)
 
     # 2 · write it back
     out_path = tmp_path / fname
@@ -93,7 +93,7 @@ def test_swc_roundtrip_exact(fname: str, tmp_path: Path):
     assert out_path.exists()
 
     # 3 · read what we just wrote
-    skel_rt = load_swc(out_path)
+    skel_rt = load_skeleton_swc(out_path)
 
     # 4 · compare ­­­—­­ geometry ------------------------------------------------
     assert np.allclose(
@@ -126,7 +126,7 @@ def test_skeleton_roundtrip(tmp_path, reference_mesh):
     skel0 = skeletonize(reference_mesh, verbose=False)
     out = tmp_path / "rt.swc"
     skel0.to_swc(out)
-    skel1 = load_swc(out)
+    skel1 = load_skeleton_swc(out)
 
     assert np.allclose(skel0.nodes,  skel1.nodes,  rtol=1e-6)
     assert _edges_equal(skel0.edges, skel1.edges)
@@ -193,9 +193,9 @@ def test_soma_npz_derived_fields(tmp_path):
 #  Skeleton classmethod round-trips
 # ------------------------------------------------------------------------
 def test_skeleton_from_swc(tmp_path):
-    """Skeleton.from_swc matches load_swc."""
+    """Skeleton.from_swc matches load_skeleton_swc."""
     src = SAMPLES_DIR / "60427.swc"
-    skel_func = load_swc(src)
+    skel_func = load_skeleton_swc(src)
     skel_cls = Skeleton.from_swc(src)
 
     assert np.allclose(skel_cls.nodes, skel_func.nodes)
@@ -204,7 +204,7 @@ def test_skeleton_from_swc(tmp_path):
 
 
 def test_skeleton_from_npz(tmp_path, reference_mesh):
-    """Skeleton.from_npz matches load_npz."""
+    """Skeleton.from_npz matches load_skeleton_npz."""
     skel = skeletonize(reference_mesh, verbose=False)
     path = tmp_path / "skel_cls.npz"
     skel.to_npz(path)

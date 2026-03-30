@@ -13,12 +13,14 @@ from .dataclass import Skeleton, Soma
 
 __all__ = [
     "load_mesh",
-    "load_swc",
-    "to_swc",
-    "load_npz",
-    "to_npz",
+    "load_skeleton_swc",
+    "save_skeleton_swc",
+    "load_skeleton_npz",
+    "save_skeleton_npz",
     "save_soma_npz",
     "load_soma_npz",
+    "save_organelles_npz",
+    "load_organelles_npz",
 ]
 
 _META_KV = re.compile(r"#\s*([^:]+)\s*:\s*(.+)")  #  key: value
@@ -56,7 +58,7 @@ def load_mesh(filepath: str | Path) -> trimesh.Trimesh:
 # -----------
 
 
-def load_swc(
+def load_skeleton_swc(
     path: str | Path,
     *,
     scale: float = 1.0,
@@ -169,7 +171,7 @@ def load_swc(
     )
 
 
-def to_swc(
+def save_skeleton_swc(
     skeleton,
     path: str | Path,
     include_header: bool = True,
@@ -255,9 +257,9 @@ def to_swc(
 # -----------
 
 
-def load_npz(path: str | Path) -> Skeleton:
+def load_skeleton_npz(path: str | Path) -> Skeleton:
     """
-    Load a Skeleton that was written with `Skeleton.to_npz`.
+    Load a Skeleton that was written with `Skeleton.to_npz` / `save_skeleton_npz`.
     """
     path = Path(path)
 
@@ -333,7 +335,7 @@ def load_npz(path: str | Path) -> Skeleton:
     return skel
 
 
-def to_npz(
+def save_skeleton_npz(
     skeleton: Skeleton,
     path: str | Path,
     *,
@@ -482,6 +484,78 @@ def load_soma_npz(path: str | Path) -> Soma:
             R=z["R"].astype(np.float64),
             verts=z["verts"].astype(np.int64) if "verts" in z else None,
         )
+
+
+# ---------------------------
+# --- Organelles NPZ I/O ---
+# ---------------------------
+
+
+def save_organelles_npz(
+    pocket: np.ndarray,
+    isolated: np.ndarray,
+    *,
+    expanded: np.ndarray | None = None,
+    mesh_stats: tuple | None = None,
+    path: str | Path,
+    compress: bool = True,
+) -> None:
+    """Write organelle masks (and optional mesh stats) to ``.npz``.
+
+    Parameters
+    ----------
+    pocket, isolated : (nFaces,) bool
+    expanded : (nFaces,) bool or None
+        Faces added by :func:`break_at_soma`.  Saved as zeros if None.
+    mesh_stats : tuple or None
+        ``(outward_dots, face_comp, main_ci, main_face_mask)`` from
+        :func:`compute_mesh_stats`.  The fourth element is not stored
+        (derivable from ``face_comp == main_ci``).
+    path : path-like
+    compress : bool
+    """
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+
+    payload: dict[str, np.ndarray] = {
+        "pocket": np.asarray(pocket, dtype=bool),
+        "isolated": np.asarray(isolated, dtype=bool),
+        "expanded": np.asarray(expanded, dtype=bool) if expanded is not None else np.zeros_like(pocket),
+    }
+    if mesh_stats is not None:
+        outward_dots, face_comp, main_ci, _ = mesh_stats
+        payload["outward_dots"] = outward_dots
+        payload["face_comp"] = face_comp
+        payload["main_ci"] = np.array(main_ci)
+
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_organelles_npz(path: str | Path) -> dict[str, np.ndarray | None]:
+    """Load organelle data written by :func:`save_organelles_npz`.
+
+    Returns
+    -------
+    dict with keys:
+
+    - ``pocket``, ``isolated``, ``expanded`` — bool masks (nFaces,)
+    - ``outward_dots``, ``face_comp``, ``main_ci`` — mesh stats (present
+      only if they were saved)
+    """
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        d: dict[str, np.ndarray | None] = {
+            "pocket": z["pocket"].astype(bool),
+            "isolated": z["isolated"].astype(bool),
+            "expanded": z["expanded"].astype(bool) if "expanded" in z else np.zeros_like(z["pocket"]),
+        }
+        if "outward_dots" in z:
+            d["outward_dots"] = z["outward_dots"]
+            d["face_comp"] = z["face_comp"]
+            d["main_ci"] = z["main_ci"]
+        return d
 
 
 # --------------------------
@@ -679,3 +753,24 @@ def load_contact_sites_npz(path: str | Path):
             stats_B=stats_B,
             stats_pair=stats_pair,
         )
+
+
+# Backward-compat wrappers — will be removed in a future release.
+
+def _deprecated_alias(old_name: str, new_func):
+    import functools, warnings
+
+    @functools.wraps(new_func)
+    def wrapper(*args, **kwargs):
+        warnings.warn(
+            f"{old_name}() is deprecated, use {new_func.__name__}() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return new_func(*args, **kwargs)
+    return wrapper
+
+load_swc = _deprecated_alias("load_swc", load_skeleton_swc)
+to_swc = _deprecated_alias("to_swc", save_skeleton_swc)
+load_npz = _deprecated_alias("load_npz", load_skeleton_npz)
+to_npz = _deprecated_alias("to_npz", save_skeleton_npz)

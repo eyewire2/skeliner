@@ -407,7 +407,7 @@ class Skeleton:
         """Write the skeleton to SWC."""
         from . import io
 
-        io.to_swc(
+        io.save_skeleton_swc(
             self,
             path,
             include_header=include_header,
@@ -420,14 +420,14 @@ class Skeleton:
         """Write the skeleton to a compressed NumPy archive."""
         from . import io
 
-        io.to_npz(self, path)
+        io.save_skeleton_npz(self, path)
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "Skeleton":
         """Load a skeleton from a ``.npz`` archive."""
         from . import io
 
-        return io.load_npz(path)
+        return io.load_skeleton_npz(path)
 
     @classmethod
     def from_swc(
@@ -440,7 +440,7 @@ class Skeleton:
         """Load a skeleton from an SWC file."""
         from . import io
 
-        return io.load_swc(path, scale=scale, keep_types=keep_types)
+        return io.load_skeleton_swc(path, scale=scale, keep_types=keep_types)
 
     # ------------------------------------------------------------------
     # radius recommendation
