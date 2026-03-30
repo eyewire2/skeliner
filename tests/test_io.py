@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from skeliner import Skeleton, Soma, dx, skeletonize
+from skeliner.dataclass import Organelles
 from skeliner.io import (
     load_mesh, load_skeleton_npz, load_soma_npz, load_skeleton_swc,
     save_soma_npz, save_organelles_npz, load_organelles_npz,
@@ -268,38 +269,29 @@ def test_organelles_npz_full_roundtrip(tmp_path):
     expanded = np.zeros(nF, dtype=bool)
     expanded[500:520] = True
 
-    outward_dots = np.random.default_rng(42).uniform(-1, 1, nF)
-    face_comp = np.random.default_rng(42).integers(0, 5, nF)
-    main_ci = 0
-    mesh_stats = (outward_dots, face_comp, main_ci, face_comp == main_ci)
+    rng = np.random.default_rng(42)
+    org = Organelles(
+        pocket=pocket, isolated=isolated, expanded=expanded,
+        outward_dots=rng.uniform(-1, 1, nF),
+        face_comp=rng.integers(0, 5, nF).astype(np.int64),
+        main_ci=0,
+    )
 
     path = tmp_path / "org_full.npz"
-    save_organelles_npz(pocket, isolated, expanded=expanded,
-                        mesh_stats=mesh_stats, path=path)
+    save_organelles_npz(org, path)
 
-    d = load_organelles_npz(path)
-    assert np.array_equal(d["pocket"], pocket)
-    assert np.array_equal(d["isolated"], isolated)
-    assert np.array_equal(d["expanded"], expanded)
-    assert np.allclose(d["outward_dots"], outward_dots)
-    assert np.array_equal(d["face_comp"], face_comp)
-    assert int(d["main_ci"]) == main_ci
-
-
-def test_organelles_npz_masks_only(tmp_path):
-    """Round-trip without mesh stats."""
-    nF = 500
-    pocket = np.ones(nF, dtype=bool)
-    isolated = np.zeros(nF, dtype=bool)
-
-    path = tmp_path / "org_masks.npz"
-    save_organelles_npz(pocket, isolated, path=path)
-
-    d = load_organelles_npz(path)
-    assert np.array_equal(d["pocket"], pocket)
-    assert np.array_equal(d["isolated"], isolated)
-    assert d["expanded"].sum() == 0  # defaults to zeros
-    assert "outward_dots" not in d
+    loaded = load_organelles_npz(path)
+    assert np.array_equal(loaded.pocket, org.pocket)
+    assert np.array_equal(loaded.isolated, org.isolated)
+    assert np.array_equal(loaded.expanded, org.expanded)
+    assert np.allclose(loaded.outward_dots, org.outward_dots)
+    assert np.array_equal(loaded.face_comp, org.face_comp)
+    assert loaded.main_ci == org.main_ci
+    # .mask property
+    assert np.array_equal(loaded.mask, pocket | isolated | expanded)
+    # .mesh_stats backward compat
+    od, fc, mc, mm = loaded.mesh_stats
+    assert np.array_equal(mm, loaded.face_comp == loaded.main_ci)
 
 
 def test_organelles_npz_backward_compat(tmp_path):
@@ -307,10 +299,13 @@ def test_organelles_npz_backward_compat(tmp_path):
     nF = 100
     pocket = np.ones(nF, dtype=bool)
     isolated = np.zeros(nF, dtype=bool)
-    # Simulate old format: no expanded key
+    # Simulate old format: no expanded key, but has mesh stats
     path = tmp_path / "org_old.npz"
-    np.savez_compressed(path, pocket=pocket, isolated=isolated)
+    face_comp = np.zeros(nF, dtype=np.int64)
+    np.savez_compressed(path, pocket=pocket, isolated=isolated,
+                        outward_dots=np.zeros(nF), face_comp=face_comp,
+                        main_ci=np.array(0))
 
-    d = load_organelles_npz(path)
-    assert np.array_equal(d["pocket"], pocket)
-    assert np.array_equal(d["expanded"], np.zeros(nF, dtype=bool))
+    loaded = load_organelles_npz(path)
+    assert np.array_equal(loaded.pocket, pocket)
+    assert np.array_equal(loaded.expanded, np.zeros(nF, dtype=bool))

@@ -49,6 +49,55 @@ class _SkeletonModuleView:
 
 
 # -----------------------------------------------------------------------------
+# Organelles dataclass
+# -----------------------------------------------------------------------------
+@dataclass(slots=True)
+class Organelles:
+    """Organelle masks and mesh precomputed stats.
+
+    Returned by :func:`~skeliner.pre.find_organelles` and
+    :func:`~skeliner.io.load_organelles_npz`.
+
+    Parameters
+    ----------
+    pocket : (nFaces,) bool
+        Pocket organelle faces.
+    isolated : (nFaces,) bool
+        Isolated (disconnected) organelle faces.
+    expanded : (nFaces,) bool
+        Faces added by :func:`~skeliner.pre.break_at_soma`.
+    outward_dots : (nFaces,) float
+        Per-face outward score from :func:`~skeliner.pre.compute_mesh_stats`.
+    face_comp : (nFaces,) int
+        Connected component label per face.
+    main_ci : int
+        Largest component ID.
+    """
+
+    pocket: np.ndarray
+    isolated: np.ndarray
+    expanded: np.ndarray
+    outward_dots: np.ndarray
+    face_comp: np.ndarray
+    main_ci: int
+
+    @property
+    def mask(self) -> np.ndarray:
+        """Combined bool mask (pocket | isolated | expanded)."""
+        return self.pocket | self.isolated | self.expanded
+
+    @property
+    def main_face_mask(self) -> np.ndarray:
+        """Bool mask for faces in the main component."""
+        return self.face_comp == self.main_ci
+
+    @property
+    def mesh_stats(self) -> tuple:
+        """Backward-compatible tuple for functions expecting mesh_stats."""
+        return (self.outward_dots, self.face_comp, self.main_ci, self.main_face_mask)
+
+
+# -----------------------------------------------------------------------------
 # Soma dataclass
 # -----------------------------------------------------------------------------
 @dataclass(slots=True)

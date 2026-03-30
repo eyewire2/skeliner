@@ -447,18 +447,19 @@ class TestFindIsolatedOrganelles:
 
 
 class TestFindOrganelles:
-    def test_returns_two_masks(self):
+    def test_returns_organelles(self):
         mesh = _icosphere()
-        pocket, isolated = pre.find_organelles(mesh, radius=50.0)
-        assert pocket.shape == (len(mesh.faces),)
-        assert isolated.shape == (len(mesh.faces),)
-        assert pocket.dtype == bool
-        assert isolated.dtype == bool
+        org = pre.find_organelles(mesh, radius=50.0)
+        assert org.pocket.shape == (len(mesh.faces),)
+        assert org.isolated.shape == (len(mesh.faces),)
+        assert org.pocket.dtype == bool
+        assert org.isolated.dtype == bool
+        assert org.mask.shape == (len(mesh.faces),)
 
     def test_masks_are_disjoint(self):
         mesh = _sphere_with_internal()
-        pocket, isolated = pre.find_organelles(mesh, radius=50.0)
-        overlap = pocket & isolated
+        org = pre.find_organelles(mesh, radius=50.0)
+        overlap = org.pocket & org.isolated
         assert overlap.sum() == 0
 
 

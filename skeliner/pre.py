@@ -1682,8 +1682,7 @@ def find_soma_via_ring_cutoff(
 
     # ── 1b. Organelle mask (for excluding from final soma) ──────
     if organelles is None:
-        pocket, isolated = find_organelles(mesh, verbose=verbose)
-        organelles = pocket | isolated
+        organelles = find_organelles(mesh, verbose=verbose).mask
 
     # ── 2. Build main-component vertex adjacency ─────────────────────
     if verbose:
@@ -2403,8 +2402,7 @@ def find_soma_via_neurite_exclusion(
 
     # ── 0. Organelle clustering → soma center ─────────────────────
     if organelles is None:
-        pocket, isolated = find_organelles(mesh, verbose=verbose)
-        organelles = pocket | isolated
+        organelles = find_organelles(mesh, verbose=verbose).mask
     if organelles.sum() == 0:
         if verbose:
             print("[skeliner.pre] Soma: no organelles found")
@@ -2831,8 +2829,7 @@ def find_soma_via_geodesic(
 
     # ── 0. Organelle clustering via geodesic proximity ───────────
     if organelles is None:
-        pocket, isolated = find_organelles(mesh, verbose=verbose)
-        organelles = pocket | isolated
+        organelles = find_organelles(mesh, verbose=verbose).mask
     if organelles.sum() == 0:
         if verbose:
             print("[skeliner.pre] Soma-alt: no organelles found")
@@ -5098,10 +5095,11 @@ def find_organelles(
     min_cluster_size: int = 5,
     verbose: bool = False,
     mesh_stats: tuple | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
+):
     """Detect internal mesh fragments (organelle membranes) in a neuron mesh.
 
-    Returns two non-overlapping masks:
+    Returns an :class:`~skeliner.dataclass.Organelles` containing two
+    non-overlapping masks plus precomputed mesh stats:
 
     * **pocket** — membrane folds connected to the neuron surface,
       detected via gradient-based rim finding + flood-fill.
@@ -5127,11 +5125,11 @@ def find_organelles(
 
     Returns
     -------
-    pocket : np.ndarray
-        Boolean mask ``(nFaces,)`` — pocket organelle faces (main component).
-    isolated : np.ndarray
-        Boolean mask ``(nFaces,)`` — isolated internal fragment faces.
+    Organelles
+        Dataclass with ``pocket``, ``isolated``, ``expanded`` masks
+        and ``outward_dots``, ``face_comp``, ``main_ci`` mesh stats.
     """
+    from .dataclass import Organelles
     import time as _time
 
     _p = "[skeliner.pre]"
@@ -5219,7 +5217,15 @@ def find_organelles(
             f"isolated={int(isolated.sum()):,} ({dt_total:.1f}s)"
         )
 
-    return pocket, isolated
+    outward_dots, face_comp, main_ci, _ = precomputed
+    return Organelles(
+        pocket=pocket,
+        isolated=isolated,
+        expanded=np.zeros(len(mesh.faces), dtype=bool),
+        outward_dots=outward_dots,
+        face_comp=face_comp,
+        main_ci=int(main_ci),
+    )
 
 
 def _find_nonmanifold_fusions(
@@ -5806,9 +5812,9 @@ def remove_organelles(
 
     Examples
     --------
-    pocket, isolated = find_organelles(mesh, verbose=True)
-    soma = find_soma_via_ring_cutoff(mesh, organelles=pocket | isolated)
-    clean = remove_organelles(mesh, organelles=pocket | isolated)
+    org = find_organelles(mesh, verbose=True)
+    soma = find_soma_via_ring_cutoff(mesh, organelles=org.mask)
+    clean = remove_organelles(mesh, organelles=org.mask)
     # soma.verts is still valid on clean — no remapping needed
     """
     if organelles is not None and len(organelles) == len(mesh.faces):
@@ -5819,14 +5825,13 @@ def remove_organelles(
                 f"({int(organelle.sum()):,} faces)"
             )
     else:
-        pocket, isolated = find_organelles(
+        organelle = find_organelles(
             mesh,
             radius=radius,
             radius_multiplier=radius_multiplier,
             min_cluster_size=min_cluster_size,
             verbose=verbose,
-        )
-        organelle = pocket | isolated
+        ).mask
 
     if not organelle.any():
         if verbose:
@@ -6604,9 +6609,9 @@ def compact_mesh(
 
     Examples
     --------
-    pocket, isolated = find_organelles(mesh)
-    soma = find_soma_via_ring_cutoff(mesh, organelles=pocket | isolated)
-    mesh = remove_organelles(mesh, organelles=pocket | isolated)
+    org = find_organelles(mesh)
+    soma = find_soma_via_ring_cutoff(mesh, organelles=org.mask)
+    mesh = remove_organelles(mesh, organelles=org.mask)
     # ... more removals ...
     mesh, vert_map, soma = compact_mesh(mesh, soma=soma)
     """
@@ -6707,17 +6712,16 @@ def preprocess(
     # ── Detection (all on original mesh, sharing stats) ───────────
     stats = compute_mesh_stats(mesh, verbose=verbose)
 
-    pocket, isolated = find_organelles(mesh, mesh_stats=stats, verbose=verbose)
-    organelles_mask = pocket | isolated
+    org = find_organelles(mesh, mesh_stats=stats, verbose=verbose)
 
     soma = find_soma_via_ring_cutoff(
-        mesh, organelles=organelles_mask, mesh_stats=stats, verbose=verbose
+        mesh, organelles=org.mask, mesh_stats=org.mesh_stats, verbose=verbose
     )
 
     disconnected = find_disconnected(
         mesh,
         soma=soma,
-        organelles=organelles_mask,
+        organelles=org.mask,
         mesh_stats=stats,
         verbose=verbose,
     )
@@ -6734,14 +6738,14 @@ def preprocess(
 
     # ── Removal (order: fragments → organelles → gaps → compact) ──
     mesh = remove_fragments(mesh, fragments=fragments_mask, verbose=verbose)
-    mesh = remove_organelles(mesh, organelles=organelles_mask, verbose=verbose)
+    mesh = remove_organelles(mesh, organelles=org.mask, verbose=verbose)
     mesh = remove_gaps(mesh, gaps=gaps, verbose=verbose)
     mesh, vert_map, soma = compact_mesh(mesh, soma=soma, verbose=verbose)
 
     return PreprocessResult(
         mesh=mesh,
         soma=soma,
-        organelles=organelles_mask,
+        organelles=org.mask,
         fragments=fragments_mask,
         disconnected=disconnected,
         gaps=gaps,

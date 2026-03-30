@@ -9,7 +9,7 @@ import trimesh
 
 from ._core import _bfs_parents
 from ._state import rebuild_vert2node
-from .dataclass import Skeleton, Soma
+from .dataclass import Organelles, Skeleton, Soma
 
 __all__ = [
     "load_mesh",
@@ -517,70 +517,39 @@ def load_soma_npz(path: str | Path) -> Soma:
 
 
 def save_organelles_npz(
-    pocket: np.ndarray,
-    isolated: np.ndarray,
-    *,
-    expanded: np.ndarray | None = None,
-    mesh_stats: tuple | None = None,
-    path: str | Path,
-    compress: bool = True,
+    org: Organelles, path: str | Path, *, compress: bool = True,
 ) -> None:
-    """Write organelle masks (and optional mesh stats) to ``.npz``.
-
-    Parameters
-    ----------
-    pocket, isolated : (nFaces,) bool
-    expanded : (nFaces,) bool or None
-        Faces added by :func:`break_at_soma`.  Saved as zeros if None.
-    mesh_stats : tuple or None
-        ``(outward_dots, face_comp, main_ci, main_face_mask)`` from
-        :func:`compute_mesh_stats`.  The fourth element is not stored
-        (derivable from ``face_comp == main_ci``).
-    path : path-like
-    compress : bool
-    """
+    """Write an :class:`Organelles` to a compressed ``.npz`` archive."""
     path = Path(path)
     if not path.suffix:
         path = path.with_suffix(".npz")
 
     payload: dict[str, np.ndarray] = {
-        "pocket": np.asarray(pocket, dtype=bool),
-        "isolated": np.asarray(isolated, dtype=bool),
-        "expanded": np.asarray(expanded, dtype=bool) if expanded is not None else np.zeros_like(pocket),
+        "pocket": np.asarray(org.pocket, dtype=bool),
+        "isolated": np.asarray(org.isolated, dtype=bool),
+        "expanded": np.asarray(org.expanded, dtype=bool),
+        "outward_dots": org.outward_dots,
+        "face_comp": org.face_comp,
+        "main_ci": np.array(org.main_ci),
     }
-    if mesh_stats is not None:
-        outward_dots, face_comp, main_ci, _ = mesh_stats
-        payload["outward_dots"] = outward_dots
-        payload["face_comp"] = face_comp
-        payload["main_ci"] = np.array(main_ci)
 
     save_fn = np.savez_compressed if compress else np.savez
     save_fn(path, **payload)
 
 
-def load_organelles_npz(path: str | Path) -> dict[str, np.ndarray | None]:
-    """Load organelle data written by :func:`save_organelles_npz`.
-
-    Returns
-    -------
-    dict with keys:
-
-    - ``pocket``, ``isolated``, ``expanded`` — bool masks (nFaces,)
-    - ``outward_dots``, ``face_comp``, ``main_ci`` — mesh stats (present
-      only if they were saved)
-    """
+def load_organelles_npz(path: str | Path) -> Organelles:
+    """Load an :class:`Organelles` written by :func:`save_organelles_npz`."""
     path = Path(path)
     with np.load(path, allow_pickle=False) as z:
-        d: dict[str, np.ndarray | None] = {
-            "pocket": z["pocket"].astype(bool),
-            "isolated": z["isolated"].astype(bool),
-            "expanded": z["expanded"].astype(bool) if "expanded" in z else np.zeros_like(z["pocket"]),
-        }
-        if "outward_dots" in z:
-            d["outward_dots"] = z["outward_dots"]
-            d["face_comp"] = z["face_comp"]
-            d["main_ci"] = z["main_ci"]
-        return d
+        pocket = z["pocket"].astype(bool)
+        return Organelles(
+            pocket=pocket,
+            isolated=z["isolated"].astype(bool),
+            expanded=z["expanded"].astype(bool) if "expanded" in z else np.zeros_like(pocket),
+            outward_dots=z["outward_dots"],
+            face_comp=z["face_comp"],
+            main_ci=int(z["main_ci"]),
+        )
 
 
 # --------------------------
