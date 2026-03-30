@@ -18,9 +18,9 @@ __all__ = [
     "find_holes",
     "find_nucleus_center",
     "find_offsets",
-    "find_soma",
+    "find_soma_via_neurite_exclusion",
+    "find_soma_via_ring_cutoff",
     "find_soma_via_z_contour",
-    "find_soma_void",
     "preprocess",
     "PreprocessResult",
     "remove_fins",
@@ -2374,7 +2374,7 @@ def break_at_soma(
     return soma, organelle_expanded, neurites
 
 
-def find_soma(
+def find_soma_via_neurite_exclusion(
     mesh: trimesh.Trimesh,
     *,
     organelles: np.ndarray | None = None,
@@ -2801,7 +2801,7 @@ def find_soma(
     return soma
 
 
-def find_soma_alt(
+def find_soma_via_geodesic(
     mesh: trimesh.Trimesh,
     *,
     organelles: np.ndarray | None = None,
@@ -2810,17 +2810,18 @@ def find_soma_alt(
 ) -> Soma | None:
     """Experimental soma detection — geodesic proximity + mass boundary.
 
-    Work-in-progress replacement for :func:`find_soma`.  Key differences:
+    Work-in-progress.  Key differences from
+    :func:`find_soma_via_neurite_exclusion`:
 
       0. Organelle clustering uses **geodesic** (surface) proximity via
          multi-source BFS instead of Euclidean NN.  This prevents linking
          organelles across membranes.
-      1. BFS from center on non-organelle surface (same as find_soma).
+      1. BFS from center on non-organelle surface (same).
       2. Candidate set boundary determined by **neighborhood mass** of
          soma organelle clusters (Otsu on own_size + neighbor_sizes),
          converted to a BFS ring boundary.  No fixed multiplier.
-      3. Per-tip neurite exclusion (same as find_soma).
-      4. Fit ellipsoid (same as find_soma).
+      3. Per-tip neurite exclusion (same).
+      4. Fit ellipsoid (same).
     """
 
     if mesh_stats is not None:
@@ -3250,7 +3251,7 @@ def find_disconnected(
     verbose : bool, default False
         Print summary.
     soma : Soma or None
-        Pre-computed soma from :func:`find_soma`.
+        Pre-computed soma from any ``find_soma_via_*`` function.
     organelles : np.ndarray or None
         Boolean mask ``(nFaces,)`` of organelle faces.  Components that
         are entirely organelle are skipped.
@@ -3276,7 +3277,7 @@ def find_disconnected(
 
     # Locate soma so we can exclude components inside it
     if soma is None:
-        soma = find_soma(
+        soma = find_soma_via_ring_cutoff(
             mesh,
             organelles=organelles,
             mesh_stats=mesh_stats,
@@ -3402,7 +3403,7 @@ def find_gaps(
     verbose : bool, default False
         Print summary.
     soma : Soma or None
-        Pre-computed soma from :func:`find_soma`.
+        Pre-computed soma from any ``find_soma_via_*`` function.
     disconnected : list[list[int]] or None
         Pre-computed disconnected components from :func:`find_disconnected`.
 
@@ -5806,7 +5807,7 @@ def remove_organelles(
     Examples
     --------
     pocket, isolated = find_organelles(mesh, verbose=True)
-    soma = find_soma(mesh, organelles=pocket | isolated)
+    soma = find_soma_via_ring_cutoff(mesh, organelles=pocket | isolated)
     clean = remove_organelles(mesh, organelles=pocket | isolated)
     # soma.verts is still valid on clean — no remapping needed
     """
@@ -6604,7 +6605,7 @@ def compact_mesh(
     Examples
     --------
     pocket, isolated = find_organelles(mesh)
-    soma = find_soma(mesh, organelles=pocket | isolated)
+    soma = find_soma_via_ring_cutoff(mesh, organelles=pocket | isolated)
     mesh = remove_organelles(mesh, organelles=pocket | isolated)
     # ... more removals ...
     mesh, vert_map, soma = compact_mesh(mesh, soma=soma)
@@ -6709,7 +6710,7 @@ def preprocess(
     pocket, isolated = find_organelles(mesh, mesh_stats=stats, verbose=verbose)
     organelles_mask = pocket | isolated
 
-    soma = find_soma(
+    soma = find_soma_via_ring_cutoff(
         mesh, organelles=organelles_mask, mesh_stats=stats, verbose=verbose
     )
 
@@ -7644,802 +7645,20 @@ def find_soma_via_z_contour(
     return soma
 
 
-#  find_soma_void — soma detection via organelle-void cross-sections
-# =====================================================================
+# Backward-compat wrapper — will be removed in a future release.
 
+def _deprecated_alias(old_name: str, new_func):
+    import functools, warnings
 
-def find_soma_void(
-    mesh: trimesh.Trimesh,
-    pocket: np.ndarray,
-    isolated: np.ndarray,
-    *,
-    mesh_stats: tuple | None = None,
-    verbose: bool = False,
-) -> np.ndarray:
-    """Detect soma faces using organelle distribution and mesh cross-sections.
-
-    The approach exploits the fact that organelles coat the nucleus membrane
-    but are absent from the nucleus interior, creating a 3D void.
-
-    **Algorithm**
-
-    1. Find the nucleus void centre from the organelle field
-       (density peak → local enclosure-based void detection).
-    2. Build a bounding box centred on the void by expanding outward
-       along each axis until organelle density drops off.
-    3. Cross-section a submesh within the bounding box at every
-       vertex Z-level.
-    4. At each Z-level, select the contour that contains the void
-       centre's XY projection — that is the soma contour.  Neurite
-       contours (which don't contain the void centre) are excluded.
-    5. Classify vertices inside the soma contour at their Z-level.
-    6. A face is soma if any of its vertices is classified as soma.
-       Organelle faces (pocket / isolated) are excluded.
-
-    Parameters
-    ----------
-    mesh : trimesh.Trimesh
-        Input neuron mesh.
-    pocket : np.ndarray
-        Boolean mask ``(nFaces,)`` of pocket organelle faces.
-    isolated : np.ndarray
-        Boolean mask ``(nFaces,)`` of isolated organelle faces.
-    mesh_stats : tuple or None
-        Precomputed ``(outward_dots, face_comp, main_ci, main_face_mask)``.
-    verbose : bool
-        Print progress information.
-
-    Returns
-    -------
-    np.ndarray
-        Boolean mask ``(nFaces,)`` — soma faces (includes nucleus membrane,
-        excludes organelle faces).
-    """
-    import time as _time
-
-    from shapely import prepare
-    from shapely.geometry import Point, Polygon
-    from shapely.ops import unary_union
-
-    _p = "[find_soma_void]"
-    t0 = _time.perf_counter()
-
-    verts = np.asarray(mesh.vertices, dtype=np.float64)
-    faces_arr = np.asarray(mesh.faces)
-    n_faces = len(faces_arr)
-    all_c = verts[faces_arr].mean(axis=1)
-
-    # ── 0. Mesh stats ──────────────────────────────────────────────
-    if mesh_stats is not None:
-        _, face_comp, main_ci, _ = mesh_stats
-    else:
-        stats = compute_mesh_stats(mesh, verbose=verbose)
-        _, face_comp, main_ci, _ = stats
-
-    org_mask = pocket | isolated
-    org_c = all_c[np.where(org_mask)[0]]
-
-    if len(org_c) < 50:
-        if verbose:
-            print(f"{_p} too few organelle faces ({len(org_c)}), skipping")
-        return np.zeros(n_faces, dtype=bool)
-
-    # ── 1. Find the nucleus void centre ────────────────────────────
-    void_center = _find_void_center(org_c, verbose=verbose)
-    if void_center is None or np.any(np.isnan(void_center)):
-        if verbose:
-            print(f"{_p} no void found in organelle field")
-        return np.zeros(n_faces, dtype=bool)
-
-    if verbose:
-        print(
-            f"{_p} void centre: ({void_center[0]:.0f}, "
-            f"{void_center[1]:.0f}, {void_center[2]:.0f})"
+    @functools.wraps(new_func)
+    def wrapper(*args, **kwargs):
+        warnings.warn(
+            f"{old_name}() is deprecated, use {new_func.__name__}() instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+        return new_func(*args, **kwargs)
+    return wrapper
 
-    # ── 2. Bounding box centred on the void ────────────────────────
-    soma_box_min, soma_box_max = _find_void_bounding_box(
-        org_c,
-        void_center,
-        verbose=verbose,
-    )
+find_soma = _deprecated_alias("find_soma", find_soma_via_neurite_exclusion)
 
-    if verbose:
-        print(
-            f"{_p} soma box: "
-            f"X=[{soma_box_min[0]:.0f},{soma_box_max[0]:.0f}] "
-            f"Y=[{soma_box_min[1]:.0f},{soma_box_max[1]:.0f}] "
-            f"Z=[{soma_box_min[2]:.0f},{soma_box_max[2]:.0f}] "
-            f"({_time.perf_counter() - t0:.1f}s)"
-        )
-
-    # ── 3. Cross-section a submesh within the bounding box ─────────
-    face_in_box = (
-        (all_c[:, 0] >= soma_box_min[0])
-        & (all_c[:, 0] <= soma_box_max[0])
-        & (all_c[:, 1] >= soma_box_min[1])
-        & (all_c[:, 1] <= soma_box_max[1])
-        & (all_c[:, 2] >= soma_box_min[2])
-        & (all_c[:, 2] <= soma_box_max[2])
-    )
-    box_face_idx = np.where(face_in_box)[0]
-    if len(box_face_idx) == 0:
-        if verbose:
-            print(f"{_p} no faces inside bounding box")
-        return np.zeros(n_faces, dtype=bool)
-
-    submesh = mesh.submesh([box_face_idx], append=True)
-
-    if verbose:
-        print(f"{_p} submesh: {len(submesh.faces):,} faces (from {n_faces:,})")
-
-    z_unique = np.unique(submesh.vertices[:, 2])
-    z_near = z_unique[(z_unique >= soma_box_min[2]) & (z_unique <= soma_box_max[2])]
-
-    # Void centre XY as a shapely Point for contour selection
-    vc_xy = Point(void_center[0], void_center[1])
-
-    z_contours: dict[float, list[tuple[float, np.ndarray]]] = {}
-    for z in z_near:
-        contours = _section_contours(submesh, float(z))
-        if contours:
-            z_contours[z] = contours
-
-    if not z_contours:
-        if verbose:
-            print(f"{_p} no cross-section contours found")
-        return np.zeros(n_faces, dtype=bool)
-
-    if verbose:
-        print(
-            f"{_p} collected {len(z_contours)} Z-levels "
-            f"({_time.perf_counter() - t0:.1f}s)"
-        )
-
-    # ── 4. Determine soma Z-range and build contour polygons ────────
-    #       The void centre defines the Z-range: the soma exists at
-    #       Z-levels where a contour contains the void centre's XY.
-    #       Within that range, union ALL contours at each Z-level
-    #       (not just the one containing the void centre) to capture
-    #       the full soma surface including folds and pores.
-
-    # First pass: find which Z-levels contain the void centre
-    vc_z_levels: list[float] = []
-    for z, contours in z_contours.items():
-        for _area, pts in contours:
-            if len(pts) < 3:
-                continue
-            try:
-                p = Polygon(pts[:, :2])
-                if not p.is_valid:
-                    p = p.buffer(0)
-                if p.is_valid and not p.is_empty and p.contains(vc_xy):
-                    vc_z_levels.append(z)
-                    break
-            except Exception:
-                pass
-
-    if not vc_z_levels:
-        if verbose:
-            print(f"{_p} no contour contains the void centre")
-        return np.zeros(n_faces, dtype=bool)
-
-    soma_z_min = min(vc_z_levels)
-    soma_z_max = max(vc_z_levels)
-
-    # From the void-centre contours, derive the soma XY extent.
-    # This constrains which contours to include — neurites extending
-    # in XY beyond the soma are excluded.
-    soma_x_min, soma_x_max = np.inf, -np.inf
-    soma_y_min, soma_y_max = np.inf, -np.inf
-    for z in vc_z_levels:
-        contours = z_contours.get(z, [])
-        for _area, pts in contours:
-            if len(pts) < 3:
-                continue
-            try:
-                p = Polygon(pts[:, :2])
-                if not p.is_valid:
-                    p = p.buffer(0)
-                if p.is_valid and not p.is_empty and p.contains(vc_xy):
-                    bx = p.bounds  # (minx, miny, maxx, maxy)
-                    soma_x_min = min(soma_x_min, bx[0])
-                    soma_y_min = min(soma_y_min, bx[1])
-                    soma_x_max = max(soma_x_max, bx[2])
-                    soma_y_max = max(soma_y_max, bx[3])
-                    break
-            except Exception:
-                pass
-
-    # Add padding for folds/pores just outside the void-centre contour
-    xy_pad = 1000.0
-    soma_x_min -= xy_pad
-    soma_x_max += xy_pad
-    soma_y_min -= xy_pad
-    soma_y_max += xy_pad
-
-    if verbose:
-        print(
-            f"{_p} soma XY extent: "
-            f"X=[{soma_x_min:.0f},{soma_x_max:.0f}] "
-            f"Y=[{soma_y_min:.0f},{soma_y_max:.0f}]"
-        )
-
-    # Second pass: within the soma Z-range, union contours that
-    # overlap with the soma XY extent
-    soma_xy_box = Polygon(
-        [
-            (soma_x_min, soma_y_min),
-            (soma_x_max, soma_y_min),
-            (soma_x_max, soma_y_max),
-            (soma_x_min, soma_y_max),
-        ]
-    )
-
-    soma_polys: dict[float, object] = {}
-    for z, contours in z_contours.items():
-        if z < soma_z_min or z > soma_z_max:
-            continue
-        polys = []
-        for _area, pts in contours:
-            if len(pts) < 3:
-                continue
-            try:
-                p = Polygon(pts[:, :2])
-                if not p.is_valid:
-                    p = p.buffer(0)
-                if p.is_valid and not p.is_empty:
-                    if p.intersects(soma_xy_box):
-                        polys.append(p)
-            except Exception:
-                pass
-        if polys:
-            merged = unary_union(polys).buffer(5.0)
-            prepare(merged)
-            soma_polys[z] = merged
-
-    if verbose:
-        print(
-            f"{_p} soma Z-range: [{soma_z_min:.0f}, {soma_z_max:.0f}], "
-            f"{len(soma_polys)} Z-levels "
-            f"({_time.perf_counter() - t0:.1f}s)"
-        )
-
-    # ── 5. Classify vertices ───────────────────────────────────────
-    vert_in_soma = np.zeros(len(verts), dtype=bool)
-    vert_z = verts[:, 2]
-
-    in_box = (
-        (verts[:, 0] >= soma_box_min[0])
-        & (verts[:, 0] <= soma_box_max[0])
-        & (verts[:, 1] >= soma_box_min[1])
-        & (verts[:, 1] <= soma_box_max[1])
-    )
-
-    for z, poly in soma_polys.items():
-        at_z = np.where((vert_z == z) & in_box)[0]
-        if len(at_z) == 0:
-            continue
-        inside = np.array([poly.contains(Point(p)) for p in verts[at_z, :2]])
-        vert_in_soma[at_z] = inside
-
-    if verbose:
-        print(
-            f"{_p} {vert_in_soma.sum():,} vertices in soma "
-            f"({_time.perf_counter() - t0:.1f}s)"
-        )
-
-    # ── 6. Face classification ─────────────────────────────────────
-    face_soma = vert_in_soma[faces_arr].any(axis=1)
-    clean_main = (face_comp == main_ci) & ~pocket & ~isolated
-    soma_mask = face_soma & clean_main
-
-    if verbose:
-        print(
-            f"{_p} soma: {int(soma_mask.sum()):,} faces "
-            f"({_time.perf_counter() - t0:.1f}s)"
-        )
-
-    return soma_mask
-
-
-def has_soma(
-    org_c: np.ndarray,
-    *,
-    verbose: bool = False,
-) -> tuple[bool, np.ndarray | None, np.ndarray | None]:
-    """Detect whether the cell has a soma based on organelle distribution.
-
-    The soma is characterised by organelles wrapping around a nucleus
-    void — an empty interior enclosed by organelles.  On a coarse
-    occupancy grid (500-unit resolution), inter-organelle gaps vanish
-    and only the nucleus void remains as enclosed empty space.
-
-    Parameters
-    ----------
-    org_c : np.ndarray
-        ``(N, 3)`` organelle face centroids.
-
-    Returns
-    -------
-    detected : bool
-        True if a soma void is detected.
-    void_approx : np.ndarray or None
-        ``(3,)`` approximate void location (centroid of enclosed
-        empty voxels on the coarse grid), or None.
-    soma_mask : np.ndarray or None
-        ``(N,)`` boolean mask over *org_c* selecting organelles in
-        the soma neighbourhood, or None.
-    """
-    from scipy.ndimage import distance_transform_edt, gaussian_filter
-
-    _p = "[has_soma]"
-
-    if len(org_c) < 50:
-        if verbose:
-            print(f"{_p} too few organelles ({len(org_c)})")
-        return False, None, None
-
-    # ── Coarse occupancy grid (500-unit resolution) ───────────────
-    coarse_res = 500
-    mins = org_c.min(axis=0)
-    bins = ((org_c - mins) / coarse_res).astype(int)
-    gs = bins.max(axis=0) + 1
-    grid = np.zeros(gs, dtype=np.float32)
-    np.add.at(grid, (bins[:, 0], bins[:, 1], bins[:, 2]), 1)
-
-    coarse_occ = grid > 0
-
-    # ── 6-ray enclosure test ──────────────────────────────────────
-    # At 500-unit resolution inter-organelle gaps are < 1 voxel and
-    # vanish.  Only the nucleus void (5000+ units) creates enclosed
-    # empty space.
-    enclosed = np.ones(gs, dtype=bool)
-    for axis in range(3):
-        enclosed &= np.maximum.accumulate(coarse_occ, axis=axis)
-        enclosed &= np.flip(
-            np.maximum.accumulate(np.flip(coarse_occ, axis=axis), axis=axis),
-            axis=axis,
-        )
-    ee = enclosed & ~coarse_occ
-    n_enclosed = int(ee.sum())
-
-    if n_enclosed == 0:
-        if verbose:
-            print(f"{_p} no enclosed empty voxels — no soma detected")
-        return False, None, None
-
-    # ── Approximate void location ─────────────────────────────────
-    coords = np.argwhere(ee)
-    coarse_dt = distance_transform_edt(~coarse_occ)
-    dt_vals = coarse_dt[coords[:, 0], coords[:, 1], coords[:, 2]]
-
-    # DT-weighted centroid of enclosed voxels
-    void_vox = np.average(coords.astype(float), axis=0, weights=dt_vals)
-    void_approx = mins + void_vox * coarse_res + coarse_res / 2
-
-    # ── Soma-neighbourhood organelles ─────────────────────────────
-    crop_radius = 10_000
-    soma_mask = np.linalg.norm(org_c - void_approx, axis=1) < crop_radius
-
-    if verbose:
-        dt_max = float(dt_vals.max())
-        print(
-            f"{_p} {n_enclosed} enclosed voxels, "
-            f"DT_max={dt_max:.1f} ({dt_max * coarse_res:.0f} units), "
-            f"void≈({void_approx[0]:.0f}, {void_approx[1]:.0f}, "
-            f"{void_approx[2]:.0f}), {soma_mask.sum():,} soma organelles"
-        )
-
-    return True, void_approx, soma_mask
-
-
-def _find_void_seed(
-    org_c: np.ndarray,
-    *,
-    verbose: bool = False,
-) -> np.ndarray | None:
-    """Find a rough point inside the nucleus void.
-
-    Not the true centre — biased toward the dense side — but
-    reliably inside the void.  Used as the ray-cast seed by
-    ``_find_void_organelles``.
-
-    Parameters
-    ----------
-    org_c : np.ndarray
-        ``(N, 3)`` organelle face centroids.
-
-    Returns
-    -------
-    np.ndarray or None
-        ``(3,)`` approximate void location, or None if not found.
-    """
-    from scipy.ndimage import distance_transform_edt, gaussian_filter
-
-    _p = "[_find_void_seed]"
-
-    # ── Stage 1: density peak → soma neighbourhood ─────────────────
-    coarse_res = 500
-    mins = org_c.min(axis=0)
-    bins = ((org_c - mins) / coarse_res).astype(int)
-    grid_shape = bins.max(axis=0) + 1
-    grid = np.zeros(grid_shape, dtype=np.float32)
-    np.add.at(grid, (bins[:, 0], bins[:, 1], bins[:, 2]), 1)
-    grid_smooth = gaussian_filter(grid, sigma=3)
-
-    peak_idx = np.unravel_index(grid_smooth.argmax(), grid_smooth.shape)
-    peak = mins + np.array(peak_idx) * coarse_res + coarse_res / 2
-
-    # Crop to local region around density peak
-    crop_radius = 10_000
-    local = org_c[np.linalg.norm(org_c - peak, axis=1) < crop_radius]
-
-    if len(local) < 50:
-        if verbose:
-            print(f"{_p} too few local organelles ({len(local)})")
-        return None
-
-    if verbose:
-        print(
-            f"{_p} density peak: ({peak[0]:.0f}, {peak[1]:.0f}, "
-            f"{peak[2]:.0f}), {len(local):,} local organelles"
-        )
-
-    # ── Stage 2: enclosure-based void detection ────────────────────
-    vox_res = 300
-    vm = local.min(axis=0) - vox_res * 3
-    vb = ((local - vm) / vox_res).astype(int)
-    vs = vb.max(axis=0) + 4
-    occ = np.zeros(vs, dtype=bool)
-    occ[vb[:, 0], vb[:, 1], vb[:, 2]] = True
-
-    # Distance to nearest organelle at each empty voxel
-    dt = distance_transform_edt(~occ)
-
-    # Enclosure: for each axis, an occupied voxel must exist both
-    # before and after the current voxel along that axis.
-    enclosed = np.ones(vs, dtype=bool)
-    for axis in range(3):
-        enclosed &= np.maximum.accumulate(occ, axis=axis)
-        enclosed &= np.flip(
-            np.maximum.accumulate(np.flip(occ, axis=axis), axis=axis),
-            axis=axis,
-        )
-
-    # Enclosed empty voxels — the nucleus interior
-    mask = enclosed & ~occ
-    coords = np.argwhere(mask)
-
-    if len(coords) == 0:
-        if verbose:
-            print(f"{_p} no enclosed empty voxels found, falling back to density peak")
-        return peak.copy()
-
-    # Weighted centroid (deeper = more weight) centres the result
-    weights = dt[mask]
-    center = vm + np.average(coords, axis=0, weights=weights) * vox_res + vox_res / 2
-
-    if verbose:
-        dt_max = float(weights.max())
-        print(
-            f"{_p} void: {len(coords)} enclosed voxels, "
-            f"DT_max={dt_max:.1f} vox ({dt_max * vox_res:.0f} units), "
-            f"centre=({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})"
-        )
-
-    return center
-
-
-def _find_void_organelles(
-    org_c: np.ndarray,
-    *,
-    verbose: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Identify organelle centroids surrounding the nucleus void.
-
-    Balloon / ray-cast approach:
-
-    1. Get a rough seed inside the void from ``_find_void_seed``
-       (enclosure + DT-weighted centroid — imperfect but reliably
-       inside the void).
-    2. Build an occupancy grid and cast rays uniformly from the
-       seed.  The first organelle voxel each ray hits is a
-       void-surface organelle.  Rays that escape through the
-       pocket mouth are ignored.
-
-    Parameters
-    ----------
-    org_c : np.ndarray
-        ``(N, 3)`` organelle face centroids.
-
-    Returns
-    -------
-    mask : np.ndarray
-        ``(N,)`` boolean — True for void-surrounding organelles.
-    box_min : np.ndarray
-        ``(3,)`` lower corner of selected-organelle bounding box.
-    box_max : np.ndarray
-        ``(3,)`` upper corner of selected-organelle bounding box.
-    """
-    from scipy.ndimage import distance_transform_edt, gaussian_filter
-
-    _p = "[_find_void_organelles]"
-    out = np.zeros(len(org_c), dtype=bool)
-    nan3 = np.full(3, np.nan)
-
-    # ── Rough seed from the old void-center logic ─────────────────
-    seed_world = _find_void_seed(org_c, verbose=verbose)
-    if seed_world is None:
-        if verbose:
-            print(f"{_p} no seed — _find_void_seed returned None")
-        return out, nan3, nan3
-
-    # ── Crop organelles around seed ───────────────────────────────
-    crop_radius = 10_000
-    local_mask = np.linalg.norm(org_c - seed_world, axis=1) < crop_radius
-    local = org_c[local_mask]
-
-    if len(local) < 50:
-        if verbose:
-            print(f"{_p} too few local organelles ({len(local)})")
-        return out, nan3, nan3
-
-    # ── Occupancy grid ────────────────────────────────────────────
-    vox_res = 300
-    vm = local.min(axis=0) - vox_res * 3
-    vb = ((local - vm) / vox_res).astype(int)
-    vs = vb.max(axis=0) + 4
-    occ = np.zeros(vs, dtype=bool)
-    occ[vb[:, 0], vb[:, 1], vb[:, 2]] = True
-
-    # Seed in voxel coordinates
-    seed = (seed_world - vm) / vox_res
-
-    # ── Ray-cast from seed in all directions ──────────────────────
-    # Fibonacci sphere sampling for uniform coverage.
-    n_rays = 2000
-    golden = (1 + np.sqrt(5)) / 2
-    idx = np.arange(n_rays, dtype=float)
-    theta = 2 * np.pi * idx / golden
-    phi = np.arccos(1 - 2 * (idx + 0.5) / n_rays)
-    dirs = np.column_stack(
-        [
-            np.sin(phi) * np.cos(theta),
-            np.sin(phi) * np.sin(theta),
-            np.cos(phi),
-        ]
-    )  # (n_rays, 3)
-
-    # March all rays in parallel — step size 0.5 voxels
-    max_r = float(max(vs))
-    n_steps = int(np.ceil(max_r / 0.5))
-    t = np.arange(1, n_steps + 1, dtype=float) * 0.5  # (T,)
-
-    # positions: (n_rays, T, 3)
-    pos = seed[None, None, :] + dirs[:, None, :] * t[None, :, None]
-    ix = np.round(pos).astype(np.int32)
-
-    # Bounds check
-    valid = (
-        (ix[:, :, 0] >= 0)
-        & (ix[:, :, 0] < vs[0])
-        & (ix[:, :, 1] >= 0)
-        & (ix[:, :, 1] < vs[1])
-        & (ix[:, :, 2] >= 0)
-        & (ix[:, :, 2] < vs[2])
-    )
-
-    # Safe indices for look-up (out-of-bounds → 0, masked later)
-    sx = np.where(valid, ix[:, :, 0], 0)
-    sy = np.where(valid, ix[:, :, 1], 0)
-    sz = np.where(valid, ix[:, :, 2], 0)
-
-    is_occ = occ[sx, sy, sz] & valid  # (n_rays, T)
-
-    # First hit along each ray
-    has_hit = is_occ.any(axis=1)
-    first_t = np.argmax(is_occ, axis=1)  # index of first True
-
-    hit_ix = ix[np.arange(n_rays), first_t]  # (n_rays, 3)
-    hit_ix = hit_ix[has_hit]
-
-    # Unique hit voxels → set for fast lookup
-    hit_set = set(map(tuple, hit_ix.tolist()))
-
-    if not hit_set:
-        if verbose:
-            print(f"{_p} no organelle hit by any ray")
-        return out, nan3, nan3
-
-    # Map hit voxels back to org_c indices
-    local_indices = np.where(local_mask)[0]
-    for i in range(len(vb)):
-        if tuple(vb[i]) in hit_set:
-            out[local_indices[i]] = True
-
-    if out.any():
-        sel = org_c[out]
-        box_min, box_max = sel.min(axis=0), sel.max(axis=0)
-    else:
-        box_min, box_max = nan3.copy(), nan3.copy()
-
-    if verbose:
-        n_hit = has_hit.sum()
-        n_escaped = n_rays - n_hit
-        print(
-            f"{_p} {out.sum():,} / {len(org_c):,} void-surrounding "
-            f"organelles ({len(hit_set)} hit voxels, "
-            f"{n_hit} rays hit, {n_escaped} escaped)"
-        )
-
-    return out, box_min, box_max
-
-
-def _find_void_center(
-    org_c: np.ndarray,
-    *,
-    verbose: bool = False,
-) -> np.ndarray | None:
-    """Find the centre of the nucleus void.
-
-    Midpoint of the bounding box of void-surrounding organelles
-    (from ``_find_void_organelles``).  Equidistant from the extremes
-    on each axis — immune to organelle density bias.
-
-    Parameters
-    ----------
-    org_c : np.ndarray
-        ``(N, 3)`` organelle face centroids.
-
-    Returns
-    -------
-    np.ndarray or None
-        ``(3,)`` void centre in world coordinates, or None if not found.
-    """
-    _p = "[_find_void_center]"
-    void_org, box_min, box_max = _find_void_organelles(org_c, verbose=verbose)
-
-    if not void_org.any() or np.any(np.isnan(box_min)):
-        if verbose:
-            print(f"{_p} no void organelles found")
-        return None
-
-    center = (box_min + box_max) / 2
-
-    if verbose:
-        print(f"{_p} centre=({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})")
-
-    return center
-
-
-def _find_void_bounding_box(
-    org_c: np.ndarray,
-    void_center: np.ndarray,
-    *,
-    bin_size: float = 500,
-    verbose: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Find the soma bounding box by expanding from the void centre.
-
-    For each axis, bin organelle centroids into slabs and expand outward
-    from the void centre while the count stays above a fraction of the
-    peak count.  The box is naturally centred on the nucleus.
-
-    Parameters
-    ----------
-    org_c : np.ndarray
-        ``(N, 3)`` organelle face centroids.
-    void_center : np.ndarray
-        ``(3,)`` void centre in world coordinates.
-    bin_size : float
-        Width of each slab along each axis.
-
-    Returns
-    -------
-    box_min, box_max : np.ndarray, np.ndarray
-        ``(3,)`` arrays — lower and upper corners of the bounding box.
-    """
-    _p = "[_find_void_bounding_box]"
-    half_bin = bin_size / 2
-    padding = 1000.0
-
-    # Crop to soma neighbourhood — exclude distant neurite organelles
-    crop_radius = 10_000
-    local = org_c[np.linalg.norm(org_c - void_center, axis=1) < crop_radius]
-
-    box_min = np.full(3, -np.inf)
-    box_max = np.full(3, np.inf)
-
-    for axis in range(3):
-        ax_vals = local[:, axis]
-
-        if len(ax_vals) == 0:
-            continue
-
-        lo = ax_vals.min() - bin_size
-        hi = ax_vals.max() + bin_size
-        edges = np.arange(lo, hi + bin_size, bin_size)
-        counts, edges = np.histogram(ax_vals, bins=edges)
-        centres = (edges[:-1] + edges[1:]) / 2
-
-        if len(counts) == 0 or counts.max() == 0:
-            continue
-
-        # Find the slab closest to the void centre
-        vc_idx = int(np.argmin(np.abs(centres - void_center[axis])))
-
-        # Expand outward from void centre in both directions.
-        # Collect the full profile, then find the steepest relative
-        # drop — the soma/neurite boundary.  No fixed threshold.
-        for direction in [-1, +1]:
-            rng = (
-                range(vc_idx - 1, -1, -1)
-                if direction == -1
-                else range(vc_idx + 1, len(counts))
-            )
-            indices = list(rng)
-            if not indices:
-                continue
-
-            # Smooth the profile with a 3-bin running mean to
-            # reduce noise before looking for the steepest drop.
-            vals = counts[indices].astype(float)
-            if len(vals) >= 3:
-                smoothed = np.convolve(vals, np.ones(3) / 3, mode="same")
-            else:
-                smoothed = vals
-
-            # Find the steepest relative drop: (prev - cur) / prev.
-            # The soma boundary is the first large drop from a
-            # still-high level.
-            best_drop_ratio = 0.0
-            best_drop_pos = len(indices) - 1
-            for j in range(1, len(smoothed)):
-                prev = smoothed[j - 1]
-                if prev <= 0:
-                    continue
-                drop_ratio = (prev - smoothed[j]) / prev
-                if drop_ratio > best_drop_ratio:
-                    best_drop_ratio = drop_ratio
-                    best_drop_pos = j
-
-            # The box extends to the bin just before the steepest drop
-            stop_idx = indices[max(best_drop_pos - 1, 0)]
-            boundary = centres[stop_idx]
-            if direction == -1:
-                box_min[axis] = boundary - half_bin - padding
-            else:
-                box_max[axis] = boundary + half_bin + padding
-
-    if verbose:
-        print(
-            f"{_p} box: "
-            f"X=[{box_min[0]:.0f},{box_max[0]:.0f}] "
-            f"Y=[{box_min[1]:.0f},{box_max[1]:.0f}] "
-            f"Z=[{box_min[2]:.0f},{box_max[2]:.0f}]"
-        )
-
-    return box_min, box_max
-
-
-def _section_contours(
-    mesh: trimesh.Trimesh,
-    z: float,
-) -> list[tuple[float, np.ndarray]]:
-    """Return ``[(area, vertices_Nx3), ...]`` for each contour at *z*."""
-    section = mesh.section(plane_origin=[0, 0, z], plane_normal=[0, 0, 1])
-    if section is None:
-        return []
-    sv = section.vertices
-    contours: list[tuple[float, np.ndarray]] = []
-    for entity in section.entities:
-        pts = sv[entity.points]
-        if len(pts) < 3:
-            continue
-        x, y = pts[:, 0], pts[:, 1]
-        area = 0.5 * abs(
-            np.sum(x[:-1] * y[1:] - x[1:] * y[:-1]) + x[-1] * y[0] - x[0] * y[-1]
-        )
-        contours.append((area, pts))
-    return contours

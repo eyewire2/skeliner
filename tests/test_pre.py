@@ -417,13 +417,13 @@ class TestRemoveGaps:
         assert n_comps < 2 or _live_faces(result) != _live_faces(mesh)
 
 
-# ── find_soma ────────────────────────────────────────────────────────
+# ── find_soma_via_ring_cutoff ─────────────────────────────────────────
 
 
 class TestFindSoma:
     def test_no_fragments_returns_none(self):
         mesh = _icosphere()
-        soma = pre.find_soma(mesh)
+        soma = pre.find_soma_via_ring_cutoff(mesh)
         assert soma is None
 
 

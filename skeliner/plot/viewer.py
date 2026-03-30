@@ -999,14 +999,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import find_disconnected, find_soma
+        from skeliner.pre import find_disconnected, find_soma_via_ring_cutoff
 
         mesh = mesh_state["mesh"]
         soma = mesh_state.get("soma")
         if soma is None:
             await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(
-                find_soma, mesh,
+                find_soma_via_ring_cutoff, mesh,
                 organelles=_organelle_mask(mesh_state.get("organelles")),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
@@ -1135,7 +1135,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import find_gaps, find_soma
+        from skeliner.pre import find_gaps, find_soma_via_ring_cutoff
 
         mesh = mesh_state["mesh"]
 
@@ -1144,7 +1144,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if soma is None:
             await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(
-                find_soma, mesh,
+                find_soma_via_ring_cutoff, mesh,
                 organelles=_organelle_mask(mesh_state.get("organelles")),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
