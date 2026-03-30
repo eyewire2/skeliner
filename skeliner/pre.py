@@ -1663,7 +1663,7 @@ def find_soma_via_ring_cutoff(
     """
 
     if mesh_stats is not None:
-        _, labels, main, _ = mesh_stats
+        labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
 
@@ -2396,7 +2396,7 @@ def find_soma_via_neurite_exclusion(
     """
 
     if mesh_stats is not None:
-        _, labels, main, _ = mesh_stats
+        labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
 
@@ -2823,7 +2823,7 @@ def find_soma_via_geodesic(
     """
 
     if mesh_stats is not None:
-        _, labels, main, _ = mesh_stats
+        labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
 
@@ -3264,7 +3264,7 @@ def find_disconnected(
         component, sorted largest-first.
     """
     if mesh_stats is not None:
-        _, labels, main, _ = mesh_stats
+        labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
     n_faces = len(mesh.faces)
@@ -3413,7 +3413,7 @@ def find_gaps(
         (``-1`` for main), sorted by gap distance (smallest first).
     """
     if mesh_stats is not None:
-        _, labels, main, _ = mesh_stats
+        labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
 
@@ -4056,11 +4056,12 @@ def compute_mesh_stats(
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     verbose: bool = False,
-) -> tuple[np.ndarray, np.ndarray, int, np.ndarray]:
+):
     """Shared precomputation for organelle detection.
 
-    Returns (outward_dots, face_comp, main_ci, main_face_mask).
+    Returns a :class:`~skeliner.dataclass.MeshStats`.
     """
+    from .dataclass import MeshStats
     if radius is None:
         median_edge = float(np.median(mesh.edges_unique_length))
         radius = radius_multiplier * median_edge
@@ -4106,7 +4107,11 @@ def compute_mesh_stats(
             f"({100 * raw_count / len(mesh.faces):.1f}%)"
         )
 
-    return outward_dots, face_comp, main_ci, main_face_mask
+    return MeshStats(
+        outward_dots=outward_dots,
+        face_comp=face_comp,
+        main_ci=int(main_ci),
+    )
 
 
 def _rim_enclosed_area(
@@ -4248,14 +4253,15 @@ def find_rims(
     """
 
     if mesh_stats is not None:
-        outward_dots, _, _, main_face_mask = mesh_stats
+        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
     else:
-        outward_dots, _, _, main_face_mask = compute_mesh_stats(
+        mesh_stats = compute_mesh_stats(
             mesh,
             radius,
             radius_multiplier,
             verbose,
         )
+        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
     n_faces = len(mesh.faces)
     edge_to_face = _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
     adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
@@ -4364,14 +4370,15 @@ def find_pocket_mouths(
     """
 
     if mesh_stats is not None:
-        outward_dots, _, _, main_face_mask = mesh_stats
+        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
     else:
-        outward_dots, _, _, main_face_mask = compute_mesh_stats(
+        mesh_stats = compute_mesh_stats(
             mesh,
             radius,
             radius_multiplier,
             verbose,
         )
+        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
     n_faces = len(mesh.faces)
     edge_to_face = _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
     adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
@@ -4627,14 +4634,15 @@ def find_pocket_organelles(
     """
 
     if mesh_stats is not None:
-        outward_dots, _, _, main_face_mask = mesh_stats
+        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
     else:
-        outward_dots, _, _, main_face_mask = compute_mesh_stats(
+        mesh_stats = compute_mesh_stats(
             mesh,
             radius,
             radius_multiplier,
             verbose,
         )
+        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
     n_faces = len(mesh.faces)
     # Compute shared structures once
     edge_to_face = _edge_to_faces(mesh)
@@ -4847,14 +4855,15 @@ def find_pocket_organelles_alt(
     """
 
     if mesh_stats is not None:
-        outward_dots, _, _, main_face_mask = mesh_stats
+        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
     else:
-        outward_dots, _, _, main_face_mask = compute_mesh_stats(
+        mesh_stats = compute_mesh_stats(
             mesh,
             radius,
             radius_multiplier,
             verbose,
         )
+        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
     n_faces = len(mesh.faces)
     edge_to_face = _edge_to_faces(mesh)
     adj = _face_adjacency(mesh, edge_to_face)
@@ -5013,15 +5022,16 @@ def find_isolated_organelles(
     np.ndarray
         Boolean mask ``(nFaces,)`` — isolated organelle faces.
     """
-    if mesh_stats is not None:
-        outward_dots, face_comp, main_ci, _ = mesh_stats
-    else:
-        outward_dots, face_comp, main_ci, _ = compute_mesh_stats(
+    if mesh_stats is None:
+        mesh_stats = compute_mesh_stats(
             mesh,
             radius,
             radius_multiplier,
             verbose,
         )
+    outward_dots = mesh_stats.outward_dots
+    face_comp = mesh_stats.face_comp
+    main_ci = mesh_stats.main_ci
     n_comps = face_comp.max() + 1
     isolated = np.zeros(len(mesh.faces), dtype=bool)
     n_internal_frags = 0
@@ -5136,16 +5146,14 @@ def find_organelles(
     t_total = _time.perf_counter()
 
     # ── 1. Precompute outward dots and components ─────────────────
-    if mesh_stats is not None:
-        precomputed = mesh_stats
-    else:
-        precomputed = compute_mesh_stats(
+    if mesh_stats is None:
+        mesh_stats = compute_mesh_stats(
             mesh,
             radius,
             radius_multiplier,
             verbose,
         )
-    _, face_comp, main_ci, _ = precomputed
+    face_comp, main_ci = mesh_stats.face_comp, mesh_stats.main_ci
 
     # ── 2. Find isolated organelles (small internal components) ───
     isolated = find_isolated_organelles(
@@ -5153,7 +5161,7 @@ def find_organelles(
         radius=radius,
         radius_multiplier=radius_multiplier,
         verbose=verbose,
-        mesh_stats=precomputed,
+        mesh_stats=mesh_stats,
     )
 
     # ── 3. Identify structural components (non-isolated) ──────────
@@ -5186,11 +5194,16 @@ def find_organelles(
     for ci in structural_comps:
         structural_mask[face_comp == ci] = True
 
-    precomputed_structural = (
-        precomputed[0],  # outward_dots
-        precomputed[1],  # face_comp
-        precomputed[2],  # main_ci
-        structural_mask,  # structural_face_mask (replaces main_face_mask)
+    from .dataclass import MeshStats
+    # Build a MeshStats where main_face_mask covers all structural components
+    # by mapping main_ci to a synthetic value that matches structural_mask.
+    # We achieve this by setting face_comp to 0 for structural faces and
+    # main_ci=0, so main_face_mask == structural_mask.
+    structural_face_comp = np.where(structural_mask, 0, -1).astype(mesh_stats.face_comp.dtype)
+    precomputed_structural = MeshStats(
+        outward_dots=mesh_stats.outward_dots,
+        face_comp=structural_face_comp,
+        main_ci=0,
     )
 
     pocket = find_pocket_organelles(
@@ -5217,13 +5230,11 @@ def find_organelles(
             f"isolated={int(isolated.sum()):,} ({dt_total:.1f}s)"
         )
 
-    from .dataclass import MeshStats
-    outward_dots, face_comp, main_ci, _ = precomputed
     return Organelles(
         pocket=pocket,
         isolated=isolated,
         expanded=np.zeros(len(mesh.faces), dtype=bool),
-        mesh_stats=MeshStats(outward_dots=outward_dots, face_comp=face_comp, main_ci=int(main_ci)),
+        mesh_stats=mesh_stats,
     )
 
 
@@ -5263,7 +5274,7 @@ def _find_nonmanifold_fusions(
         )
 
     if mesh_stats is not None:
-        outward_dots = mesh_stats[0]
+        outward_dots = mesh_stats.outward_dots
     else:
         if verbose:
             print("[skeliner.pre] Computing outward dots ...")

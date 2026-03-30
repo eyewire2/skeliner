@@ -445,7 +445,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 from skeliner.io import load_organelles_npz
                 org = load_organelles_npz(tmp_path)
                 mesh_state["organelles"] = org
-                mesh_state["mesh_stats"] = org.mesh_stats.as_tuple()
+                mesh_state["mesh_stats"] = org.mesh_stats
                 loaded = []
 
                 loaded.append(f"pocket={int(org.pocket.sum()):,}")
@@ -878,17 +878,17 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         cached = mesh_state.get("organelles")
 
         # Ensure mesh_stats are available
-        precomputed = mesh_state.get("mesh_stats")
-        if precomputed is None or len(precomputed[0]) != nF:
-            precomputed = await _run_with_log(
+        ms = mesh_state.get("mesh_stats")
+        if ms is None or len(ms.outward_dots) != nF:
+            ms = await _run_with_log(
                 compute_mesh_stats, mesh, None, 5.0, True
             )
-            mesh_state["mesh_stats"] = precomputed
+            mesh_state["mesh_stats"] = ms
 
         if det_type in ("pocket", "surface"):
             mask = await _run_with_log(
                 find_pocket_organelles, mesh, verbose=True,
-                mesh_stats=precomputed,
+                mesh_stats=ms,
             )
             pocket = mask if cached is None else cached.pocket | mask
             isolated = np.zeros(nF, dtype=bool) if cached is None else cached.isolated
@@ -903,7 +903,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         elif det_type == "isolated":
             mask = await _run_with_log(
                 find_isolated_organelles, mesh, verbose=True,
-                mesh_stats=precomputed,
+                mesh_stats=ms,
             )
             pocket = np.zeros(nF, dtype=bool) if cached is None else cached.pocket
             isolated = mask if cached is None else cached.isolated | mask
@@ -918,7 +918,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         else:
             result = await _run_with_log(
                 find_organelles, mesh, verbose=True,
-                mesh_stats=precomputed,
+                mesh_stats=ms,
             )
             pocket = result.pocket
             isolated = result.isolated
@@ -938,10 +938,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "label": "organelle:isolated",
                 })
 
-        od, fc, mc, _ = precomputed
         mesh_state["organelles"] = Organelles(
             pocket=pocket, isolated=isolated, expanded=expanded,
-            mesh_stats=MeshStats(outward_dots=od, face_comp=fc, main_ci=int(mc)),
+            mesh_stats=ms,
         )
 
         ann = {}
@@ -1220,14 +1219,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     mesh_stats=new_stats,
                 )
                 mesh_state["organelles"] = new_org
-                mesh_state["mesh_stats"] = new_stats.as_tuple()
+                mesh_state["mesh_stats"] = new_stats
             elif mesh_state.get("mesh_stats") is not None:
-                od, fc, mc, mm = mesh_state["mesh_stats"]
-                mesh_state["mesh_stats"] = (
-                    np.concatenate([od, np.ones(n_added, dtype=od.dtype)]),
-                    np.concatenate([fc, np.full(n_added, mc, dtype=fc.dtype)]),
-                    mc,
-                    np.concatenate([mm, np.ones(n_added, dtype=mm.dtype)]),
+                s = mesh_state["mesh_stats"]
+                mesh_state["mesh_stats"] = MeshStats(
+                    outward_dots=np.concatenate([s.outward_dots, np.ones(n_added, dtype=s.outward_dots.dtype)]),
+                    face_comp=np.concatenate([s.face_comp, np.full(n_added, s.main_ci, dtype=s.face_comp.dtype)]),
+                    main_ci=s.main_ci,
                 )
 
         _clear_annotations("gap ", "disconnected ")
@@ -1400,13 +1398,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         centroid = mesh_state["centroid"]
 
         # Reuse cached precomputed data
-        precomputed = mesh_state.get("mesh_stats")
-        if precomputed is None or len(precomputed[0]) != len(mesh.faces):
-            precomputed = compute_mesh_stats(mesh, None, 5.0, True)
-            mesh_state["mesh_stats"] = precomputed
+        ms = mesh_state.get("mesh_stats")
+        if ms is None or len(ms.outward_dots) != len(mesh.faces):
+            ms = compute_mesh_stats(mesh, None, 5.0, True)
+            mesh_state["mesh_stats"] = ms
 
         def _run():
-            rims = find_rims(mesh, verbose=True, mesh_stats=precomputed)
+            rims = find_rims(mesh, verbose=True, mesh_stats=ms)
             verts = np.asarray(mesh.vertices, dtype=np.float32)
             colors = [
                 [0.2, 1.0, 0.6], [0.1, 0.8, 0.9], [0.9, 1.0, 0.2],
