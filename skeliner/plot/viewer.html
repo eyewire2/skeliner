@@ -277,28 +277,13 @@
         <div id="detect-panel">
             <div style="white-space: nowrap">
                 <span style="color: #888">Detect:</span>
-                <span style="position:relative;display:inline-block;margin-left:4px">
-                    <button id="detectOrganellesBtn">Organelles</button>
-                    <div id="organellesPopup" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:4px;background:rgba(0,0,0,0.85);border:1px solid #555;border-radius:4px;padding:6px 8px;white-space:nowrap;z-index:300">
-                        <div style="color:#888;font-size:10px;margin-bottom:4px">Detect type:</div>
-                        <button class="org-type-btn" data-type="all" style="display:block;width:100%;text-align:left;margin-bottom:2px">All</button>
-                        <button class="org-type-btn" data-type="pocket" style="display:block;width:100%;text-align:left;margin-bottom:2px">Pocket</button>
-                        <button class="org-type-btn" data-type="isolated" style="display:block;width:100%;text-align:left">Isolated</button>
-                    </div>
-                </span>
+                <button id="detectOrganellesBtn" style="margin-left:4px">Organelles</button>
                 <button id="detectFusionsBtn" style="margin-left: 4px">Fusions</button>
                 <button id="detectFragmentsBtn" style="margin-left: 4px">Fragments</button>
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
                 <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
 
-                <span style="position:relative;display:inline-block;margin-left:4px">
-                    <button id="detectSomaBtn">Soma</button>
-                    <div id="somaMenu" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:4px;background:rgba(0,0,0,0.85);border:1px solid #555;border-radius:4px;padding:6px 8px;white-space:nowrap;z-index:300">
-                        <div style="color:#888;font-size:10px;margin-bottom:4px">Detect method:</div>
-                        <button class="soma-opt" data-method="z_contour" style="display:block;width:100%;text-align:left;margin-bottom:2px">Z-contour</button>
-                        <button class="soma-opt" data-method="ring_cutoff" style="display:block;width:100%;text-align:left">Ring cutoff</button>
-                    </div>
-                </span>
+                <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
                 <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
@@ -677,37 +662,11 @@ let meshCentroid = [0, 0, 0];
                 renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
                 renderer.domElement.addEventListener("pointerdown", onRecenter);
 
-                document.getElementById("detectOrganellesBtn").addEventListener("click", () => {
-                    const popup = document.getElementById("organellesPopup");
-                    popup.style.display = popup.style.display === "none" ? "" : "none";
-                });
-                document.querySelectorAll(".org-type-btn").forEach((b) =>
-                    b.addEventListener("click", () => {
-                        document.getElementById("organellesPopup").style.display = "none";
-                        const type = b.dataset.type;
-                        if (type === "all") runDetectOrganelles();
-                        else runDetectOrganellesType(type);
-                    })
-                );
+                document.getElementById("detectOrganellesBtn").addEventListener("click", runDetectOrganelles);
                 document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
                 document.getElementById("detectFragmentsBtn").addEventListener("click", runDetectFragments);
-                document.getElementById("detectSomaBtn").addEventListener("click", () => {
-                    const menu = document.getElementById("somaMenu");
-                    menu.style.display = menu.style.display === "none" ? "block" : "none";
-                });
-                document.querySelectorAll(".soma-opt").forEach(opt => {
-                    opt.addEventListener("mouseenter", () => opt.style.background = "#444");
-                    opt.addEventListener("mouseleave", () => opt.style.background = "transparent");
-                    opt.addEventListener("click", () => {
-                        document.getElementById("somaMenu").style.display = "none";
-                        runDetectSoma(opt.dataset.method);
-                    });
-                });
-                document.addEventListener("click", (e) => {
-                    if (!e.target.closest("#detectSomaBtn") && !e.target.closest("#somaMenu"))
-                        document.getElementById("somaMenu").style.display = "none";
-                });
+                document.getElementById("detectSomaBtn").addEventListener("click", () => runDetectSoma("ring_cutoff"));
                 document.getElementById("detectDisconnectedBtn").addEventListener("click", runDetectDisconnected);
                 document.getElementById("detectGapsBtn").addEventListener("click", runDetectGaps);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
@@ -787,6 +746,18 @@ let meshCentroid = [0, 0, 0];
                     .then((ann) => {
                         if (ann && (ann.highlights || ann.markers || ann.edges || ann.edge_groups))
                             applyAnnotations(ann);
+                        // Restore button states from existing annotations
+                        if (ann && ann.highlights) {
+                            const labels = ann.highlights.map(h => (h.label || "").toLowerCase());
+                            const has = (kw) => labels.some(l => l.includes(kw));
+                            if (has("organelle")) setBtnState(document.getElementById("detectOrganellesBtn"), "done");
+                            if (has("soma")) setBtnState(document.getElementById("detectSomaBtn"), "done");
+                            if (has("fusion")) setBtnState(document.getElementById("detectFusionsBtn"), "done");
+                            if (has("fragment")) setBtnState(document.getElementById("detectFragmentsBtn"), "done");
+                            if (has("hole")) setBtnState(document.getElementById("detectHolesBtn"), "done");
+                            if (has("gap")) setBtnState(document.getElementById("detectGapsBtn"), "done");
+                            if (has("disconn")) setBtnState(document.getElementById("detectDisconnectedBtn"), "done");
+                        }
                     })
                     .catch(() => {});
 
@@ -1477,7 +1448,7 @@ let meshCentroid = [0, 0, 0];
                 try {
                     const resp = await fetchFn();
                     const data = await resp.json();
-                    setBtnState(btn, data.ok ? "done" : "error");
+                    setBtnState(btn, resp.ok ? "done" : "error");
                     return data;
                 } catch (e) {
                     setBtnState(btn, "error");
@@ -1489,13 +1460,6 @@ let meshCentroid = [0, 0, 0];
                 await _runAction(
                     document.getElementById("detectOrganellesBtn"),
                     () => fetch("/detect_organelles", { method: "POST" }),
-                );
-            }
-
-            async function runDetectOrganellesType(type) {
-                await _runAction(
-                    document.getElementById("detectOrganellesBtn"),
-                    () => fetch(`/detect_organelles?type=${type}`, { method: "POST" }),
                 );
             }
 
@@ -2989,9 +2953,18 @@ let meshCentroid = [0, 0, 0];
             let annotationsHidden = false;
             function hideAllAnnotations() {
                 annotationsHidden = !annotationsHidden;
-                for (const m of annotationMeshes) m.visible = !annotationsHidden;
-                for (const m of markerMeshes) m.visible = !annotationsHidden;
-                for (const m of edgeGroupMeshes) m.visible = !annotationsHidden;
+                const vis = !annotationsHidden;
+                for (const m of annotationMeshes) {
+                    m.visible = vis;
+                    if (m._linkedEllipsoid) m._linkedEllipsoid.visible = vis;
+                }
+                for (const m of markerMeshes) m.visible = vis;
+                for (const m of edgeGroupMeshes) m.visible = vis;
+                // Sync individual toggle buttons
+                document.querySelectorAll("#hlList button").forEach(btn => {
+                    if (btn.textContent === "hide" || btn.textContent === "show")
+                        btn.textContent = vis ? "hide" : "show";
+                });
                 document.getElementById("hlHideAll").textContent =
                     annotationsHidden ? "Show All" : "Hide All";
             }
