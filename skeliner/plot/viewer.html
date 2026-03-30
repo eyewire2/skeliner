@@ -679,7 +679,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("save-dialog-backdrop").addEventListener("click", closeSaveDialog);
                 document.getElementById("saveMeshObj").addEventListener("click", () => doSave("mesh"));
                 document.getElementById("saveSkelSwc").addEventListener("click", () => doSave("swc"));
-                document.getElementById("saveSkelNpz").addEventListener("click", () => doSave("npz"));
+                document.getElementById("saveSkelNpz").addEventListener("click", () => doSave("npz_skel"));
                 document.getElementById("saveSomaNpz").addEventListener("click", () => doSave("soma"));
                 document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
@@ -1648,22 +1648,30 @@ let meshCentroid = [0, 0, 0];
                         saved.push(await downloadFile(`/export_mesh?prefix=${pfx}`));
                     }
                     if (mode === "swc" || mode === "all") {
-                        const name = getSkelName();
-                        if (!name) throw new Error("No skeleton");
-                        saved.push(
-                            await downloadFile(
-                                `/export_skeleton?name=${encodeURIComponent(name)}&format=swc&prefix=${pfx}`,
-                            ),
-                        );
+                        try {
+                            const name = getSkelName();
+                            if (!name) throw new Error("No skeleton");
+                            saved.push(
+                                await downloadFile(
+                                    `/export_skeleton?name=${encodeURIComponent(name)}&format=swc&prefix=${pfx}`,
+                                ),
+                            );
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
                     }
-                    if (mode === "npz" || mode === "all") {
-                        const name = getSkelName();
-                        if (!name) throw new Error("No skeleton");
-                        saved.push(
-                            await downloadFile(
-                                `/export_skeleton?name=${encodeURIComponent(name)}&format=npz&prefix=${pfx}`,
-                            ),
-                        );
+                    if (mode === "npz_skel" || mode === "all") {
+                        try {
+                            const name = getSkelName();
+                            if (!name) throw new Error("No skeleton");
+                            saved.push(
+                                await downloadFile(
+                                    `/export_skeleton?name=${encodeURIComponent(name)}&format=npz&prefix=${pfx}`,
+                                ),
+                            );
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
                     }
                     if (mode === "soma" || mode === "all") {
                         try {
@@ -3033,6 +3041,12 @@ let meshCentroid = [0, 0, 0];
                 ws.onmessage = (event) => {
                     const msg = JSON.parse(event.data);
                     if (msg.type === "annotations") applyAnnotations(msg.payload);
+                    else if (msg.type === "annotations_updated") {
+                        fetch("/annotations").then(r => r.json()).then(ann => {
+                            if (ann && (ann.highlights || ann.markers || ann.edges || ann.edge_groups))
+                                applyAnnotations(ann);
+                        }).catch(() => {});
+                    }
                     else if (msg.type === "camera_command") applyCameraCommand(msg.payload);
                     else if (msg.type === "reload") window.location.reload();
                     else if (msg.type === "mesh_loaded") {

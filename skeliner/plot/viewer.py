@@ -479,6 +479,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                         "label": "organelle:expanded",
                     })
 
+                annotations_path.write_text(json.dumps(ann), encoding="utf-8")
                 print(f"Loaded organelle npz: {', '.join(loaded)}")
                 await broadcast({"type": "annotations_updated"})
                 return JSONResponse({
@@ -1057,11 +1058,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if method == "ring_cutoff":
             from skeliner.pre import find_soma_via_ring_cutoff as _find
             label_prefix = "soma (ring_cutoff)"
-            color = [0.9, 0.7, 0.3]
         else:
             from skeliner.pre import find_soma_via_z_contour as _find
             label_prefix = "soma (z_contour)"
-            color = [0.85, 0.65, 0.13]
+        color = [0.9, 0.5, 0.9]
 
         mesh = mesh_state["mesh"]
         if method == "z_contour":
