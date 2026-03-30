@@ -1621,12 +1621,6 @@ def _assign_soma_verts(
     else:
         soma.verts = soma_verts_arr
 
-    soma.nucleus = {
-        "center": nuc["center"],
-        "peak_r": nuc["peak_r"],
-        "z_range": nuc["z_range"],
-        "slices": nuc["slices"],
-    }
     return soma
 
 
@@ -2149,6 +2143,12 @@ def find_soma_via_ring_cutoff(
             f"(cutoff ring {cutoff})"
         )
 
+    soma.nucleus = {
+        "center": nuc["center"],
+        "peak_r": nuc["peak_r"],
+        "z_range": nuc["z_range"],
+        "slices": nuc["slices"],
+    }
     return soma
 
 
