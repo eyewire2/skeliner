@@ -67,13 +67,17 @@
             }
             .hl-item {
                 display: flex;
-                justify-content: space-between;
                 align-items: center;
+            }
+            .hl-item > span:first-child {
+                flex: 1;
+                min-width: 0;
             }
             .hl-item button {
                 font-size: 10px;
                 cursor: pointer;
-                margin-left: 8px;
+                margin-left: 4px;
+                flex-shrink: 0;
             }
             .hl-swatch {
                 display: inline-block;
@@ -196,14 +200,14 @@
                 border-color: #555;
             }
             #detect-panel button[data-state="running"] {
-                background: #3a3020;
-                border-color: #c90;
+                background: #3a3020 !important;
+                border-color: #c90 !important;
             }
             #detect-panel button[data-state="done"] {
-                border-color: #4a8;
+                border-color: #4a8 !important;
             }
             #detect-panel button[data-state="error"] {
-                border-color: #a44;
+                border-color: #a44 !important;
             }
             #saveBtn {
                 background: #1a3a2a !important;
@@ -747,9 +751,13 @@ let meshCentroid = [0, 0, 0];
                         if (ann && (ann.highlights || ann.markers || ann.edges || ann.edge_groups))
                             applyAnnotations(ann);
                         // Restore button states from existing annotations
-                        if (ann && ann.highlights) {
-                            const labels = ann.highlights.map(h => (h.label || "").toLowerCase());
-                            const has = (kw) => labels.some(l => l.includes(kw));
+                        const allLabels = [
+                            ...(ann.highlights || []),
+                            ...(ann.edge_groups || []),
+                            ...(ann.markers || []),
+                        ].map(h => (h.label || "").toLowerCase());
+                        if (allLabels.length > 0) {
+                            const has = (kw) => allLabels.some(l => l.includes(kw));
                             if (has("organelle")) setBtnState(document.getElementById("detectOrganellesBtn"), "done");
                             if (has("soma")) setBtnState(document.getElementById("detectSomaBtn"), "done");
                             if (has("fusion")) setBtnState(document.getElementById("detectFusionsBtn"), "done");
@@ -2755,14 +2763,14 @@ let meshCentroid = [0, 0, 0];
                         countSpan.style.color = "#888";
                         left.appendChild(countSpan);
 
+                        div.appendChild(left);
+
                         const focusBtn = document.createElement("button");
                         focusBtn.textContent = "⌖";
                         focusBtn.title = "Center camera on this annotation";
                         focusBtn.style.cssText = "font-size:12px;cursor:pointer;margin-left:4px;";
                         focusBtn.addEventListener("click", () => focusOnAnnotation(idx));
-                        left.appendChild(focusBtn);
-
-                        div.appendChild(left);
+                        div.appendChild(focusBtn);
 
                         const toggleBtn = document.createElement("button");
                         toggleBtn.textContent =
@@ -2869,14 +2877,19 @@ let meshCentroid = [0, 0, 0];
                         nameSpan.addEventListener("dblclick", () => focusOnEdgeGroup(idx));
                         left.appendChild(nameSpan);
 
+                        const countSpan = document.createElement("span");
+                        countSpan.textContent = ` (${segs.length.toLocaleString()})`;
+                        countSpan.style.color = "#888";
+                        left.appendChild(countSpan);
+
+                        div.appendChild(left);
+
                         const focusBtn = document.createElement("button");
                         focusBtn.textContent = "⌖";
                         focusBtn.title = "Center camera on this edge group";
                         focusBtn.style.cssText = "font-size:12px;cursor:pointer;margin-left:4px;";
                         focusBtn.addEventListener("click", () => focusOnEdgeGroup(idx));
-                        left.appendChild(focusBtn);
-
-                        div.appendChild(left);
+                        div.appendChild(focusBtn);
 
                         const toggleBtn = document.createElement("button");
                         toggleBtn.textContent =

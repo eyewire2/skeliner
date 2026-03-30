@@ -464,19 +464,19 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     ann["highlights"].append({
                         "faces": np.where(org.pocket)[0].tolist(),
                         "color": [1, 0.15, 0.15],
-                        "label": f"organelle:pocket ({int(org.pocket.sum()):,})",
+                        "label": "organelle:pocket",
                     })
                 if org.isolated.any():
                     ann["highlights"].append({
                         "faces": np.where(org.isolated)[0].tolist(),
                         "color": [0.15, 0.8, 0.15],
-                        "label": f"organelle:isolated ({int(org.isolated.sum()):,})",
+                        "label": "organelle:isolated",
                     })
                 if org.expanded.any():
                     ann["highlights"].append({
                         "faces": np.where(org.expanded)[0].tolist(),
                         "color": [1, 0.6, 0.15],
-                        "label": f"organelle:expanded ({int(org.expanded.sum()):,})",
+                        "label": "organelle:expanded",
                     })
 
                 print(f"Loaded organelle npz: {', '.join(loaded)}")
@@ -515,7 +515,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     ann["highlights"].append({
                         "faces": soma_faces,
                         "color": [0.9, 0.5, 0.9],
-                        "label": f"soma ({len(soma_faces):,}f, {n_verts:,}v)",
+                        "label": "soma",
                     })
                     centroid = mesh_state["centroid"]
                     if "ellipsoids" not in ann:
@@ -897,7 +897,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 highlights.append({
                     "faces": faces,
                     "color": [1, 0.15, 0.15],
-                    "label": f"organelle:pocket ({len(faces):,})",
+                    "label": "organelle:pocket",
                 })
         elif det_type == "isolated":
             mask = await _run_with_log(
@@ -928,13 +928,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 highlights.append({
                     "faces": sf,
                     "color": [1, 0.15, 0.15],
-                    "label": f"organelle:pocket ({len(sf):,})",
+                    "label": "organelle:pocket",
                 })
             if iso:
                 highlights.append({
                     "faces": iso,
                     "color": [0.15, 0.8, 0.15],
-                    "label": f"organelle:isolated ({len(iso):,})",
+                    "label": "organelle:isolated",
                 })
 
         od, fc, mc, _ = precomputed
@@ -977,7 +977,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann["highlights"].append({
                 "faces": faces,
                 "color": [0.2, 0.8, 0.8],
-                "label": f"fragments ({len(faces):,})",
+                "label": "fragments",
             })
             annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
@@ -1029,7 +1029,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann["highlights"].append({
                 "faces": faces,
                 "color": colors[i % len(colors)],
-                "label": f"disconnected {i} ({len(faces):,}f)",
+                "label": f"disconnected {i}",
             })
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
@@ -1096,7 +1096,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         ann["highlights"].append({
             "faces": soma_faces,
             "color": color,
-            "label": f"{label_prefix} ({len(soma_faces):,}f, {len(soma.verts):,}v)",
+            "label": label_prefix,
         })
 
         # Wireframe ellipsoid (coordinates shifted by mesh centroid)
@@ -1169,7 +1169,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann["highlights"].append({
                 "faces": faces_a + faces_b,
                 "color": color,
-                "label": f"gap {i}: {label_a} ({len(faces_a)}f) ↔ {label_b} ({len(faces_b)}f), {dist:.0f}nm",
+                "label": f"gap {i}: {label_a} ↔ {label_b}, {dist:.0f}nm",
             })
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
@@ -1378,7 +1378,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann["highlights"].append({
                 "faces": cluster,
                 "color": colors[i % len(colors)],
-                "label": f"fusion {i} ({len(cluster)}f)",
+                "label": f"fusion {i}",
             })
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
@@ -1423,7 +1423,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 edge_groups.append({
                     "segments": segments,
                     "color": color,
-                    "label": f"rim {i} ({len(rim_edges)}e)",
+                    "label": f"rim {i}",
                 })
             return edge_groups, len(rims)
 
@@ -1855,7 +1855,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             {
                 "faces": soma_faces,
                 "color": [0.9, 0.5, 0.9],
-                "label": f"soma ({len(soma_faces):,}f, {len(new_soma.verts):,}v)",
+                "label": "soma",
             }
         )
 
@@ -2175,7 +2175,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 edge_groups.append({
                     "segments": segments,
                     "color": color,
-                    "label": f"hole {i} ({len(loop)}v)",
+                    "label": f"hole {i}",
                 })
             return edge_groups, len(loops)
 
