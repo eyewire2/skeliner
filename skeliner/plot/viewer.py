@@ -445,7 +445,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 from skeliner.io import load_organelles_npz
                 org = load_organelles_npz(tmp_path)
                 mesh_state["organelles"] = org
-                mesh_state["mesh_stats"] = org.mesh_stats
+                mesh_state["mesh_stats"] = org.mesh_stats.as_tuple()
                 loaded = []
 
                 loaded.append(f"pocket={int(org.pocket.sum()):,}")
@@ -872,7 +872,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             compute_mesh_stats, find_pocket_organelles,
             find_isolated_organelles, find_organelles,
         )
-        from skeliner.dataclass import Organelles
+        from skeliner.dataclass import MeshStats, Organelles
 
         cached = mesh_state.get("organelles")
 
@@ -940,7 +940,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         od, fc, mc, _ = precomputed
         mesh_state["organelles"] = Organelles(
             pocket=pocket, isolated=isolated, expanded=expanded,
-            outward_dots=od, face_comp=fc, main_ci=int(mc),
+            mesh_stats=MeshStats(outward_dots=od, face_comp=fc, main_ci=int(mc)),
         )
 
         ann = {}
@@ -1203,20 +1203,24 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         # Stitch faces were appended — extend cached masks so indices stay valid
         if n_added > 0:
-            from skeliner.dataclass import Organelles
+            from skeliner.dataclass import MeshStats, Organelles
             pad = np.zeros(n_added, dtype=bool)
             org = mesh_state.get("organelles")
             if org is not None:
-                od = np.concatenate([org.outward_dots, np.ones(n_added, dtype=org.outward_dots.dtype)])
-                fc = np.concatenate([org.face_comp, np.full(n_added, org.main_ci, dtype=org.face_comp.dtype)])
+                s = org.mesh_stats
+                new_stats = MeshStats(
+                    outward_dots=np.concatenate([s.outward_dots, np.ones(n_added, dtype=s.outward_dots.dtype)]),
+                    face_comp=np.concatenate([s.face_comp, np.full(n_added, s.main_ci, dtype=s.face_comp.dtype)]),
+                    main_ci=s.main_ci,
+                )
                 new_org = Organelles(
                     pocket=np.concatenate([org.pocket, pad]),
                     isolated=np.concatenate([org.isolated, pad]),
                     expanded=np.concatenate([org.expanded, pad]),
-                    outward_dots=od, face_comp=fc, main_ci=org.main_ci,
+                    mesh_stats=new_stats,
                 )
                 mesh_state["organelles"] = new_org
-                mesh_state["mesh_stats"] = new_org.mesh_stats
+                mesh_state["mesh_stats"] = new_stats.as_tuple()
             elif mesh_state.get("mesh_stats") is not None:
                 od, fc, mc, mm = mesh_state["mesh_stats"]
                 mesh_state["mesh_stats"] = (
@@ -1354,7 +1358,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import find_fusions
 
         mesh = mesh_state["mesh"]
-        clusters = await _run_with_log(find_fusions, mesh, verbose=True)
+        clusters = await _run_with_log(
+            find_fusions, mesh, verbose=True,
+            mesh_stats=mesh_state.get("mesh_stats"),
+        )
         mesh_state["fusion_clusters"] = clusters
 
         ann = {}
@@ -1824,9 +1831,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             pocket=org.pocket,
             isolated=org.isolated,
             expanded=new_org & ~(org.pocket | org.isolated),
-            outward_dots=org.outward_dots,
-            face_comp=org.face_comp,
-            main_ci=org.main_ci,
+            mesh_stats=org.mesh_stats,
         )
 
         # Build annotations

@@ -9,7 +9,7 @@ import trimesh
 
 from ._core import _bfs_parents
 from ._state import rebuild_vert2node
-from .dataclass import Organelles, Skeleton, Soma
+from .dataclass import MeshStats, Organelles, Skeleton, Soma
 
 __all__ = [
     "load_mesh",
@@ -524,13 +524,14 @@ def save_organelles_npz(
     if not path.suffix:
         path = path.with_suffix(".npz")
 
+    s = org.mesh_stats
     payload: dict[str, np.ndarray] = {
         "pocket": np.asarray(org.pocket, dtype=bool),
         "isolated": np.asarray(org.isolated, dtype=bool),
         "expanded": np.asarray(org.expanded, dtype=bool),
-        "outward_dots": org.outward_dots,
-        "face_comp": org.face_comp,
-        "main_ci": np.array(org.main_ci),
+        "outward_dots": s.outward_dots,
+        "face_comp": s.face_comp,
+        "main_ci": np.array(s.main_ci),
     }
 
     save_fn = np.savez_compressed if compress else np.savez
@@ -542,13 +543,16 @@ def load_organelles_npz(path: str | Path) -> Organelles:
     path = Path(path)
     with np.load(path, allow_pickle=False) as z:
         pocket = z["pocket"].astype(bool)
+        stats = MeshStats(
+            outward_dots=z["outward_dots"],
+            face_comp=z["face_comp"],
+            main_ci=int(z["main_ci"]),
+        )
         return Organelles(
             pocket=pocket,
             isolated=z["isolated"].astype(bool),
             expanded=z["expanded"].astype(bool) if "expanded" in z else np.zeros_like(pocket),
-            outward_dots=z["outward_dots"],
-            face_comp=z["face_comp"],
-            main_ci=int(z["main_ci"]),
+            mesh_stats=stats,
         )
 
 

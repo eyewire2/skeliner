@@ -49,6 +49,41 @@ class _SkeletonModuleView:
 
 
 # -----------------------------------------------------------------------------
+# MeshStats dataclass
+# -----------------------------------------------------------------------------
+@dataclass(slots=True)
+class MeshStats:
+    """Precomputed per-face mesh statistics.
+
+    Returned by :func:`~skeliner.pre.compute_mesh_stats`.
+    Stored inside :class:`Organelles` and persisted in ``organelles.npz``.
+
+    Parameters
+    ----------
+    outward_dots : (nFaces,) float
+        Per-face outward score (dot of face normal vs direction from
+        local center-of-mass).  Positive = surface, negative = internal.
+    face_comp : (nFaces,) int
+        Connected component label per face.
+    main_ci : int
+        Largest component ID.
+    """
+
+    outward_dots: np.ndarray
+    face_comp: np.ndarray
+    main_ci: int
+
+    @property
+    def main_face_mask(self) -> np.ndarray:
+        """Bool mask for faces in the main component."""
+        return self.face_comp == self.main_ci
+
+    def as_tuple(self) -> tuple:
+        """Backward-compatible tuple ``(outward_dots, face_comp, main_ci, main_face_mask)``."""
+        return (self.outward_dots, self.face_comp, self.main_ci, self.main_face_mask)
+
+
+# -----------------------------------------------------------------------------
 # Organelles dataclass
 # -----------------------------------------------------------------------------
 @dataclass(slots=True)
@@ -66,35 +101,20 @@ class Organelles:
         Isolated (disconnected) organelle faces.
     expanded : (nFaces,) bool
         Faces added by :func:`~skeliner.pre.break_at_soma`.
-    outward_dots : (nFaces,) float
-        Per-face outward score from :func:`~skeliner.pre.compute_mesh_stats`.
-    face_comp : (nFaces,) int
-        Connected component label per face.
-    main_ci : int
-        Largest component ID.
+    mesh_stats : MeshStats
+        Precomputed mesh statistics from
+        :func:`~skeliner.pre.compute_mesh_stats`.
     """
 
     pocket: np.ndarray
     isolated: np.ndarray
     expanded: np.ndarray
-    outward_dots: np.ndarray
-    face_comp: np.ndarray
-    main_ci: int
+    mesh_stats: MeshStats
 
     @property
     def mask(self) -> np.ndarray:
         """Combined bool mask (pocket | isolated | expanded)."""
         return self.pocket | self.isolated | self.expanded
-
-    @property
-    def main_face_mask(self) -> np.ndarray:
-        """Bool mask for faces in the main component."""
-        return self.face_comp == self.main_ci
-
-    @property
-    def mesh_stats(self) -> tuple:
-        """Backward-compatible tuple for functions expecting mesh_stats."""
-        return (self.outward_dots, self.face_comp, self.main_ci, self.main_face_mask)
 
 
 # -----------------------------------------------------------------------------

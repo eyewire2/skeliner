@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from skeliner import Skeleton, Soma, dx, skeletonize
-from skeliner.dataclass import Organelles
+from skeliner.dataclass import MeshStats, Organelles
 from skeliner.io import (
     load_mesh, load_skeleton_npz, load_soma_npz, load_skeleton_swc,
     save_soma_npz, save_organelles_npz, load_organelles_npz,
@@ -270,11 +270,13 @@ def test_organelles_npz_full_roundtrip(tmp_path):
     expanded[500:520] = True
 
     rng = np.random.default_rng(42)
-    org = Organelles(
-        pocket=pocket, isolated=isolated, expanded=expanded,
+    stats = MeshStats(
         outward_dots=rng.uniform(-1, 1, nF),
         face_comp=rng.integers(0, 5, nF).astype(np.int64),
         main_ci=0,
+    )
+    org = Organelles(
+        pocket=pocket, isolated=isolated, expanded=expanded, mesh_stats=stats,
     )
 
     path = tmp_path / "org_full.npz"
@@ -284,14 +286,14 @@ def test_organelles_npz_full_roundtrip(tmp_path):
     assert np.array_equal(loaded.pocket, org.pocket)
     assert np.array_equal(loaded.isolated, org.isolated)
     assert np.array_equal(loaded.expanded, org.expanded)
-    assert np.allclose(loaded.outward_dots, org.outward_dots)
-    assert np.array_equal(loaded.face_comp, org.face_comp)
-    assert loaded.main_ci == org.main_ci
+    assert np.allclose(loaded.mesh_stats.outward_dots, stats.outward_dots)
+    assert np.array_equal(loaded.mesh_stats.face_comp, stats.face_comp)
+    assert loaded.mesh_stats.main_ci == stats.main_ci
     # .mask property
     assert np.array_equal(loaded.mask, pocket | isolated | expanded)
-    # .mesh_stats backward compat
-    od, fc, mc, mm = loaded.mesh_stats
-    assert np.array_equal(mm, loaded.face_comp == loaded.main_ci)
+    # .as_tuple backward compat
+    od, fc, mc, mm = loaded.mesh_stats.as_tuple()
+    assert np.array_equal(mm, loaded.mesh_stats.face_comp == loaded.mesh_stats.main_ci)
 
 
 def test_organelles_npz_backward_compat(tmp_path):
@@ -309,3 +311,4 @@ def test_organelles_npz_backward_compat(tmp_path):
     loaded = load_organelles_npz(path)
     assert np.array_equal(loaded.pocket, pocket)
     assert np.array_equal(loaded.expanded, np.zeros(nF, dtype=bool))
+    assert loaded.mesh_stats.main_ci == 0

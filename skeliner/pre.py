@@ -5217,14 +5217,13 @@ def find_organelles(
             f"isolated={int(isolated.sum()):,} ({dt_total:.1f}s)"
         )
 
+    from .dataclass import MeshStats
     outward_dots, face_comp, main_ci, _ = precomputed
     return Organelles(
         pocket=pocket,
         isolated=isolated,
         expanded=np.zeros(len(mesh.faces), dtype=bool),
-        outward_dots=outward_dots,
-        face_comp=face_comp,
-        main_ci=int(main_ci),
+        mesh_stats=MeshStats(outward_dots=outward_dots, face_comp=face_comp, main_ci=int(main_ci)),
     )
 
 
@@ -5236,6 +5235,7 @@ def _find_nonmanifold_fusions(
     grow_rings: int = 20,
     min_branch_size: int = 5,
     verbose: bool = False,
+    mesh_stats: tuple | None = None,
 ) -> list[list[int]]:
     """Detect non-manifold fusions (shared edges, duplicate faces, pinch vertices)."""
     from collections import Counter, deque
@@ -5262,16 +5262,19 @@ def _find_nonmanifold_fusions(
             f"{len(zero_faces)} zero-area, {nm_edges} non-manifold edges"
         )
 
-    if verbose:
-        print("[skeliner.pre] Computing outward dots ...")
-    outward_dots = _outward_dot(
-        mesh,
-        radius
-        if radius is not None
-        else radius_multiplier * float(np.median(mesh.edges_unique_length)),
-    )
-    if verbose:
-        print("[skeliner.pre] Outward dots computed")
+    if mesh_stats is not None:
+        outward_dots = mesh_stats[0]
+    else:
+        if verbose:
+            print("[skeliner.pre] Computing outward dots ...")
+        outward_dots = _outward_dot(
+            mesh,
+            radius
+            if radius is not None
+            else radius_multiplier * float(np.median(mesh.edges_unique_length)),
+        )
+        if verbose:
+            print("[skeliner.pre] Outward dots computed")
 
     # Signal 1: negative-dot faces at non-manifold edges
     nm_neg_faces: set[int] = set()
@@ -5503,6 +5506,7 @@ def find_fusions(
     grow_rings: int = 20,
     min_branch_size: int = 5,
     verbose: bool = False,
+    mesh_stats: tuple | None = None,
 ) -> list[list[int]]:
     """Detect non-manifold fusion points where two branches are wrongly connected.
 
@@ -5521,6 +5525,10 @@ def find_fusions(
     min_branch_size : int
         Minimum faces in a component to count as a branch.
     verbose : bool
+    mesh_stats : tuple or None
+        Precomputed ``(outward_dots, face_comp, main_ci, main_face_mask)``
+        from :func:`compute_mesh_stats`.  Reuses ``outward_dots`` to skip
+        redundant computation.
 
     Returns
     -------
@@ -5543,6 +5551,7 @@ def find_fusions(
         grow_rings=grow_rings,
         min_branch_size=min_branch_size,
         verbose=verbose,
+        mesh_stats=mesh_stats,
     )
     clusters.sort(key=len, reverse=True)
 
