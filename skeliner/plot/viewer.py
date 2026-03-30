@@ -205,13 +205,20 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         "centroid": np.zeros(3, dtype=np.float32),
         "offsets": None, # cached from detect_offsets
         "mesh_stats": None, # cached from compute_mesh_stats
-        "organelles": None, # cached from detect_organelles
+        "organelles": None, # dict(pocket, isolated, expanded) bool masks, or None
         "fusion_clusters": None, # cached from detect_fusions
         "soma": None, # cached from detect_soma
         "disconnected": None, # cached from detect_disconnected
         "gap_clusters": None, # cached from detect_gaps
         "hole_loops": None, # cached from detect_holes
     }
+
+    def _organelle_mask(org: dict | None) -> np.ndarray | None:
+        """Combined bool mask from organelles dict."""
+        if org is None:
+            return None
+        return org["pocket"] | org["isolated"] | org["expanded"]
+
     # Multiple skeletons, keyed by filename
     skeleton_states: dict[str, dict[str, Any]] = {}
     SKEL_COLORS = [
@@ -442,7 +449,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 if "pocket" in data and "isolated" in data:
                     pocket = data["pocket"]
                     isolated = data["isolated"]
-                    mesh_state["organelles"] = pocket | isolated
+                    expanded = data["expanded"] if "expanded" in data else np.zeros_like(pocket)
+                    mesh_state["organelles"] = {
+                        "pocket": pocket, "isolated": isolated, "expanded": expanded,
+                    }
                     loaded.append(f"pocket={int(pocket.sum()):,}")
                     loaded.append(f"isolated={int(isolated.sum()):,}")
 
@@ -865,12 +875,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         det_type = request.query_params.get("type", "all")
 
         highlights = []
-        # Start from cached mask if available, else empty
+        nF = len(mesh.faces)
         cached = mesh_state.get("organelles")
-        if cached is not None and len(cached) == len(mesh.faces):
-            combined = cached.copy()
+        if cached is not None and len(cached["pocket"]) == nF:
+            org = {k: v.copy() for k, v in cached.items()}
         else:
-            combined = np.zeros(len(mesh.faces), dtype=bool)
+            org = {
+                "pocket": np.zeros(nF, dtype=bool),
+                "isolated": np.zeros(nF, dtype=bool),
+                "expanded": np.zeros(nF, dtype=bool),
+            }
 
         from skeliner.pre import (
             compute_mesh_stats, find_pocket_organelles,
@@ -890,7 +904,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 find_pocket_organelles, mesh, verbose=True,
                 mesh_stats=precomputed,
             )
-            combined |= mask
+            org["pocket"] |= mask
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
                 highlights.append({
@@ -903,7 +917,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 find_isolated_organelles, mesh, verbose=True,
                 mesh_stats=precomputed,
             )
-            combined |= mask
+            org["isolated"] |= mask
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
                 highlights.append({
@@ -916,7 +930,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 find_organelles, mesh, verbose=True,
                 mesh_stats=precomputed,
             )
-            combined = surface | iso_mask
+            org["pocket"] = surface
+            org["isolated"] = iso_mask
+            org["expanded"] = np.zeros(nF, dtype=bool)
             sf = [int(fi) for fi in np.where(surface)[0]]
             iso = [int(fi) for fi in np.where(iso_mask)[0]]
             if sf:
@@ -932,7 +948,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "label": f"organelle:isolated ({len(iso):,})",
                 })
 
-        mesh_state["organelles"] = combined
+        mesh_state["organelles"] = org
 
         ann = {}
         if annotations_path.exists():
@@ -989,7 +1005,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(
                 find_soma, mesh,
-                organelles=mesh_state.get("organelles"),
+                organelles=_organelle_mask(mesh_state.get("organelles")),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
             )
@@ -1071,7 +1087,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         else:
             soma = await _run_with_log(
                 _find, mesh,
-                organelles=mesh_state.get("organelles"),
+                organelles=_organelle_mask(mesh_state.get("organelles")),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
             )
@@ -1136,7 +1152,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(
                 find_soma, mesh,
-                organelles=mesh_state.get("organelles"),
+                organelles=_organelle_mask(mesh_state.get("organelles")),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
             )
@@ -1205,7 +1221,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if n_added > 0:
             pad = np.zeros(n_added, dtype=bool)
             if mesh_state.get("organelles") is not None:
-                mesh_state["organelles"] = np.concatenate([mesh_state["organelles"], pad])
+                org = mesh_state["organelles"]
+                for k in org:
+                    org[k] = np.concatenate([org[k], pad])
             cached_stats = mesh_state.get("mesh_stats")
             if cached_stats is not None:
                 od, fc, mc, mm = cached_stats
@@ -1505,18 +1523,18 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
-        cached = mesh_state.get("organelles")
+        cached_mask = _organelle_mask(mesh_state.get("organelles"))
 
         from skeliner.pre import _rebuild_mesh
 
         def _do_remove():
-            if cached is not None and len(cached) == len(mesh.faces) and cached.any():
-                print(f"[skeliner.pre] Using cached organelle mask ({int(cached.sum()):,} faces)")
-                return _rebuild_mesh(mesh, ~cached)
+            if cached_mask is not None and len(cached_mask) == len(mesh.faces) and cached_mask.any():
+                print(f"[skeliner.pre] Using cached organelle mask ({int(cached_mask.sum()):,} faces)")
+                return _rebuild_mesh(mesh, ~cached_mask)
             else:
                 reason = (
-                    "no cached mask" if cached is None
-                    else f"length mismatch ({len(cached)} vs {len(mesh.faces)})" if len(cached) != len(mesh.faces)
+                    "no cached mask" if cached_mask is None
+                    else f"length mismatch ({len(cached_mask)} vs {len(mesh.faces)})" if len(cached_mask) != len(mesh.faces)
                     else "mask is empty"
                 )
                 print(f"[skeliner.pre] No cached organelle mask ({reason}), running detection")
@@ -1792,12 +1810,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             return JSONResponse(
                 {"ok": False, "error": "Run soma detection first"}, status_code=400
             )
-        org_mask = mesh_state.get("organelles")
-        if org_mask is None:
+        org_dict = mesh_state.get("organelles")
+        if org_dict is None:
             return JSONResponse(
                 {"ok": False, "error": "Run organelle detection first"},
                 status_code=400,
             )
+        org_mask = _organelle_mask(org_dict)
 
         from skeliner.pre import break_at_soma
 
@@ -1809,7 +1828,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         new_soma, new_org, neurites = await _run_with_log(_run)
 
         mesh_state["soma"] = new_soma
-        mesh_state["organelles"] = new_org
+        mesh_state["organelles"] = {
+            "pocket": org_dict["pocket"],
+            "isolated": org_dict["isolated"],
+            "expanded": new_org & ~(org_dict["pocket"] | org_dict["isolated"]),
+        }
 
         # Build annotations
         centroid = mesh_state["centroid"]
@@ -2050,31 +2073,22 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         )
 
     async def export_organelles(request):
-        """Save organelle masks (pocket, isolated) + precomputed data."""
+        """Save organelle masks (pocket, isolated, expanded) + mesh stats."""
         from starlette.responses import Response
         import tempfile
 
-        cached_mask = mesh_state.get("organelles")
-        if cached_mask is None:
+        org = mesh_state.get("organelles")
+        if org is None:
             return JSONResponse(
                 {"ok": False, "error": "No organelle masks"}, status_code=400
             )
 
-        # Split combined mask into pocket/isolated from annotations
-        ann = {}
-        if annotations_path.exists():
-            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
-        pocket = np.zeros(len(cached_mask), dtype=bool)
-        isolated = np.zeros(len(cached_mask), dtype=bool)
-        for h in ann.get("highlights", []):
-            label = h.get("label", "").lower()
-            if "pocket" in label and "false" not in label:
-                pocket[h["faces"]] = True
-            elif "isolated" in label and "false" not in label:
-                isolated[h["faces"]] = True
-        save_data = {"pocket": pocket, "isolated": isolated}
+        save_data = {
+            "pocket": org["pocket"],
+            "isolated": org["isolated"],
+            "expanded": org["expanded"],
+        }
 
-        # Include precomputed data if available
         precomputed = mesh_state.get("mesh_stats")
         if precomputed is not None:
             outward_dots, face_comp, main_ci, _ = precomputed
