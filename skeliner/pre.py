@@ -2168,8 +2168,11 @@ def _build_edge_to_faces(faces, mask):
 
 def _face_components(faces, edge_to_faces, face_indices):
     """BFS connected components on a subset of faces."""
-    fi_set = set(face_indices.tolist()) if hasattr(face_indices, 'tolist') \
+    fi_set = (
+        set(face_indices.tolist())
+        if hasattr(face_indices, "tolist")
         else set(face_indices)
+    )
     visited: set[int] = set()
     components: list[np.ndarray] = []
     for fi in face_indices:
@@ -4062,6 +4065,7 @@ def compute_mesh_stats(
     Returns a :class:`~skeliner.dataclass.MeshStats`.
     """
     from .dataclass import MeshStats
+
     if radius is None:
         median_edge = float(np.median(mesh.edges_unique_length))
         radius = radius_multiplier * median_edge
@@ -4253,7 +4257,10 @@ def find_rims(
     """
 
     if mesh_stats is not None:
-        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
+        outward_dots, main_face_mask = (
+            mesh_stats.outward_dots,
+            mesh_stats.main_face_mask,
+        )
     else:
         mesh_stats = compute_mesh_stats(
             mesh,
@@ -4261,7 +4268,10 @@ def find_rims(
             radius_multiplier,
             verbose,
         )
-        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
+        outward_dots, main_face_mask = (
+            mesh_stats.outward_dots,
+            mesh_stats.main_face_mask,
+        )
     n_faces = len(mesh.faces)
     edge_to_face = _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
     adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
@@ -4370,7 +4380,10 @@ def find_pocket_mouths(
     """
 
     if mesh_stats is not None:
-        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
+        outward_dots, main_face_mask = (
+            mesh_stats.outward_dots,
+            mesh_stats.main_face_mask,
+        )
     else:
         mesh_stats = compute_mesh_stats(
             mesh,
@@ -4378,7 +4391,10 @@ def find_pocket_mouths(
             radius_multiplier,
             verbose,
         )
-        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
+        outward_dots, main_face_mask = (
+            mesh_stats.outward_dots,
+            mesh_stats.main_face_mask,
+        )
     n_faces = len(mesh.faces)
     edge_to_face = _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
     adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
@@ -4634,7 +4650,10 @@ def find_pocket_organelles(
     """
 
     if mesh_stats is not None:
-        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
+        outward_dots, main_face_mask = (
+            mesh_stats.outward_dots,
+            mesh_stats.main_face_mask,
+        )
     else:
         mesh_stats = compute_mesh_stats(
             mesh,
@@ -4642,7 +4661,10 @@ def find_pocket_organelles(
             radius_multiplier,
             verbose,
         )
-        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
+        outward_dots, main_face_mask = (
+            mesh_stats.outward_dots,
+            mesh_stats.main_face_mask,
+        )
     n_faces = len(mesh.faces)
     # Compute shared structures once
     edge_to_face = _edge_to_faces(mesh)
@@ -4855,7 +4877,10 @@ def find_pocket_organelles_alt(
     """
 
     if mesh_stats is not None:
-        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
+        outward_dots, main_face_mask = (
+            mesh_stats.outward_dots,
+            mesh_stats.main_face_mask,
+        )
     else:
         mesh_stats = compute_mesh_stats(
             mesh,
@@ -4863,7 +4888,10 @@ def find_pocket_organelles_alt(
             radius_multiplier,
             verbose,
         )
-        outward_dots, main_face_mask = mesh_stats.outward_dots, mesh_stats.main_face_mask
+        outward_dots, main_face_mask = (
+            mesh_stats.outward_dots,
+            mesh_stats.main_face_mask,
+        )
     n_faces = len(mesh.faces)
     edge_to_face = _edge_to_faces(mesh)
     adj = _face_adjacency(mesh, edge_to_face)
@@ -5195,11 +5223,14 @@ def find_organelles(
         structural_mask[face_comp == ci] = True
 
     from .dataclass import MeshStats
+
     # Build a MeshStats where main_face_mask covers all structural components
     # by mapping main_ci to a synthetic value that matches structural_mask.
     # We achieve this by setting face_comp to 0 for structural faces and
     # main_ci=0, so main_face_mask == structural_mask.
-    structural_face_comp = np.where(structural_mask, 0, -1).astype(mesh_stats.face_comp.dtype)
+    structural_face_comp = np.where(structural_mask, 0, -1).astype(
+        mesh_stats.face_comp.dtype
+    )
     precomputed_structural = MeshStats(
         outward_dots=mesh_stats.outward_dots,
         face_comp=structural_face_comp,
@@ -6987,8 +7018,8 @@ def find_nucleus_center(
     # These are outer-surface vertices (not void/pocket), suitable
     # as BFS seeds for soma detection.
     mid_i = best[len(best) // 2]
-    mid_vi = raw[mid_i][5]       # vert_indices at this Z
-    mid_sm = raw[mid_i][6]       # soma_mask (bool over vert_indices)
+    mid_vi = raw[mid_i][5]  # vert_indices at this Z
+    mid_sm = raw[mid_i][6]  # soma_mask (bool over vert_indices)
     soma_seed_vi = mid_vi[mid_sm] if mid_sm is not None else np.array([], dtype=np.intp)
 
     return {
@@ -7103,12 +7134,9 @@ def _z_scan(
     best = max(runs, key=len)
 
     if not retry_broken:
-        slices = np.array(
-            [(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best]
-        )
+        slices = np.array([(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best])
         center = np.array(
-            [np.nanmean(slices[:, 1]), np.nanmean(slices[:, 2]),
-             np.mean(slices[:, 0])]
+            [np.nanmean(slices[:, 1]), np.nanmean(slices[:, 2]), np.mean(slices[:, 0])]
         )
         return raw, best, center
 
@@ -7294,8 +7322,12 @@ def _soma_hulls(
     (True = nothing beyond the soma, extend to mesh edge; False = soma
     is bounded by neurites, don't extend).
     """
-    from scipy.ndimage import (binary_dilation, binary_erosion,
-                                binary_fill_holes, distance_transform_edt)
+    from scipy.ndimage import (
+        binary_dilation,
+        binary_erosion,
+        binary_fill_holes,
+        distance_transform_edt,
+    )
     from scipy.spatial import ConvexHull
     from shapely.geometry import Polygon as _Poly
 
@@ -7332,17 +7364,19 @@ def _soma_hulls(
         if peak_dist >= 6:
             r = max(int(peak_dist * 0.3), 3)
             se = np.zeros((2 * r + 1, 2 * r + 1), dtype=bool)
-            yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
-            se[xx ** 2 + yy ** 2 <= r ** 2] = True
+            yy, xx = np.ogrid[-r : r + 1, -r : r + 1]
+            se[xx**2 + yy**2 <= r**2] = True
             opened = binary_erosion(filled, se)
             opened = binary_dilation(opened, se)
             if opened.any():
                 # Build hull from opened grid cell centres
                 gi, gj = np.where(opened)
-                hull_pts = np.column_stack([
-                    xy_min[0] + gi * grid_res + grid_res / 2,
-                    xy_min[1] + gj * grid_res + grid_res / 2,
-                ])
+                hull_pts = np.column_stack(
+                    [
+                        xy_min[0] + gi * grid_res + grid_res / 2,
+                        xy_min[1] + gj * grid_res + grid_res / 2,
+                    ]
+                )
                 try:
                     h = ConvexHull(hull_pts)
                     p = _Poly(hull_pts[h.vertices])
@@ -7375,8 +7409,7 @@ def _soma_hulls(
 
     # Find the chain's position in hull_levels
     chain_set = set(best)
-    chain_positions = [pos for pos, i in enumerate(hull_levels)
-                       if i in chain_set]
+    chain_positions = [pos for pos, i in enumerate(hull_levels) if i in chain_set]
     if not chain_positions:
         return {}, False, False
     mid_lo = min(chain_positions)
@@ -7601,7 +7634,9 @@ def find_soma_via_z_contour(
                 continue
             fi_batch = cand_fi[mask]
             pts_xy = centroids[fi_batch, :2]
-            inside = np.array([expanded_polys[hi][1].contains(Point(p)) for p in pts_xy])
+            inside = np.array(
+                [expanded_polys[hi][1].contains(Point(p)) for p in pts_xy]
+            )
             soma_face[fi_batch] |= inside
 
     # Exclude organelle faces from soma
@@ -7610,6 +7645,7 @@ def find_soma_via_z_contour(
 
     # Keep only the largest connected component of soma faces
     from collections import deque
+
     adj = _face_adjacency(mesh)
     soma_idx = set(np.where(soma_face)[0].tolist())
     visited: set[int] = set()
@@ -7646,9 +7682,7 @@ def find_soma_via_z_contour(
     soma = Soma.fit(mesh.vertices[soma_arr], verts=soma_arr)
 
     # Build nucleus dict from _z_scan results
-    nuc_slices = np.array(
-        [(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best]
-    )
+    nuc_slices = np.array([(raw[i][0], raw[i][1], raw[i][2], raw[i][3]) for i in best])
     soma.nucleus = {
         "center": nc,
         "peak_r": float(nuc_slices[:, 3].max()),
@@ -7671,6 +7705,7 @@ def find_soma_via_z_contour(
 
 # Backward-compat wrapper — will be removed in a future release.
 
+
 def _deprecated_alias(old_name: str, new_func):
     import functools, warnings
 
@@ -7682,7 +7717,8 @@ def _deprecated_alias(old_name: str, new_func):
             stacklevel=2,
         )
         return new_func(*args, **kwargs)
+
     return wrapper
 
-find_soma = _deprecated_alias("find_soma", find_soma_via_neurite_exclusion)
 
+find_soma = _deprecated_alias("find_soma", find_soma_via_neurite_exclusion)

@@ -426,7 +426,9 @@ class Skeleton:
             self.ntype = np.asanyarray(self.ntype, dtype=np.int8).reshape(-1)
             if len(self.ntype) != N:
                 raise ValueError("ntype length must match number of nodes")
-            self.ntype[0] = -1 if not (self.ntype[0] in [-1, 1]) else self.ntype[0]  # root must be "root" or "soma"
+            self.ntype[0] = (
+                -1 if not (self.ntype[0] in [-1, 1]) else self.ntype[0]
+            )  # root must be "root" or "soma"
 
         if self.soma is not None:
             if self.soma.verts is not None and self.soma.verts.ndim != 1:

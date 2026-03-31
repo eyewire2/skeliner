@@ -16,4 +16,3 @@ def view(mesh_path, **kwargs):
     from .viewer import view as _view
 
     return _view(mesh_path, **kwargs)
-

@@ -149,7 +149,11 @@ def load_skeleton_swc(
     # --- core arrays ----------------------------------------------------
     nodes_arr = np.asarray(xyz, dtype=np.float64) * scale
     radii_arr = np.asarray(radii, dtype=np.float64) * scale
-    radii_dict = {"median": radii_arr, "mean": radii_arr.copy(), "trim": radii_arr.copy()}
+    radii_dict = {
+        "median": radii_arr,
+        "mean": radii_arr.copy(),
+        "trim": radii_arr.copy(),
+    }
     ntype_arr = np.asarray(ntype, dtype=np.int8)
     # --- edges (parent IDs → 0-based indices) ---------------------------
     id_map = {old: new for new, old in enumerate(ids)}
@@ -386,11 +390,19 @@ def save_skeleton_npz(
             idx_min, idx_max = n2v_idx.min(), n2v_idx.max()
             if idx_min >= 0 and idx_max <= np.iinfo(np.uint16).max:
                 n2v_idx = n2v_idx.astype(np.uint16)
-            elif idx_min < 0 and idx_min >= np.iinfo(np.int16).min and idx_max <= np.iinfo(np.int16).max:
+            elif (
+                idx_min < 0
+                and idx_min >= np.iinfo(np.int16).min
+                and idx_max <= np.iinfo(np.int16).max
+            ):
                 n2v_idx = n2v_idx.astype(np.int16)
             elif idx_min >= 0 and idx_max <= np.iinfo(np.uint32).max:
                 n2v_idx = n2v_idx.astype(np.uint32)
-            elif idx_min < 0 and idx_min >= np.iinfo(np.int32).min and idx_max <= np.iinfo(np.int32).max:
+            elif (
+                idx_min < 0
+                and idx_min >= np.iinfo(np.int32).min
+                and idx_max <= np.iinfo(np.int32).max
+            ):
                 n2v_idx = n2v_idx.astype(np.int32)
             else:
                 n2v_idx = n2v_idx.astype(np.int64)
@@ -401,11 +413,19 @@ def save_skeleton_npz(
         off_min, off_max = n2v_off.min(), n2v_off.max()
         if off_min >= 0 and off_max <= np.iinfo(np.uint16).max:
             n2v_off = n2v_off.astype(np.uint16)
-        elif off_min < 0 and off_min >= np.iinfo(np.int16).min and off_max <= np.iinfo(np.int16).max:
+        elif (
+            off_min < 0
+            and off_min >= np.iinfo(np.int16).min
+            and off_max <= np.iinfo(np.int16).max
+        ):
             n2v_off = n2v_off.astype(np.int16)
         elif off_min >= 0 and off_max <= np.iinfo(np.uint32).max:
             n2v_off = n2v_off.astype(np.uint32)
-        elif off_min < 0 and off_min >= np.iinfo(np.int32).min and off_max <= np.iinfo(np.int32).max:
+        elif (
+            off_min < 0
+            and off_min >= np.iinfo(np.int32).min
+            and off_max <= np.iinfo(np.int32).max
+        ):
             n2v_off = n2v_off.astype(np.int32)
         else:
             n2v_off = n2v_off.astype(np.int64)
@@ -499,8 +519,12 @@ def load_soma_npz(path: str | Path) -> Soma:
             nucleus = {
                 "center": z["nucleus_center"].astype(np.float64),
                 "peak_r": float(z["nucleus_peak_r"]) if "nucleus_peak_r" in z else 0.0,
-                "z_range": tuple(z["nucleus_z_range"].astype(np.float64)) if "nucleus_z_range" in z else (0.0, 0.0),
-                "slices": z["nucleus_slices"].astype(np.float64) if "nucleus_slices" in z else np.empty((0, 4)),
+                "z_range": tuple(z["nucleus_z_range"].astype(np.float64))
+                if "nucleus_z_range" in z
+                else (0.0, 0.0),
+                "slices": z["nucleus_slices"].astype(np.float64)
+                if "nucleus_slices" in z
+                else np.empty((0, 4)),
             }
         return Soma(
             center=z["center"].astype(np.float64),
@@ -517,7 +541,10 @@ def load_soma_npz(path: str | Path) -> Soma:
 
 
 def save_organelles_npz(
-    org: Organelles, path: str | Path, *, compress: bool = True,
+    org: Organelles,
+    path: str | Path,
+    *,
+    compress: bool = True,
 ) -> None:
     """Write an :class:`Organelles` to a compressed ``.npz`` archive."""
     path = Path(path)
@@ -551,7 +578,9 @@ def load_organelles_npz(path: str | Path) -> Organelles:
         return Organelles(
             pocket=pocket,
             isolated=z["isolated"].astype(bool),
-            expanded=z["expanded"].astype(bool) if "expanded" in z else np.zeros_like(pocket),
+            expanded=z["expanded"].astype(bool)
+            if "expanded" in z
+            else np.zeros_like(pocket),
             mesh_stats=stats,
         )
 
@@ -755,6 +784,7 @@ def load_contact_sites_npz(path: str | Path):
 
 # Backward-compat wrappers — will be removed in a future release.
 
+
 def _deprecated_alias(old_name: str, new_func):
     import functools, warnings
 
@@ -766,7 +796,9 @@ def _deprecated_alias(old_name: str, new_func):
             stacklevel=2,
         )
         return new_func(*args, **kwargs)
+
     return wrapper
+
 
 load_swc = _deprecated_alias("load_swc", load_skeleton_swc)
 to_swc = _deprecated_alias("to_swc", save_skeleton_swc)

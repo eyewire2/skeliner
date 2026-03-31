@@ -13,8 +13,15 @@ from scipy.stats import binned_statistic_2d
 
 from ..dataclass import Skeleton
 
-__all__ = ["projection", "threeviews", "details", "node_details",
-           "z_section", "z_section_grid", "soma_diagnostics"]
+__all__ = [
+    "projection",
+    "threeviews",
+    "details",
+    "node_details",
+    "z_section",
+    "z_section_grid",
+    "soma_diagnostics",
+]
 
 
 Number = int | float
@@ -518,23 +525,19 @@ def projection(
     c_xy = _project(skel.nodes[[0]] * scl_skel, ix, iy).ravel()
     col_soma = swc_colors[1] if color_by == "ntype" else "pink"
 
-    if soma_style == 'filled':
+    if soma_style == "filled":
         soma_fc = col_soma
-        soma_ec = 'k'
-        soma_ls = '-'
-        soma_mc = 'none'
+        soma_ec = "k"
+        soma_ls = "-"
+        soma_mc = "none"
     else:
         ax.scatter(*c_xy, color="black", s=15, zorder=3)
-        soma_fc = 'none'
-        soma_ec = 'k'
-        soma_ls = '--'
+        soma_fc = "none"
+        soma_ec = "k"
+        soma_ls = "--"
         soma_mc = col_soma
 
-    if (
-        mesh is not None
-        and skel.soma is not None
-        and skel.soma.verts is not None
-    ):
+    if mesh is not None and skel.soma is not None and skel.soma.verts is not None:
         if draw_soma_mask:
             xy_soma = _project(mesh.vertices[np.asarray(skel.soma.verts, int)], ix, iy)
             xy_soma = xy_soma * scl_mesh
@@ -632,8 +635,8 @@ def projection(
                     ax.add_collection(pc)
 
     # ────────────────────────────── final cosmetics ────────────────────────
-    if plane in ['xy', 'yx']:
-        ax.set_aspect('equal', adjustable='box')
+    if plane in ["xy", "yx"]:
+        ax.set_aspect("equal", adjustable="box")
 
     if unit is None:
         unit_str = "" if scl_skel == 1.0 else f"(×{scl_skel:g})"
@@ -990,7 +993,7 @@ def details(
         ax.add_patch(ell)
 
     # ────────────── cosmetics & labels ────────────────────────────────────
-    if plane in ['xy', 'yx']:
+    if plane in ["xy", "yx"]:
         ax.set_aspect("equal", adjustable="box")
 
     if unit is None:
@@ -999,7 +1002,6 @@ def details(
     else:
         ax.set_xlabel(f"{plane[0]} ({unit})")
         ax.set_ylabel(f"{plane[1]} ({unit})")
-
 
     if xlim is not None:
         ax.set_xlim(xlim)
@@ -1314,8 +1316,15 @@ def z_section(
         return fig, ax
 
     # All vertices — light gray
-    ax.scatter(pts_xy[:, 0], pts_xy[:, 1], c="#cccccc", s=0.5,
-               alpha=0.3, zorder=1, rasterized=True)
+    ax.scatter(
+        pts_xy[:, 0],
+        pts_xy[:, 1],
+        c="#cccccc",
+        s=0.5,
+        alpha=0.3,
+        zorder=1,
+        rasterized=True,
+    )
 
     # Organelle overlay
     if organelles is not None:
@@ -1324,8 +1333,16 @@ def z_section(
         org_near = face_near & organelles
         if org_near.sum() > 0:
             oc = centroids[org_near]
-            ax.scatter(oc[:, 0], oc[:, 1], c="red", s=2, alpha=0.4,
-                       zorder=2, rasterized=True, label="organelles")
+            ax.scatter(
+                oc[:, 0],
+                oc[:, 1],
+                c="red",
+                s=2,
+                alpha=0.4,
+                zorder=2,
+                rasterized=True,
+                label="organelles",
+            )
 
     # Outer contour — rasterize, find largest cluster, convex hull.
     # When soma_hull=True, fill interior + morphological open to strip
@@ -1336,15 +1353,11 @@ def z_section(
             grid_res = 200.0
             struct3 = np.ones((3, 3), dtype=bool)
             xy_min = pts_xy.min(axis=0) - grid_res * 3
-            nx = int((pts_xy[:, 0].max() - xy_min[0] + grid_res * 6)
-                     / grid_res) + 1
-            ny = int((pts_xy[:, 1].max() - xy_min[1] + grid_res * 6)
-                     / grid_res) + 1
+            nx = int((pts_xy[:, 0].max() - xy_min[0] + grid_res * 6) / grid_res) + 1
+            ny = int((pts_xy[:, 1].max() - xy_min[1] + grid_res * 6) / grid_res) + 1
             occ = np.zeros((nx, ny), dtype=bool)
-            ix = ((pts_xy[:, 0] - xy_min[0]) / grid_res).astype(int).clip(
-                0, nx - 1)
-            iy = ((pts_xy[:, 1] - xy_min[1]) / grid_res).astype(int).clip(
-                0, ny - 1)
+            ix = ((pts_xy[:, 0] - xy_min[0]) / grid_res).astype(int).clip(0, nx - 1)
+            iy = ((pts_xy[:, 1] - xy_min[1]) / grid_res).astype(int).clip(0, ny - 1)
             occ[ix, iy] = True
 
             dilated = binary_dilation(occ, struct3)
@@ -1357,11 +1370,13 @@ def z_section(
                 soma_mask = vert_labels == lid
 
                 if soma_hull:
-                    from scipy.ndimage import (binary_erosion,
-                                               binary_fill_holes,
-                                               distance_transform_edt)
-                    closed = binary_dilation(occ & soma_region, struct3,
-                                             iterations=2)
+                    from scipy.ndimage import (
+                        binary_erosion,
+                        binary_fill_holes,
+                        distance_transform_edt,
+                    )
+
+                    closed = binary_dilation(occ & soma_region, struct3, iterations=2)
                     closed = binary_erosion(closed, struct3, iterations=2)
                     filled = binary_fill_holes(closed)
                     dt = distance_transform_edt(filled)
@@ -1369,22 +1384,29 @@ def z_section(
                     if peak_dist >= 6:
                         r = max(int(peak_dist * 0.3), 3)
                         se = np.zeros((2 * r + 1, 2 * r + 1), dtype=bool)
-                        yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
-                        se[xx ** 2 + yy ** 2 <= r ** 2] = True
+                        yy, xx = np.ogrid[-r : r + 1, -r : r + 1]
+                        se[xx**2 + yy**2 <= r**2] = True
                         opened = binary_erosion(filled, se)
                         opened = binary_dilation(opened, se)
                         if opened.any():
                             gi, gj = np.where(opened)
-                            hull_pts = np.column_stack([
-                                xy_min[0] + gi * grid_res + grid_res / 2,
-                                xy_min[1] + gj * grid_res + grid_res / 2,
-                            ])
+                            hull_pts = np.column_stack(
+                                [
+                                    xy_min[0] + gi * grid_res + grid_res / 2,
+                                    xy_min[1] + gj * grid_res + grid_res / 2,
+                                ]
+                            )
                             hull = ConvexHull(hull_pts)
                             hv = hull_pts[hull.vertices]
                             hv_closed = np.vstack([hv, hv[0:1]])
-                            ax.plot(hv_closed[:, 0], hv_closed[:, 1],
-                                    color="green", linewidth=2.5, zorder=5,
-                                    label="outer contour")
+                            ax.plot(
+                                hv_closed[:, 0],
+                                hv_closed[:, 1],
+                                color="green",
+                                linewidth=2.5,
+                                zorder=5,
+                                label="outer contour",
+                            )
                             soma_mask = soma_mask & opened[ix, iy]
                             soma_pts = pts_xy[soma_mask]
 
@@ -1395,9 +1417,14 @@ def z_section(
                         hull = ConvexHull(soma_pts)
                         hv = soma_pts[hull.vertices]
                         hv_closed = np.vstack([hv, hv[0:1]])
-                        ax.plot(hv_closed[:, 0], hv_closed[:, 1],
-                                color="green", linewidth=2.5, zorder=5,
-                                label="outer contour")
+                        ax.plot(
+                            hv_closed[:, 0],
+                            hv_closed[:, 1],
+                            color="green",
+                            linewidth=2.5,
+                            zorder=5,
+                            label="outer contour",
+                        )
         except Exception:
             pass
 
@@ -1418,7 +1445,7 @@ def z_section(
             dx = sweep_pts[:, 0] - vc[0]
             dy = sweep_pts[:, 1] - vc[1]
             angles = np.arctan2(dy, dx)
-            dists = np.sqrt(dx ** 2 + dy ** 2)
+            dists = np.sqrt(dx**2 + dy**2)
             n_bins = 72
             bin_edges = np.linspace(-np.pi, np.pi, n_bins + 1)
             inner_pts = []
@@ -1441,21 +1468,41 @@ def z_section(
                         clipped = inner_poly.intersection(hull_poly)
                         if hasattr(clipped, "exterior"):
                             cc = np.array(clipped.exterior.coords)
-                            ax.plot(cc[:, 0], cc[:, 1],
-                                    color="goldenrod", linewidth=2.5,
-                                    zorder=5, label="nucleus void")
+                            ax.plot(
+                                cc[:, 0],
+                                cc[:, 1],
+                                color="goldenrod",
+                                linewidth=2.5,
+                                zorder=5,
+                                label="nucleus void",
+                            )
                         else:
-                            ax.plot(inner_closed[:, 0], inner_closed[:, 1],
-                                    color="goldenrod", linewidth=2.5,
-                                    zorder=5, label="nucleus void")
+                            ax.plot(
+                                inner_closed[:, 0],
+                                inner_closed[:, 1],
+                                color="goldenrod",
+                                linewidth=2.5,
+                                zorder=5,
+                                label="nucleus void",
+                            )
                     else:
-                        ax.plot(inner_closed[:, 0], inner_closed[:, 1],
-                                color="goldenrod", linewidth=2.5,
-                                zorder=5, label="nucleus void")
+                        ax.plot(
+                            inner_closed[:, 0],
+                            inner_closed[:, 1],
+                            color="goldenrod",
+                            linewidth=2.5,
+                            zorder=5,
+                            label="nucleus void",
+                        )
                 except Exception:
-                    ax.plot(inner_closed[:, 0], inner_closed[:, 1],
-                            color="goldenrod", linewidth=2.5,
-                            zorder=5, label="nucleus void")
+                    ax.plot(
+                        inner_closed[:, 0],
+                        inner_closed[:, 1],
+                        color="goldenrod",
+                        linewidth=2.5,
+                        zorder=5,
+                        label="nucleus void",
+                    )
 
     # Auto-zoom centred on nucleus XY
     if nucleus is not None:
@@ -1463,8 +1510,9 @@ def z_section(
         pad = nucleus["peak_r"] * 4
         ax.set_xlim(nc[0] - pad, nc[0] + pad)
         ax.set_ylim(nc[1] - pad, nc[1] + pad)
-        ax.plot(nc[0], nc[1], "+", color="red", markersize=10,
-                markeredgewidth=2, zorder=10)
+        ax.plot(
+            nc[0], nc[1], "+", color="red", markersize=10, markeredgewidth=2, zorder=10
+        )
 
     ax.set_aspect("equal")
     ax.set_title(f"Z = {z:.0f}  ({pts_xy.shape[0]} vertices)")
@@ -1527,12 +1575,12 @@ def z_section_grid(
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
     axes_flat = np.asarray(axes).ravel()
 
-    z_levels = np.linspace(z_center - z_span / 2,
-                           z_center + z_span / 2, n_levels)
+    z_levels = np.linspace(z_center - z_span / 2, z_center + z_span / 2, n_levels)
 
     for i, z_val in enumerate(z_levels):
         z_section(
-            mesh, z_val,
+            mesh,
+            z_val,
             z_tol=z_tol,
             organelles=organelles,
             nucleus=nucleus,
@@ -1601,16 +1649,26 @@ def soma_diagnostics(
 
         # All mesh vertices — light gray
         ax.scatter(
-            verts[:, ix], verts[:, iy],
-            c="#dddddd", s=0.3, alpha=0.2, rasterized=True, zorder=1,
+            verts[:, ix],
+            verts[:, iy],
+            c="#dddddd",
+            s=0.3,
+            alpha=0.2,
+            rasterized=True,
+            zorder=1,
         )
 
         # Soma vertices
         if soma is not None and len(soma.verts) > 0:
             sv = verts[soma.verts]
             ax.scatter(
-                sv[:, ix], sv[:, iy],
-                c="#d4a843", s=0.8, alpha=0.5, rasterized=True, zorder=3,
+                sv[:, ix],
+                sv[:, iy],
+                c="#d4a843",
+                s=0.8,
+                alpha=0.5,
+                rasterized=True,
+                zorder=3,
                 label="soma",
             )
 
@@ -1618,8 +1676,13 @@ def soma_diagnostics(
         if organelles is not None and organelles.any():
             org_centroids = verts[faces[organelles]].mean(axis=1)
             ax.scatter(
-                org_centroids[:, ix], org_centroids[:, iy],
-                c="red", s=0.3, alpha=0.15, rasterized=True, zorder=2,
+                org_centroids[:, ix],
+                org_centroids[:, iy],
+                c="red",
+                s=0.3,
+                alpha=0.15,
+                rasterized=True,
+                zorder=2,
                 label="organelles",
             )
             # Soma ellipsoid outline
@@ -1632,8 +1695,13 @@ def soma_diagnostics(
         if nucleus is not None:
             nc = nucleus["center"]
             ax.plot(
-                nc[ix], nc[iy], "+", color="cyan",
-                markersize=12, markeredgewidth=2, zorder=10,
+                nc[ix],
+                nc[iy],
+                "+",
+                color="cyan",
+                markersize=12,
+                markeredgewidth=2,
+                zorder=10,
             )
             # Z-range lines on planes that show Z
             if 2 in (ix, iy):
@@ -1642,11 +1710,13 @@ def soma_diagnostics(
                 other_ax = iy if z_ax == ix else ix
                 for zv in (z_lo, z_hi):
                     if z_ax == ix:
-                        ax.axvline(zv, color="cyan", linewidth=0.8,
-                                   alpha=0.6, linestyle="--")
+                        ax.axvline(
+                            zv, color="cyan", linewidth=0.8, alpha=0.6, linestyle="--"
+                        )
                     else:
-                        ax.axhline(zv, color="cyan", linewidth=0.8,
-                                   alpha=0.6, linestyle="--")
+                        ax.axhline(
+                            zv, color="cyan", linewidth=0.8, alpha=0.6, linestyle="--"
+                        )
 
         # Zoom to soma region with generous padding
         if soma is not None and len(soma.verts) > 0:

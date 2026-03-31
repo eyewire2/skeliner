@@ -108,7 +108,7 @@ def _estimate_radius(
     *,
     method: str = "median",
     trim_fraction: float = 0.15,
-    q: float = 80.,
+    q: float = 80.0,
 ) -> float:
     """Return one scalar radius according to *method*."""
     if method == "median":

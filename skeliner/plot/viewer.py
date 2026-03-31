@@ -37,6 +37,7 @@ def _ensure_state_dir():
 
 # ── Mesh helpers ──────────────────────────────────────────────────────
 
+
 def _mesh_to_buffers(
     mesh: trimesh.Trimesh, *, centroid: np.ndarray | None = None
 ) -> dict[str, Any]:
@@ -55,6 +56,7 @@ def _mesh_to_buffers(
 
 
 # ── Skeleton helpers ──────────────────────────────────────────────────
+
 
 def _skeleton_to_buffers(skel, centroid: np.ndarray) -> dict[str, Any]:
     """Convert a Skeleton to line-segment buffers for Three.js.
@@ -160,9 +162,9 @@ def _l2_graph_to_buffers(path: Path, centroid: np.ndarray) -> dict[str, Any]:
             n_edges = len(orig_edges)
             radii[:n_l2] = l2_radii
             # boundary_src [N..N+M-1] inherits from src L2 node
-            radii[n_l2:n_l2 + n_edges] = l2_radii[orig_edges[:, 0]]
+            radii[n_l2 : n_l2 + n_edges] = l2_radii[orig_edges[:, 0]]
             # boundary_dst [N+M..N+2M-1] inherits from dst L2 node
-            radii[n_l2 + n_edges:] = l2_radii[orig_edges[:, 1]]
+            radii[n_l2 + n_edges :] = l2_radii[orig_edges[:, 1]]
 
     positions = np.empty((len(edges) * 2, 3), dtype=np.float32)
     positions[0::2] = nodes[edges[:, 0]]
@@ -180,14 +182,13 @@ def _l2_graph_to_buffers(path: Path, centroid: np.ndarray) -> dict[str, Any]:
     }
 
 
-
-
 def _get_viewer_html() -> str:
     html_path = Path(__file__).parent / "viewer.html"
     return html_path.read_text(encoding="utf-8")
 
 
 # ── Server ────────────────────────────────────────────────────────────
+
 
 def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     """Create the Starlette app."""
@@ -199,18 +200,18 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     # ── Shared mutable state ──────────────────────────────────────────
     # These are modified by upload/remove endpoints
     mesh_state: dict[str, Any] = {
-        "mesh": None,           # trimesh object
-        "buffers": None,        # JSON-serialisable mesh data
-        "path": None,           # source file path
+        "mesh": None,  # trimesh object
+        "buffers": None,  # JSON-serialisable mesh data
+        "path": None,  # source file path
         "centroid": np.zeros(3, dtype=np.float32),
-        "offsets": None, # cached from detect_offsets
-        "mesh_stats": None, # cached from compute_mesh_stats
-        "organelles": None, # dict(pocket, isolated, expanded) bool masks, or None
-        "fusion_clusters": None, # cached from detect_fusions
-        "soma": None, # cached from detect_soma
-        "disconnected": None, # cached from detect_disconnected
-        "gap_clusters": None, # cached from detect_gaps
-        "hole_loops": None, # cached from detect_holes
+        "offsets": None,  # cached from detect_offsets
+        "mesh_stats": None,  # cached from compute_mesh_stats
+        "organelles": None,  # dict(pocket, isolated, expanded) bool masks, or None
+        "fusion_clusters": None,  # cached from detect_fusions
+        "soma": None,  # cached from detect_soma
+        "disconnected": None,  # cached from detect_disconnected
+        "gap_clusters": None,  # cached from detect_gaps
+        "hole_loops": None,  # cached from detect_holes
     }
 
     def _organelle_mask(org) -> np.ndarray | None:
@@ -222,18 +223,20 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     # Multiple skeletons, keyed by filename
     skeleton_states: dict[str, dict[str, Any]] = {}
     SKEL_COLORS = [
-        [1.0, 0.4, 0.1],   # orange
-        [0.2, 0.6, 1.0],   # blue
-        [0.1, 0.9, 0.4],   # green
-        [0.9, 0.2, 0.8],   # magenta
-        [1.0, 0.9, 0.1],   # yellow
+        [1.0, 0.4, 0.1],  # orange
+        [0.2, 0.6, 1.0],  # blue
+        [0.1, 0.9, 0.4],  # green
+        [0.9, 0.2, 0.8],  # magenta
+        [1.0, 0.9, 0.1],  # yellow
     ]
 
     # Pre-load mesh if path given
     if mesh_path is not None:
         mesh_path = Path(mesh_path)
         mesh = trimesh.load_mesh(str(mesh_path), process=False)
-        print(f"Loaded mesh: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
+        print(
+            f"Loaded mesh: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces"
+        )
 
         buffers = _mesh_to_buffers(mesh)
 
@@ -348,7 +351,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
     async def get_annotations(request):
         if annotations_path.exists():
-            return JSONResponse(json.loads(annotations_path.read_text(encoding="utf-8")))
+            return JSONResponse(
+                json.loads(annotations_path.read_text(encoding="utf-8"))
+            )
         return JSONResponse({})
 
     async def get_loaded(request):
@@ -375,7 +380,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             form = await request.form()
         except Exception:
             # Client disconnected during upload (e.g. drag-drop retry)
-            return JSONResponse({"ok": False, "error": "Upload interrupted"}, status_code=499)
+            return JSONResponse(
+                {"ok": False, "error": "Upload interrupted"}, status_code=499
+            )
         upload = form["file"]
         filename = upload.filename
         content = await upload.read()
@@ -388,7 +395,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         try:
             if suffix in (".obj", ".ply", ".stl"):
                 mesh = trimesh.load_mesh(str(tmp_path), process=False)
-                print(f"Uploaded mesh: {len(mesh.vertices):,} verts, {len(mesh.faces):,} faces")
+                print(
+                    f"Uploaded mesh: {len(mesh.vertices):,} verts, {len(mesh.faces):,} faces"
+                )
 
                 # ── Clear previous session data ──────────────────────
                 # Remove old mesh/skeleton files (keep the new upload)
@@ -410,7 +419,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 mesh_state["mesh"] = mesh
                 mesh_state["buffers"] = buffers
                 mesh_state["path"] = str(tmp_path.resolve())
-                mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+                mesh_state["centroid"] = np.asarray(
+                    buffers["centroid"], dtype=np.float32
+                )
 
                 # Update state file
                 current = {}
@@ -435,14 +446,18 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                             sstate["skeleton"], mesh_state["centroid"]
                         )
                     sstate["buffers"]["color"] = sstate["color"]
-                    await broadcast({"type": "skeleton_loaded", "payload": {
-                        "name": sname, **sstate["buffers"]
-                    }})
+                    await broadcast(
+                        {
+                            "type": "skeleton_loaded",
+                            "payload": {"name": sname, **sstate["buffers"]},
+                        }
+                    )
 
                 return JSONResponse({"ok": True, "type": "mesh", "name": filename})
 
             elif suffix == ".npz" and _is_organelle_data(tmp_path):
                 from skeliner.io import load_organelles_npz
+
                 org = load_organelles_npz(tmp_path)
                 mesh_state["organelles"] = org
                 mesh_state["mesh_stats"] = org.mesh_stats
@@ -461,31 +476,41 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 if "highlights" not in ann:
                     ann["highlights"] = []
                 if org.pocket.any():
-                    ann["highlights"].append({
-                        "faces": np.where(org.pocket)[0].tolist(),
-                        "color": [1, 0.15, 0.15],
-                        "label": "organelle:pocket",
-                    })
+                    ann["highlights"].append(
+                        {
+                            "faces": np.where(org.pocket)[0].tolist(),
+                            "color": [1, 0.15, 0.15],
+                            "label": "organelle:pocket",
+                        }
+                    )
                 if org.isolated.any():
-                    ann["highlights"].append({
-                        "faces": np.where(org.isolated)[0].tolist(),
-                        "color": [0.15, 0.8, 0.15],
-                        "label": "organelle:isolated",
-                    })
+                    ann["highlights"].append(
+                        {
+                            "faces": np.where(org.isolated)[0].tolist(),
+                            "color": [0.15, 0.8, 0.15],
+                            "label": "organelle:isolated",
+                        }
+                    )
                 if org.expanded.any():
-                    ann["highlights"].append({
-                        "faces": np.where(org.expanded)[0].tolist(),
-                        "color": [1, 0.6, 0.15],
-                        "label": "organelle:expanded",
-                    })
+                    ann["highlights"].append(
+                        {
+                            "faces": np.where(org.expanded)[0].tolist(),
+                            "color": [1, 0.6, 0.15],
+                            "label": "organelle:expanded",
+                        }
+                    )
 
                 annotations_path.write_text(json.dumps(ann), encoding="utf-8")
                 print(f"Loaded organelle npz: {', '.join(loaded)}")
                 await broadcast({"type": "annotations_updated"})
-                return JSONResponse({
-                    "ok": True, "type": "organelles", "name": filename,
-                    "loaded": loaded,
-                })
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "type": "organelles",
+                        "name": filename,
+                        "loaded": loaded,
+                    }
+                )
 
             elif suffix == ".npz" and _is_soma_data(tmp_path):
                 from skeliner.io import load_soma_npz
@@ -505,7 +530,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 if mesh is not None and soma.verts is not None:
                     soma_vset = set(int(v) for v in soma.verts)
                     soma_faces = [
-                        int(fi) for fi in range(len(mesh.faces))
+                        int(fi)
+                        for fi in range(len(mesh.faces))
                         if sum(1 for v in mesh.faces[fi] if int(v) in soma_vset) >= 2
                     ]
                     ann = {}
@@ -513,30 +539,40 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                         ann = json.loads(annotations_path.read_text(encoding="utf-8"))
                     if "highlights" not in ann:
                         ann["highlights"] = []
-                    ann["highlights"].append({
-                        "faces": soma_faces,
-                        "color": [0.9, 0.5, 0.9],
-                        "label": "soma",
-                    })
+                    ann["highlights"].append(
+                        {
+                            "faces": soma_faces,
+                            "color": [0.9, 0.5, 0.9],
+                            "label": "soma",
+                        }
+                    )
                     centroid = mesh_state["centroid"]
                     if "ellipsoids" not in ann:
                         ann["ellipsoids"] = []
-                    ann["ellipsoids"].append({
-                        "center": (soma.center - centroid).tolist(),
-                        "axes": soma.axes.tolist(),
-                        "R": soma.R.tolist(),
-                        "color": [0.9, 0.5, 0.9],
-                    })
+                    ann["ellipsoids"].append(
+                        {
+                            "center": (soma.center - centroid).tolist(),
+                            "axes": soma.axes.tolist(),
+                            "R": soma.R.tolist(),
+                            "color": [0.9, 0.5, 0.9],
+                        }
+                    )
                     annotations_path.write_text(json.dumps(ann), encoding="utf-8")
                     await broadcast({"type": "annotations_updated"})
 
-                return JSONResponse({
-                    "ok": True, "type": "soma", "name": filename,
-                })
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "type": "soma",
+                        "name": filename,
+                    }
+                )
 
             elif suffix == ".npz" and _is_l2_graph(tmp_path):
                 buffers = _l2_graph_to_buffers(tmp_path, mesh_state["centroid"])
-                print(f"Uploaded L2 graph: {buffers['nNodes']:,} nodes, {buffers['nEdges']:,} edges")
+                print(
+                    f"Uploaded L2 graph: {buffers['nNodes']:,} nodes, {buffers['nEdges']:,} edges"
+                )
 
                 color = SKEL_COLORS[len(skeleton_states) % len(SKEL_COLORS)]
                 buffers["color"] = color
@@ -549,14 +585,19 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "l2_graph": True,
                 }
 
-                await broadcast({"type": "skeleton_loaded", "payload": {
-                    "name": filename, **buffers
-                }})
+                await broadcast(
+                    {
+                        "type": "skeleton_loaded",
+                        "payload": {"name": filename, **buffers},
+                    }
+                )
                 return JSONResponse({"ok": True, "type": "skeleton", "name": filename})
 
             elif suffix in (".swc", ".npz"):
                 skel = _load_skeleton_as_nm(tmp_path)
-                print(f"Uploaded skeleton: {len(skel.nodes):,} nodes, {len(skel.edges):,} edges")
+                print(
+                    f"Uploaded skeleton: {len(skel.nodes):,} nodes, {len(skel.edges):,} edges"
+                )
 
                 color = SKEL_COLORS[len(skeleton_states) % len(SKEL_COLORS)]
                 buffers = _skeleton_to_buffers(skel, mesh_state["centroid"])
@@ -569,9 +610,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     "color": color,
                 }
 
-                await broadcast({"type": "skeleton_loaded", "payload": {
-                    "name": filename, **buffers
-                }})
+                await broadcast(
+                    {
+                        "type": "skeleton_loaded",
+                        "payload": {"name": filename, **buffers},
+                    }
+                )
                 return JSONResponse({"ok": True, "type": "skeleton", "name": filename})
 
             elif suffix == ".json":
@@ -608,13 +652,21 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     f"(total {len(current['highlights'])})"
                 )
                 await broadcast({"type": "annotations_updated"})
-                return JSONResponse({
-                    "ok": True, "type": "annotations", "name": filename,
-                    "added": added, "total": len(current["highlights"]),
-                })
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "type": "annotations",
+                        "name": filename,
+                        "added": added,
+                        "total": len(current["highlights"]),
+                    }
+                )
 
             else:
-                return JSONResponse({"ok": False, "error": f"Unsupported format: {suffix}"}, status_code=400)
+                return JSONResponse(
+                    {"ok": False, "error": f"Unsupported format: {suffix}"},
+                    status_code=400,
+                )
 
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -639,9 +691,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                         sstate["skeleton"], mesh_state["centroid"]
                     )
                 sstate["buffers"]["color"] = sstate["color"]
-                await broadcast({"type": "skeleton_loaded", "payload": {
-                    "name": sname, **sstate["buffers"]
-                }})
+                await broadcast(
+                    {
+                        "type": "skeleton_loaded",
+                        "payload": {"name": sname, **sstate["buffers"]},
+                    }
+                )
             await broadcast({"type": "mesh_removed"})
             return JSONResponse({"ok": True})
 
@@ -709,32 +764,38 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         # Clear previous offset annotations
         ann["highlights"] = [
-            h for h in ann["highlights"]
-            if not h.get("label", "").startswith("offset ")
+            h for h in ann["highlights"] if not h.get("label", "").startswith("offset ")
         ]
         ann["edge_groups"] = [
-            eg for eg in ann["edge_groups"]
+            eg
+            for eg in ann["edge_groups"]
             if not eg.get("label", "").startswith("offset ")
         ]
 
         colors = [
-            [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
-            [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
+            [1.0, 0.3, 0.3],
+            [0.3, 1.0, 0.3],
+            [0.3, 0.3, 1.0],
+            [1.0, 1.0, 0.3],
+            [1.0, 0.3, 1.0],
+            [0.3, 1.0, 1.0],
         ]
 
         for i, o in enumerate(offsets):
             dx, dy = o["offset"]
             color = colors[i % len(colors)]
-            ann["highlights"].append({
-                "faces": o["cap_faces"].tolist(),
-                "color": color,
-                "label": (
-                    f"offset {i}: z={o['z_floor']:.0f}→{o['z_ceil']:.0f} "
-                    f"d=({dx:.0f},{dy:.0f}) "
-                    f"err={o['match_error']:.0f} "
-                    f"{len(o['shifted_verts']):,}v"
-                ),
-            })
+            ann["highlights"].append(
+                {
+                    "faces": o["cap_faces"].tolist(),
+                    "color": color,
+                    "label": (
+                        f"offset {i}: z={o['z_floor']:.0f}→{o['z_ceil']:.0f} "
+                        f"d=({dx:.0f},{dy:.0f}) "
+                        f"err={o['match_error']:.0f} "
+                        f"{len(o['shifted_verts']):,}v"
+                    ),
+                }
+            )
 
             # Add a direction vector: red (floor) → green (ceil)
             # Coordinates must be centroid-relative for the viewer
@@ -742,16 +803,20 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             start = (o["floor_center"] - centroid).tolist()
             end = (o["ceil_center"] - centroid).tolist()
             midpt = [(s + e) / 2 for s, e in zip(start, end)]
-            ann["edge_groups"].append({
-                "segments": [[start, midpt]],
-                "color": [1.0, 0.2, 0.2],
-                "label": f"offset {i} from",
-            })
-            ann["edge_groups"].append({
-                "segments": [[midpt, end]],
-                "color": [0.2, 1.0, 0.2],
-                "label": f"offset {i} to",
-            })
+            ann["edge_groups"].append(
+                {
+                    "segments": [[start, midpt]],
+                    "color": [1.0, 0.2, 0.2],
+                    "label": f"offset {i} from",
+                }
+            )
+            ann["edge_groups"].append(
+                {
+                    "segments": [[midpt, end]],
+                    "color": [0.2, 1.0, 0.2],
+                    "label": f"offset {i} to",
+                }
+            )
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nOffsets": len(offsets)})
@@ -788,6 +853,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 {"ok": False, "error": "No offsets detected"}, status_code=400
             )
         import pickle
+
         save_path = port_dir / "offsets.pkl"
         with open(save_path, "wb") as f:
             pickle.dump(cached, f)
@@ -796,6 +862,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     async def load_offsets(request):
         """Load previously saved offsets and apply annotations."""
         import pickle
+
         save_path = port_dir / "offsets.pkl"
         if not save_path.exists():
             return JSONResponse(
@@ -814,46 +881,56 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if "edge_groups" not in ann:
             ann["edge_groups"] = []
         ann["highlights"] = [
-            h for h in ann["highlights"]
-            if not h.get("label", "").startswith("offset ")
+            h for h in ann["highlights"] if not h.get("label", "").startswith("offset ")
         ]
         ann["edge_groups"] = [
-            eg for eg in ann["edge_groups"]
+            eg
+            for eg in ann["edge_groups"]
             if not eg.get("label", "").startswith("offset ")
         ]
 
         colors = [
-            [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
-            [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
+            [1.0, 0.3, 0.3],
+            [0.3, 1.0, 0.3],
+            [0.3, 0.3, 1.0],
+            [1.0, 1.0, 0.3],
+            [1.0, 0.3, 1.0],
+            [0.3, 1.0, 1.0],
         ]
         mesh = mesh_state["mesh"]
         centroid = mesh_state["centroid"]
         for i, o in enumerate(offsets):
             dx, dy = o["offset"]
             color = colors[i % len(colors)]
-            ann["highlights"].append({
-                "faces": o["cap_faces"].tolist(),
-                "color": color,
-                "label": (
-                    f"offset {i}: z={o['z_floor']:.0f}→{o['z_ceil']:.0f} "
-                    f"d=({dx:.0f},{dy:.0f}) "
-                    f"err={o['match_error']:.0f} "
-                    f"{len(o['shifted_verts']):,}v"
-                ),
-            })
+            ann["highlights"].append(
+                {
+                    "faces": o["cap_faces"].tolist(),
+                    "color": color,
+                    "label": (
+                        f"offset {i}: z={o['z_floor']:.0f}→{o['z_ceil']:.0f} "
+                        f"d=({dx:.0f},{dy:.0f}) "
+                        f"err={o['match_error']:.0f} "
+                        f"{len(o['shifted_verts']):,}v"
+                    ),
+                }
+            )
             start = (o["floor_center"] - centroid).tolist()
             end = (o["ceil_center"] - centroid).tolist()
             midpt = [(s + e) / 2 for s, e in zip(start, end)]
-            ann["edge_groups"].append({
-                "segments": [[start, midpt]],
-                "color": [1.0, 0.2, 0.2],
-                "label": f"offset {i} from",
-            })
-            ann["edge_groups"].append({
-                "segments": [[midpt, end]],
-                "color": [0.2, 1.0, 0.2],
-                "label": f"offset {i} to",
-            })
+            ann["edge_groups"].append(
+                {
+                    "segments": [[start, midpt]],
+                    "color": [1.0, 0.2, 0.2],
+                    "label": f"offset {i} from",
+                }
+            )
+            ann["edge_groups"].append(
+                {
+                    "segments": [[midpt, end]],
+                    "color": [0.2, 1.0, 0.2],
+                    "label": f"offset {i} to",
+                }
+            )
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nOffsets": len(offsets)})
@@ -861,7 +938,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     async def detect_organelles(request):
         """Run organelle detection."""
         if mesh_state["mesh"] is None:
-            return JSONResponse({"ok": False, "error": "No mesh loaded"}, status_code=400)
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
 
         mesh = mesh_state["mesh"]
         det_type = request.query_params.get("type", "all")
@@ -870,8 +949,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         nF = len(mesh.faces)
 
         from skeliner.pre import (
-            compute_mesh_stats, find_pocket_organelles,
-            find_isolated_organelles, find_organelles,
+            compute_mesh_stats,
+            find_pocket_organelles,
+            find_isolated_organelles,
+            find_organelles,
         )
         from skeliner.dataclass import MeshStats, Organelles
 
@@ -880,14 +961,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         # Ensure mesh_stats are available
         ms = mesh_state.get("mesh_stats")
         if ms is None or len(ms.outward_dots) != nF:
-            ms = await _run_with_log(
-                compute_mesh_stats, mesh, None, 5.0, True
-            )
+            ms = await _run_with_log(compute_mesh_stats, mesh, None, 5.0, True)
             mesh_state["mesh_stats"] = ms
 
         if det_type in ("pocket", "surface"):
             mask = await _run_with_log(
-                find_pocket_organelles, mesh, verbose=True,
+                find_pocket_organelles,
+                mesh,
+                verbose=True,
                 mesh_stats=ms,
             )
             pocket = mask if cached is None else cached.pocket | mask
@@ -895,14 +976,18 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             expanded = np.zeros(nF, dtype=bool) if cached is None else cached.expanded
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
-                highlights.append({
-                    "faces": faces,
-                    "color": [1, 0.15, 0.15],
-                    "label": "organelle:pocket",
-                })
+                highlights.append(
+                    {
+                        "faces": faces,
+                        "color": [1, 0.15, 0.15],
+                        "label": "organelle:pocket",
+                    }
+                )
         elif det_type == "isolated":
             mask = await _run_with_log(
-                find_isolated_organelles, mesh, verbose=True,
+                find_isolated_organelles,
+                mesh,
+                verbose=True,
                 mesh_stats=ms,
             )
             pocket = np.zeros(nF, dtype=bool) if cached is None else cached.pocket
@@ -910,14 +995,18 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             expanded = np.zeros(nF, dtype=bool) if cached is None else cached.expanded
             faces = [int(fi) for fi in np.where(mask)[0]]
             if faces:
-                highlights.append({
-                    "faces": faces,
-                    "color": [0.15, 0.8, 0.15],
-                    "label": f"organelle:isolated ({len(faces):,})",
-                })
+                highlights.append(
+                    {
+                        "faces": faces,
+                        "color": [0.15, 0.8, 0.15],
+                        "label": f"organelle:isolated ({len(faces):,})",
+                    }
+                )
         else:
             result = await _run_with_log(
-                find_organelles, mesh, verbose=True,
+                find_organelles,
+                mesh,
+                verbose=True,
                 mesh_stats=ms,
             )
             pocket = result.pocket
@@ -926,20 +1015,26 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             sf = [int(fi) for fi in np.where(pocket)[0]]
             iso = [int(fi) for fi in np.where(isolated)[0]]
             if sf:
-                highlights.append({
-                    "faces": sf,
-                    "color": [1, 0.15, 0.15],
-                    "label": "organelle:pocket",
-                })
+                highlights.append(
+                    {
+                        "faces": sf,
+                        "color": [1, 0.15, 0.15],
+                        "label": "organelle:pocket",
+                    }
+                )
             if iso:
-                highlights.append({
-                    "faces": iso,
-                    "color": [0.15, 0.8, 0.15],
-                    "label": "organelle:isolated",
-                })
+                highlights.append(
+                    {
+                        "faces": iso,
+                        "color": [0.15, 0.8, 0.15],
+                        "label": "organelle:isolated",
+                    }
+                )
 
         mesh_state["organelles"] = Organelles(
-            pocket=pocket, isolated=isolated, expanded=expanded,
+            pocket=pocket,
+            isolated=isolated,
+            expanded=expanded,
             mesh_stats=ms,
         )
 
@@ -974,11 +1069,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 ann = json.loads(annotations_path.read_text(encoding="utf-8"))
             if "highlights" not in ann:
                 ann["highlights"] = []
-            ann["highlights"].append({
-                "faces": faces,
-                "color": [0.2, 0.8, 0.8],
-                "label": "fragments",
-            })
+            ann["highlights"].append(
+                {
+                    "faces": faces,
+                    "color": [0.2, 0.8, 0.8],
+                    "label": "fragments",
+                }
+            )
             annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
         return JSONResponse({"ok": True, "nFaces": len(faces)})
@@ -997,7 +1094,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if soma is None:
             await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(
-                find_soma_via_ring_cutoff, mesh,
+                find_soma_via_ring_cutoff,
+                mesh,
                 organelles=_organelle_mask(mesh_state.get("organelles")),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
@@ -1005,7 +1103,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             mesh_state["soma"] = soma
         await _log("[skeliner.pre] Detecting disconnected components...")
         components = await _run_with_log(
-            find_disconnected, mesh, verbose=True, soma=soma,
+            find_disconnected,
+            mesh,
+            verbose=True,
+            soma=soma,
             organelles=_organelle_mask(mesh_state.get("organelles")),
             mesh_stats=mesh_state.get("mesh_stats"),
         )
@@ -1022,15 +1123,21 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann["highlights"] = []
 
         colors = [
-            [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
-            [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
+            [1.0, 0.3, 0.3],
+            [0.3, 1.0, 0.3],
+            [0.3, 0.3, 1.0],
+            [1.0, 1.0, 0.3],
+            [1.0, 0.3, 1.0],
+            [0.3, 1.0, 1.0],
         ]
         for i, faces in enumerate(components):
-            ann["highlights"].append({
-                "faces": faces,
-                "color": colors[i % len(colors)],
-                "label": f"disconnected {i}",
-            })
+            ann["highlights"].append(
+                {
+                    "faces": faces,
+                    "color": colors[i % len(colors)],
+                    "label": f"disconnected {i}",
+                }
+            )
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nComponents": len(components)})
@@ -1056,20 +1163,25 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         if method == "ring_cutoff":
             from skeliner.pre import find_soma_via_ring_cutoff as _find
+
             label_prefix = "soma (ring_cutoff)"
         else:
             from skeliner.pre import find_soma_via_z_contour as _find
+
             label_prefix = "soma (z_contour)"
         color = [0.9, 0.5, 0.9]
 
         mesh = mesh_state["mesh"]
         if method == "z_contour":
             soma = await _run_with_log(
-                _find, mesh, verbose=True,
+                _find,
+                mesh,
+                verbose=True,
             )
         else:
             soma = await _run_with_log(
-                _find, mesh,
+                _find,
+                mesh,
                 organelles=_organelle_mask(mesh_state.get("organelles")),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
@@ -1083,7 +1195,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         # Include faces where at least 2 of 3 vertices are soma verts
         soma_vset = set(int(v) for v in soma.verts)
         soma_faces = [
-            int(fi) for fi in range(len(mesh.faces))
+            int(fi)
+            for fi in range(len(mesh.faces))
             if sum(1 for v in mesh.faces[fi] if int(v) in soma_vset) >= 2
         ]
 
@@ -1092,31 +1205,37 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann = json.loads(annotations_path.read_text(encoding="utf-8"))
         if "highlights" not in ann:
             ann["highlights"] = []
-        ann["highlights"].append({
-            "faces": soma_faces,
-            "color": color,
-            "label": label_prefix,
-        })
+        ann["highlights"].append(
+            {
+                "faces": soma_faces,
+                "color": color,
+                "label": label_prefix,
+            }
+        )
 
         # Wireframe ellipsoid (coordinates shifted by mesh centroid)
         centroid = mesh_state["centroid"]
         if "ellipsoids" not in ann:
             ann["ellipsoids"] = []
-        ann["ellipsoids"].append({
-            "center": (soma.center - centroid).tolist(),
-            "axes": soma.axes.tolist(),
-            "R": soma.R.tolist(),
-            "color": color,
-        })
+        ann["ellipsoids"].append(
+            {
+                "center": (soma.center - centroid).tolist(),
+                "axes": soma.axes.tolist(),
+                "R": soma.R.tolist(),
+                "color": color,
+            }
+        )
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
-        return JSONResponse({
-            "ok": True,
-            "method": method,
-            "nFaces": len(soma_faces),
-            "nVerts": len(soma.verts),
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "method": method,
+                "nFaces": len(soma_faces),
+                "nVerts": len(soma.verts),
+            }
+        )
 
     async def detect_gaps(request):
         """Run gap detection and write results to annotations."""
@@ -1134,7 +1253,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if soma is None:
             await _log("[skeliner.pre] Detecting soma first...")
             soma = await _run_with_log(
-                find_soma_via_ring_cutoff, mesh,
+                find_soma_via_ring_cutoff,
+                mesh,
                 organelles=_organelle_mask(mesh_state.get("organelles")),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
@@ -1144,7 +1264,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         cached_disc = mesh_state.get("disconnected")
         await _log("[skeliner.pre] Detecting gaps...")
         gaps = await _run_with_log(
-            find_gaps, mesh, verbose=True,
+            find_gaps,
+            mesh,
+            verbose=True,
             soma=soma,
             disconnected=cached_disc,
             mesh_stats=mesh_state.get("mesh_stats"),
@@ -1158,24 +1280,32 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann["highlights"] = []
 
         colors = [
-            [1.0, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 1.0],
-            [1.0, 1.0, 0.3], [1.0, 0.3, 1.0], [0.3, 1.0, 1.0],
+            [1.0, 0.3, 0.3],
+            [0.3, 1.0, 0.3],
+            [0.3, 0.3, 1.0],
+            [1.0, 1.0, 0.3],
+            [1.0, 0.3, 1.0],
+            [0.3, 1.0, 1.0],
         ]
         for i, (faces_a, faces_b, dist, da, db) in enumerate(gaps):
             label_a = "main" if da == -1 else f"disc {da}"
             label_b = "main" if db == -1 else f"disc {db}"
             color = colors[i % len(colors)]
-            ann["highlights"].append({
-                "faces": faces_a + faces_b,
-                "color": color,
-                "label": f"gap {i}: {label_a} ↔ {label_b}, {dist:.0f}nm",
-            })
+            ann["highlights"].append(
+                {
+                    "faces": faces_a + faces_b,
+                    "color": color,
+                    "label": f"gap {i}: {label_a} ↔ {label_b}, {dist:.0f}nm",
+                }
+            )
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
-        return JSONResponse({
-            "ok": True,
-            "nGaps": len(gaps),
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "nGaps": len(gaps),
+            }
+        )
 
     async def do_remove_gaps(request):
         """Bridge all detected gaps."""
@@ -1193,7 +1323,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         cached_gaps = mesh_state.get("gap_clusters")
 
         new_mesh = await _run_with_log(
-            remove_gaps, mesh, verbose=True,
+            remove_gaps,
+            mesh,
+            verbose=True,
             soma=soma,
             gaps=cached_gaps,
         )
@@ -1203,13 +1335,21 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         # Stitch faces were appended — extend cached masks so indices stay valid
         if n_added > 0:
             from skeliner.dataclass import MeshStats, Organelles
+
             pad = np.zeros(n_added, dtype=bool)
             org = mesh_state.get("organelles")
             if org is not None:
                 s = org.mesh_stats
                 new_stats = MeshStats(
-                    outward_dots=np.concatenate([s.outward_dots, np.ones(n_added, dtype=s.outward_dots.dtype)]),
-                    face_comp=np.concatenate([s.face_comp, np.full(n_added, s.main_ci, dtype=s.face_comp.dtype)]),
+                    outward_dots=np.concatenate(
+                        [s.outward_dots, np.ones(n_added, dtype=s.outward_dots.dtype)]
+                    ),
+                    face_comp=np.concatenate(
+                        [
+                            s.face_comp,
+                            np.full(n_added, s.main_ci, dtype=s.face_comp.dtype),
+                        ]
+                    ),
                     main_ci=s.main_ci,
                 )
                 new_org = Organelles(
@@ -1223,8 +1363,15 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             elif mesh_state.get("mesh_stats") is not None:
                 s = mesh_state["mesh_stats"]
                 mesh_state["mesh_stats"] = MeshStats(
-                    outward_dots=np.concatenate([s.outward_dots, np.ones(n_added, dtype=s.outward_dots.dtype)]),
-                    face_comp=np.concatenate([s.face_comp, np.full(n_added, s.main_ci, dtype=s.face_comp.dtype)]),
+                    outward_dots=np.concatenate(
+                        [s.outward_dots, np.ones(n_added, dtype=s.outward_dots.dtype)]
+                    ),
+                    face_comp=np.concatenate(
+                        [
+                            s.face_comp,
+                            np.full(n_added, s.main_ci, dtype=s.face_comp.dtype),
+                        ]
+                    ),
                     main_ci=s.main_ci,
                 )
 
@@ -1233,10 +1380,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh_state["gap_clusters"] = None
         await _log(f"Remove gaps: {n_after:,} faces after bridging")
 
-        return JSONResponse({
-            "ok": True,
-            "nFaces": n_after,
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "nFaces": n_after,
+            }
+        )
 
     async def check_fusion(request):
         """Analyze highlighted faces for fusion signals."""
@@ -1256,9 +1405,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             from collections import Counter
 
             areas = mesh.area_faces
-            zero_faces = set(
-                int(i) for i in np.where(areas < 1e-6)[0]
-            )
+            zero_faces = set(int(i) for i in np.where(areas < 1e-6)[0])
 
             # Build edge-to-face, excluding zero-area
             edge_to_face = {}
@@ -1290,8 +1437,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
             # Duplicate faces in region
             face_tuples = {
-                fi: tuple(sorted(int(v) for v in mesh.faces[fi]))
-                for fi in query_faces
+                fi: tuple(sorted(int(v) for v in mesh.faces[fi])) for fi in query_faces
             }
             # Also check all faces sharing vertices with region
             all_nearby = set()
@@ -1303,9 +1449,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
             all_tuples = {}
             for fi in all_nearby:
-                all_tuples[fi] = tuple(
-                    sorted(int(v) for v in mesh.faces[fi])
-                )
+                all_tuples[fi] = tuple(sorted(int(v) for v in mesh.faces[fi]))
             tuple_count = Counter(all_tuples.values())
             dup_faces = [
                 fi
@@ -1357,7 +1501,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         clusters = await _run_with_log(
-            find_fusions, mesh, verbose=True,
+            find_fusions,
+            mesh,
+            verbose=True,
             mesh_stats=mesh_state.get("mesh_stats"),
         )
         mesh_state["fusion_clusters"] = clusters
@@ -1369,21 +1515,29 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             ann["highlights"] = []
 
         colors = [
-            [0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0],
-            [1.0, 1.0, 0.0], [1.0, 0.5, 0.0], [0.5, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.5, 0.0],
+            [0.5, 0.0, 1.0],
         ]
         for i, cluster in enumerate(clusters):
-            ann["highlights"].append({
-                "faces": cluster,
-                "color": colors[i % len(colors)],
-                "label": f"fusion {i}",
-            })
+            ann["highlights"].append(
+                {
+                    "faces": cluster,
+                    "color": colors[i % len(colors)],
+                    "label": f"fusion {i}",
+                }
+            )
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
-        return JSONResponse({
-            "ok": True,
-            "nClusters": len(clusters),
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "nClusters": len(clusters),
+            }
+        )
 
     async def detect_rims(request):
         """Run rim detection and write results as edge annotations."""
@@ -1407,8 +1561,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             rims = find_rims(mesh, verbose=True, mesh_stats=ms)
             verts = np.asarray(mesh.vertices, dtype=np.float32)
             colors = [
-                [0.2, 1.0, 0.6], [0.1, 0.8, 0.9], [0.9, 1.0, 0.2],
-                [1.0, 0.5, 0.8], [0.5, 1.0, 0.4], [0.3, 0.7, 1.0],
+                [0.2, 1.0, 0.6],
+                [0.1, 0.8, 0.9],
+                [0.9, 1.0, 0.2],
+                [1.0, 0.5, 0.8],
+                [0.5, 1.0, 0.4],
+                [0.3, 0.7, 1.0],
             ]
             edge_groups = []
             for i, rim_edges in enumerate(rims):
@@ -1418,11 +1576,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     a = (verts[e[0]] - centroid).tolist()
                     b = (verts[e[1]] - centroid).tolist()
                     segments.append([a, b])
-                edge_groups.append({
-                    "segments": segments,
-                    "color": color,
-                    "label": f"rim {i}",
-                })
+                edge_groups.append(
+                    {
+                        "segments": segments,
+                        "color": color,
+                        "label": f"rim {i}",
+                    }
+                )
             return edge_groups, len(rims)
 
         edge_groups, n_rims = await _run_with_log(_run)
@@ -1447,7 +1607,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if "highlights" not in ann:
             return
         ann["highlights"] = [
-            h for h in ann["highlights"]
+            h
+            for h in ann["highlights"]
             if not any(h.get("label", "").startswith(p) for p in prefixes)
         ]
         annotations_path.write_text(
@@ -1491,9 +1652,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     sstate["skeleton"], mesh_state["centroid"]
                 )
             sstate["buffers"]["color"] = sstate["color"]
-            await broadcast({"type": "skeleton_loaded", "payload": {
-                "name": sname, **sstate["buffers"]
-            }})
+            await broadcast(
+                {
+                    "type": "skeleton_loaded",
+                    "payload": {"name": sname, **sstate["buffers"]},
+                }
+            )
 
         # Update state file
         current = {}
@@ -1524,32 +1688,49 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import _rebuild_mesh
 
         def _do_remove():
-            if cached_mask is not None and len(cached_mask) == len(mesh.faces) and cached_mask.any():
-                print(f"[skeliner.pre] Using cached organelle mask ({int(cached_mask.sum()):,} faces)")
+            if (
+                cached_mask is not None
+                and len(cached_mask) == len(mesh.faces)
+                and cached_mask.any()
+            ):
+                print(
+                    f"[skeliner.pre] Using cached organelle mask ({int(cached_mask.sum()):,} faces)"
+                )
                 return _rebuild_mesh(mesh, ~cached_mask)
             else:
                 reason = (
-                    "no cached mask" if cached_mask is None
-                    else f"length mismatch ({len(cached_mask)} vs {len(mesh.faces)})" if len(cached_mask) != len(mesh.faces)
+                    "no cached mask"
+                    if cached_mask is None
+                    else f"length mismatch ({len(cached_mask)} vs {len(mesh.faces)})"
+                    if len(cached_mask) != len(mesh.faces)
                     else "mask is empty"
                 )
-                print(f"[skeliner.pre] No cached organelle mask ({reason}), running detection")
+                print(
+                    f"[skeliner.pre] No cached organelle mask ({reason}), running detection"
+                )
                 from skeliner.pre import remove_organelles as _remove_organelles
+
                 return _remove_organelles(mesh, verbose=True)
 
         new_mesh = await _run_with_log(_do_remove)
 
-        n_after = n_before - int((new_mesh.faces == 0).all(axis=1).sum()) if len(new_mesh.faces) == n_before else len(new_mesh.faces)
+        n_after = (
+            n_before - int((new_mesh.faces == 0).all(axis=1).sum())
+            if len(new_mesh.faces) == n_before
+            else len(new_mesh.faces)
+        )
 
         _clear_annotations("organelle:")
         await _apply_new_mesh(new_mesh)
         n_degen = int(np.all(new_mesh.faces == 0, axis=1).sum())
         await _log(f"Remove organelles: {n_before:,} faces, {n_degen:,} degenerated")
-        return JSONResponse({
-            "ok": True,
-            "facesBefore": n_before,
-            "facesRemoved": n_degen,
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "facesBefore": n_before,
+                "facesRemoved": n_degen,
+            }
+        )
 
     async def do_remove_fusions(request):
         """Remove fusions from the mesh."""
@@ -1563,7 +1744,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         n_before = len(mesh.faces)
         cached = mesh_state.get("fusion_clusters")
         new_mesh = await _run_with_log(
-            _remove_fusions, mesh,
+            _remove_fusions,
+            mesh,
             fusion_clusters=cached,
             verbose=True,
         )
@@ -1573,12 +1755,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         await _apply_new_mesh(new_mesh)
         n_degen = int(np.all(new_mesh.faces == 0, axis=1).sum())
         await _log(f"Remove fusions: {n_degen:,} faces degenerated")
-        return JSONResponse({
-            "ok": True,
-            "facesBefore": n_before,
-            "facesAfter": n_after,
-            "facesRemoved": n_before - n_after,
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "facesBefore": n_before,
+                "facesAfter": n_after,
+                "facesRemoved": n_before - n_after,
+            }
+        )
 
     async def do_remove_fragments(request):
         """Remove fragments (islands and fins) from the mesh."""
@@ -1594,7 +1778,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         def _do_remove():
             if cached is not None and len(cached) == len(mesh.faces) and cached.any():
-                print(f"[skeliner.pre] Using cached fragment mask ({int(cached.sum()):,} faces)")
+                print(
+                    f"[skeliner.pre] Using cached fragment mask ({int(cached.sum()):,} faces)"
+                )
                 return _remove_fragments(mesh, fragments=cached, verbose=True)
             else:
                 return _remove_fragments(mesh, verbose=True)
@@ -1605,11 +1791,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         await _apply_new_mesh(new_mesh)
         n_degen = int(np.all(new_mesh.faces == 0, axis=1).sum())
         await _log(f"Remove fragments: {n_degen:,} faces degenerated")
-        return JSONResponse({
-            "ok": True,
-            "facesBefore": n_before,
-            "facesRemoved": n_degen,
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "facesBefore": n_before,
+                "facesRemoved": n_degen,
+            }
+        )
 
     async def do_fill_holes(request):
         """Fill holes in the mesh."""
@@ -1626,20 +1814,27 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         n_before = len(mesh.faces)
         cached_holes = mesh_state.get("hole_loops")
         new_mesh = await _run_with_log(
-            fill_holes, mesh,
+            fill_holes,
+            mesh,
             holes=cached_holes,
-            method=method, dome_factor=dome_factor, verbose=True,
+            method=method,
+            dome_factor=dome_factor,
+            verbose=True,
         )
         n_after = len(new_mesh.faces)
 
         _clear_annotations("hole ")
         await _apply_new_mesh(new_mesh)
-        await _log(f"Fill holes: {n_before:,} → {n_after:,} faces ({n_after - n_before:,} added)")
-        return JSONResponse({
-            "ok": True,
-            "facesBefore": n_before,
-            "facesAfter": n_after,
-        })
+        await _log(
+            f"Fill holes: {n_before:,} → {n_after:,} faces ({n_after - n_before:,} added)"
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "facesBefore": n_before,
+                "facesAfter": n_after,
+            }
+        )
 
     async def do_merge_selected(request):
         """Merge two components by stitching boundary loops of selected faces."""
@@ -1665,13 +1860,15 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         n_after = len(new_mesh.faces)
 
         await _apply_new_mesh(new_mesh)
-        return JSONResponse({
-            "ok": True,
-            "facesBefore": n_before,
-            "facesAfter": n_after,
-            "facesRemoved": len(face_indices),
-            "facesStitched": n_after - n_before + len(face_indices),
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "facesBefore": n_before,
+                "facesAfter": n_after,
+                "facesRemoved": len(face_indices),
+                "facesStitched": n_after - n_before + len(face_indices),
+            }
+        )
 
     async def edit_vertices(request):
         """Apply vertex position edits from the transform gizmo."""
@@ -1753,9 +1950,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     sstate["skeleton"], mesh_state["centroid"]
                 )
             sstate["buffers"]["color"] = sstate["color"]
-            await broadcast({"type": "skeleton_loaded", "payload": {
-                "name": sname, **sstate["buffers"]
-            }})
+            await broadcast(
+                {
+                    "type": "skeleton_loaded",
+                    "payload": {"name": sname, **sstate["buffers"]},
+                }
+            )
 
         current = {}
         if state_path.exists():
@@ -1767,12 +1967,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         }
         state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
 
-        print(f"Undo: restored mesh with {len(prev_mesh.faces):,} faces ({len(_undo_stack)} steps remaining)")
-        return JSONResponse({
-            "ok": True,
-            "nFaces": len(prev_mesh.faces),
-            "undoRemaining": len(_undo_stack),
-        })
+        print(
+            f"Undo: restored mesh with {len(prev_mesh.faces):,} faces ({len(_undo_stack)} steps remaining)"
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "nFaces": len(prev_mesh.faces),
+                "undoRemaining": len(_undo_stack),
+            }
+        )
 
     async def do_align_offsets(request):
         """Align offset layers: detect and correct Z-plane offsets."""
@@ -2000,21 +2204,26 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     sstate["skeleton"], mesh_state["centroid"]
                 )
             sstate["buffers"]["color"] = sstate["color"]
-            await broadcast({"type": "skeleton_loaded", "payload": {
-                "name": sname, **sstate["buffers"]
-            }})
+            await broadcast(
+                {
+                    "type": "skeleton_loaded",
+                    "payload": {"name": sname, **sstate["buffers"]},
+                }
+            )
 
         print(
             f"Compact: {n_verts_before:,} → {len(clean.vertices):,} verts, "
             f"{n_faces_before:,} → {len(clean.faces):,} faces"
         )
-        return JSONResponse({
-            "ok": True,
-            "vertsBefore": n_verts_before,
-            "vertsAfter": len(clean.vertices),
-            "facesBefore": n_faces_before,
-            "facesAfter": len(clean.faces),
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "vertsBefore": n_verts_before,
+                "vertsAfter": len(clean.vertices),
+                "facesBefore": n_faces_before,
+                "facesAfter": len(clean.faces),
+            }
+        )
 
     async def export_mesh(request):
         """Export the current mesh as a downloadable file."""
@@ -2038,7 +2247,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}mesh_cleaned.{fmt}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{prefix}mesh_cleaned.{fmt}"'
+            },
         )
 
     async def export_organelles(request):
@@ -2061,7 +2272,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}organelles.npz"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{prefix}organelles.npz"'
+            },
         )
 
     async def export_soma(request):
@@ -2102,7 +2315,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}annotations.json"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{prefix}annotations.json"'
+            },
         )
 
     async def export_skeleton(request):
@@ -2139,7 +2354,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{prefix}skeleton.{fmt}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{prefix}skeleton.{fmt}"'
+            },
         )
 
     async def detect_holes(request):
@@ -2159,8 +2376,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             mesh_state["hole_loops"] = loops
             verts = np.asarray(mesh.vertices, dtype=np.float32)
             colors = [
-                [0.2, 0.6, 1.0], [0.1, 0.9, 0.4], [0.9, 0.2, 0.8],
-                [1.0, 0.9, 0.1], [1.0, 0.4, 0.1], [0.4, 0.9, 0.9],
+                [0.2, 0.6, 1.0],
+                [0.1, 0.9, 0.4],
+                [0.9, 0.2, 0.8],
+                [1.0, 0.9, 0.1],
+                [1.0, 0.4, 0.1],
+                [0.4, 0.9, 0.9],
             ]
             edge_groups = []
             for i, loop in enumerate(loops):
@@ -2170,11 +2391,13 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     a = (verts[loop[j]] - centroid).tolist()
                     b = (verts[loop[(j + 1) % len(loop)]] - centroid).tolist()
                     segments.append([a, b])
-                edge_groups.append({
-                    "segments": segments,
-                    "color": color,
-                    "label": f"hole {i}",
-                })
+                edge_groups.append(
+                    {
+                        "segments": segments,
+                        "color": color,
+                        "label": f"hole {i}",
+                    }
+                )
             return edge_groups, len(loops)
 
         edge_groups, n_holes = await _run_with_log(_run)
@@ -2217,14 +2440,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "color": color,
         }
 
-        await broadcast({"type": "skeleton_loaded", "payload": {
-            "name": skel_name, **buffers
-        }})
-        return JSONResponse({
-            "ok": True,
-            "nNodes": len(skel.nodes),
-            "nEdges": len(skel.edges),
-        })
+        await broadcast(
+            {"type": "skeleton_loaded", "payload": {"name": skel_name, **buffers}}
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "nNodes": len(skel.nodes),
+                "nEdges": len(skel.edges),
+            }
+        )
 
     async def shortest_path_endpoint(request):
         """Compute shortest path between two faces or two skeleton nodes."""
@@ -2258,7 +2483,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 if face1 == face2:
                     return [face1], 0.0
 
-                print(f"[skeliner.path] Building {mode} adjacency for {n_faces:,} faces...")
+                print(
+                    f"[skeliner.path] Building {mode} adjacency for {n_faces:,} faces..."
+                )
                 centroids = mesh.triangles_center
 
                 if mode == "vertex":
@@ -2281,16 +2508,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     fi = np.concatenate([adj_pairs[:, 0], adj_pairs[:, 1]])
                     fj = np.concatenate([adj_pairs[:, 1], adj_pairs[:, 0]])
 
-                dists = np.linalg.norm(
-                    centroids[fi] - centroids[fj], axis=1
-                ).astype(np.float64)
-                graph = csr_matrix(
-                    (dists, (fi, fj)), shape=(n_faces, n_faces)
+                dists = np.linalg.norm(centroids[fi] - centroids[fj], axis=1).astype(
+                    np.float64
                 )
+                graph = csr_matrix((dists, (fi, fj)), shape=(n_faces, n_faces))
 
                 print(f"[skeliner.path] Running Dijkstra face {face1} → {face2}...")
                 dist_arr, predecessors = dijkstra(
-                    graph, directed=False, indices=face1,
+                    graph,
+                    directed=False,
+                    indices=face1,
                     return_predecessors=True,
                 )
 
@@ -2306,7 +2533,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     return None, 0
                 path.append(int(face1))
                 path.reverse()
-                print(f"[skeliner.path] Found path: {len(path)} faces, length={dist_arr[face2]:.1f}")
+                print(
+                    f"[skeliner.path] Found path: {len(path)} faces, length={dist_arr[face2]:.1f}"
+                )
                 return path, float(dist_arr[face2])
 
             path, length = await _run_with_log(_run_mesh_path)
@@ -2316,13 +2545,15 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     {"ok": False, "error": "No path found (disconnected components?)"}
                 )
 
-            return JSONResponse({
-                "ok": True,
-                "type": "mesh",
-                "path": path,
-                "length": length,
-                "nFaces": len(path),
-            })
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "type": "mesh",
+                    "path": path,
+                    "length": length,
+                    "nFaces": len(path),
+                }
+            )
 
         elif path_type == "skeleton":
             skel_name = body.get("skelName")
@@ -2345,7 +2576,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 if node1 == node2:
                     return [node1], [], 0.0
 
-                print(f"[skeliner.path] Building skeleton adjacency for {n_nodes:,} nodes...")
+                print(
+                    f"[skeliner.path] Building skeleton adjacency for {n_nodes:,} nodes..."
+                )
                 adj = [[] for _ in range(n_nodes)]
                 for ei, (a, b) in enumerate(edges):
                     d = float(np.linalg.norm(nodes[a] - nodes[b]))
@@ -2394,7 +2627,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     a, b = int(edges[ei][0]), int(edges[ei][1])
                     segments.append([nodes[a].tolist(), nodes[b].tolist()])
 
-                print(f"[skeliner.path] Found path: {len(path_nodes)} nodes, length={dist_arr[node2]:.1f}")
+                print(
+                    f"[skeliner.path] Found path: {len(path_nodes)} nodes, length={dist_arr[node2]:.1f}"
+                )
                 return path_nodes, segments, float(dist_arr[node2])
 
             path_nodes, segments, length = await _run_with_log(_run_skel_path)
@@ -2402,14 +2637,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             if path_nodes is None:
                 return JSONResponse({"ok": False, "error": "No path found"})
 
-            return JSONResponse({
-                "ok": True,
-                "type": "skeleton",
-                "pathNodes": path_nodes,
-                "segments": segments,
-                "length": length,
-                "nNodes": len(path_nodes),
-            })
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "type": "skeleton",
+                    "pathNodes": path_nodes,
+                    "segments": segments,
+                    "length": length,
+                    "nNodes": len(path_nodes),
+                }
+            )
 
         return JSONResponse(
             {"ok": False, "error": "Unknown path type"}, status_code=400
@@ -2451,7 +2688,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     current = {}
                     if state_path.exists():
                         current = json.loads(state_path.read_text(encoding="utf-8"))
-                    current["manualHighlight"] = msg["payload"].get("manualHighlight", [])
+                    current["manualHighlight"] = msg["payload"].get(
+                        "manualHighlight", []
+                    )
                     state_path.write_text(
                         json.dumps(current, indent=2), encoding="utf-8"
                     )
@@ -2459,20 +2698,18 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     # Append user-selected faces as a named annotation
                     ann = {}
                     if annotations_path.exists():
-                        ann = json.loads(
-                            annotations_path.read_text(encoding="utf-8")
-                        )
+                        ann = json.loads(annotations_path.read_text(encoding="utf-8"))
                     if "highlights" not in ann:
                         ann["highlights"] = []
                     p = msg["payload"]
-                    ann["highlights"].append({
-                        "faces": p.get("faces", []),
-                        "color": p.get("color", [1, 0.8, 0]),
-                        "label": p.get("label", "selection"),
-                    })
-                    annotations_path.write_text(
-                        json.dumps(ann), encoding="utf-8"
+                    ann["highlights"].append(
+                        {
+                            "faces": p.get("faces", []),
+                            "color": p.get("color", [1, 0.8, 0]),
+                            "label": p.get("label", "selection"),
+                        }
                     )
+                    annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         except Exception:
             pass
         finally:
@@ -2493,10 +2730,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 if mtime > last_ann_mtime:
                     last_ann_mtime = mtime
                     content = annotations_path.read_text(encoding="utf-8")
-                    await broadcast({
-                        "type": "annotations",
-                        "payload": json.loads(content),
-                    })
+                    await broadcast(
+                        {
+                            "type": "annotations",
+                            "payload": json.loads(content),
+                        }
+                    )
             except FileNotFoundError:
                 pass
             try:
@@ -2506,10 +2745,12 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                     content = camera_cmd_path.read_text(encoding="utf-8")
                     parsed = json.loads(content)
                     if parsed:
-                        await broadcast({
-                            "type": "camera_command",
-                            "payload": parsed,
-                        })
+                        await broadcast(
+                            {
+                                "type": "camera_command",
+                                "payload": parsed,
+                            }
+                        )
             except FileNotFoundError:
                 pass
             try:
@@ -2603,9 +2844,12 @@ def view(
     print()
 
     if not no_browser:
+
         def _open():
             import webbrowser
+
             webbrowser.open(url)
+
         threading.Timer(1.5, _open).start()
 
     uvicorn.run(app, host=host, port=port, log_level="warning")

@@ -276,7 +276,7 @@ def distance(
         allowed_nodes_set = {int(n) for n in allowed_nodes if 0 <= int(n) < len(nodes)}
     if allowed_edges is not None:
         allowed_edges_set = set()
-        for (u, v) in allowed_edges:
+        for u, v in allowed_edges:
             u2 = int(u)
             v2 = int(v)
             if u2 == v2:
@@ -306,7 +306,11 @@ def distance(
                 diffs = nodes[centres_list] - p_skel
                 nn_dist_arr = np.linalg.norm(diffs, axis=1)
                 if surface:
-                    rad = (np.asarray([radii[c] for c in centres_list], dtype=np.float64) if radii is not None else 0.0)
+                    rad = (
+                        np.asarray([radii[c] for c in centres_list], dtype=np.float64)
+                        if radii is not None
+                        else 0.0
+                    )
                     best = float(np.min(nn_dist_arr - rad))
                 else:
                     best = float(np.min(nn_dist_arr))

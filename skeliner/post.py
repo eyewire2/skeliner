@@ -1413,7 +1413,7 @@ def _estimate_radius(
     *,
     method: str = "median",
     trim_fraction: float = 0.05,
-    q: float = 55.,
+    q: float = 55.0,
 ) -> float:
     """Return one scalar radius according to *method*."""
     if method == "median":
@@ -1434,13 +1434,13 @@ def _estimate_radius(
         return float(d[mask].mean())
     if method == "trimlow":
         lo = np.quantile(d, trim_fraction)
-        mask = (d >= lo)
+        mask = d >= lo
         if not np.any(mask):
             return float(np.mean(d))
         return float(d[mask].mean())
     if method == "trimhigh":
         hi = np.quantile(d, 1.0 - trim_fraction)
-        mask = (d <= hi)
+        mask = d <= hi
         if not np.any(mask):
             return float(np.mean(d))
         return float(d[mask].mean())
@@ -1448,8 +1448,8 @@ def _estimate_radius(
 
 
 def submesh_by_vertices(
-        mesh : trimesh.Trimesh,
-        vertex_indices : np.ndarray,
+    mesh: trimesh.Trimesh,
+    vertex_indices: np.ndarray,
 ) -> trimesh.Trimesh:
     """
     Reduce mesh to a subset of vertices and corresponding faces.
@@ -1478,23 +1478,19 @@ def filter_inner_surfaces_raycast(mesh, num_rays=20, thresh=0.2, sample=True):
 
     # ---- Ray directions ----
     if sample:
-        phi = np.random.uniform(0, 2*np.pi, num_rays)
+        phi = np.random.uniform(0, 2 * np.pi, num_rays)
         theta = np.arccos(np.random.uniform(-1, 1, num_rays))
-        directions = np.column_stack([
-            np.sin(theta) * np.cos(phi),
-            np.sin(theta) * np.sin(phi),
-            np.cos(theta)
-        ])
+        directions = np.column_stack(
+            [np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)]
+        )
     else:
         golden_ratio = (1 + np.sqrt(5)) / 2
         idx = np.arange(num_rays)
         theta = 2 * np.pi * idx / golden_ratio
         phi = np.arccos(1 - 2 * (idx + 0.5) / num_rays)
-        directions = np.column_stack([
-            np.sin(phi) * np.cos(theta),
-            np.sin(phi) * np.sin(theta),
-            np.cos(phi)
-        ])
+        directions = np.column_stack(
+            [np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)]
+        )
 
     # ---- Precompute centroids & normals ----
     C = mesh.triangles_center
@@ -1520,6 +1516,7 @@ def filter_inner_surfaces_raycast(mesh, num_rays=20, thresh=0.2, sample=True):
     # ---- Fast intersector ----
     try:
         from trimesh.ray.ray_pyembree import RayMeshIntersector
+
         intersector = RayMeshIntersector(mesh)
     except ImportError:
         intersector = mesh.ray
@@ -1541,17 +1538,17 @@ def filter_inner_surfaces_raycast(mesh, num_rays=20, thresh=0.2, sample=True):
 
 
 def calibrate_radii(
-    skel : Skeleton,
+    skel: Skeleton,
     mesh: trimesh.Trimesh,
     *,
     radius_metric: str | None = None,
     aggregate: str = "trim",
-    min_n_outer : int = 20,
-    min_frac_outer : float = 0.33,
-    min_verts_q_outer : float = 80.,
-    rays_num_outer : int = 30,
-    rays_thresh_outer : float = 0.2,
-    rays_sample : bool = False,
+    min_n_outer: int = 20,
+    min_frac_outer: float = 0.33,
+    min_verts_q_outer: float = 80.0,
+    rays_num_outer: int = 30,
+    rays_thresh_outer: float = 0.2,
+    rays_sample: bool = False,
     store_key: str = "calibrated",
     verbose: bool = False,
 ) -> None:
@@ -1612,27 +1609,34 @@ def calibrate_radii(
 
     # Aggregate distances for each node using per-call whitelist restriction
     r_new = np.array(skel.radii[radius_metric], dtype=np.float64, copy=True)
-    r_kind = np.full(n_total, 'fallback', dtype='object')
+    r_kind = np.full(n_total, "fallback", dtype="object")
 
     n_verts = np.array([len(i) for i in skel.node2verts])
     min_n_verts_bulb = int(np.percentile(n_verts, q=min_verts_q_outer))
 
-    log_steps = (np.array([0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.]) * n_total).astype(int)
+    log_steps = (np.array([0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0]) * n_total).astype(int)
     log_steps[-1] = n_total - 1
 
     with _post_stage("calibrate_radii", verbose=verbose) as log:
-        log(f"Check for inner meshes in all nodes with min_n_verts_bulb>={min_n_verts_bulb};")
+        log(
+            f"Check for inner meshes in all nodes with min_n_verts_bulb>={min_n_verts_bulb};"
+        )
         log(f"This is {np.mean(n_verts > min_n_verts_bulb):.0%} of all nodes")
 
     for i in range(n_total):
         if i in log_steps:
-            _post_stage(f"calibrate_radii - {i/n_total:.0%} calibrated", verbose=verbose)
+            _post_stage(
+                f"calibrate_radii - {i / n_total:.0%} calibrated", verbose=verbose
+            )
 
         if skel.ntype[i] == 1 and skel.soma is not None:  # Ignore soma
             continue
 
-        vids = (np.asarray(skel.node2verts[i], dtype=np.int64)
-                if i < len(skel.node2verts) else np.empty(0, dtype=np.int64))
+        vids = (
+            np.asarray(skel.node2verts[i], dtype=np.int64)
+            if i < len(skel.node2verts)
+            else np.empty(0, dtype=np.int64)
+        )
         if vids.size == 0:
             continue
 
@@ -1642,38 +1646,46 @@ def calibrate_radii(
             mesh_i = submesh_by_vertices(mesh, vids)
             assert len(mesh_i.vertices) == len(vids)
             outer_vids = filter_inner_surfaces_raycast(
-                mesh_i, num_rays=rays_num_outer, thresh=rays_thresh_outer, sample=rays_sample)
+                mesh_i,
+                num_rays=rays_num_outer,
+                thresh=rays_thresh_outer,
+                sample=rays_sample,
+            )
             n_outer = len(outer_vids)
 
-            if (n_outer >= min_n_outer) and (n_outer >= min_frac_outer * n_inner) and (n_outer < n_inner):
+            if (
+                (n_outer >= min_n_outer)
+                and (n_outer >= min_frac_outer * n_inner)
+                and (n_outer < n_inner)
+            ):
                 d_local = dx.distance(
                     skel,
                     mesh_vertices[vids[outer_vids]],
-                    mode='centerline',
+                    mode="centerline",
                     radius_metric=radius_metric,
                     allowed_nodes=[int(i)],
                 )
                 r_new[i] = _estimate_radius(d_local, method=aggregate)
-                r_kind[i] = 'outer_centerline'
+                r_kind[i] = "outer_centerline"
                 outer_success = True
 
         if not outer_success:
             d_local = dx.distance(
                 skel,
                 mesh_vertices[vids],
-                mode='centerline',
+                mode="centerline",
                 radius_metric=radius_metric,
                 allowed_nodes=[int(i)],
             )
             r_new_i = _estimate_radius(d_local, method=aggregate)
             if r_new_i < r_new[i]:  # Update only if smaller
                 r_new[i] = r_new_i
-                r_kind[i] = 'full_centerline'
+                r_kind[i] = "full_centerline"
 
     skel.radii[store_key] = r_new
-    n_fallback = int(np.sum(r_kind == 'fallback'))
-    n_full_centerline = int(np.sum(r_kind == 'full_centerline'))
-    n_outer_centerline = int(np.sum(r_kind == 'outer_centerline'))
+    n_fallback = int(np.sum(r_kind == "fallback"))
+    n_full_centerline = int(np.sum(r_kind == "full_centerline"))
+    n_outer_centerline = int(np.sum(r_kind == "outer_centerline"))
 
     # annotate meta
     skel.extra["calibration"] = {
@@ -1691,6 +1703,10 @@ def calibrate_radii(
     with _post_stage("calibrate_radii summary", verbose=verbose) as log:
         log(f"n_total={n_total}")
         log(f"n_fallback={n_fallback}={n_fallback / n_total:.0%}, ")
-        log(f"n_full_centerline={n_full_centerline}={n_full_centerline / n_total:.0%}, ")
-        log(f"n_outer_centerline={n_outer_centerline}={n_outer_centerline / n_total:.0%}; ")
+        log(
+            f"n_full_centerline={n_full_centerline}={n_full_centerline / n_total:.0%}, "
+        )
+        log(
+            f"n_outer_centerline={n_outer_centerline}={n_outer_centerline / n_total:.0%}; "
+        )
         log(f"store='{store_key}', base='{radius_metric}'")

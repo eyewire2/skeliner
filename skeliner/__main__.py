@@ -15,7 +15,9 @@ def main():
 
     # ── view ──────────────────────────────────────────────────────────
     view_parser = sub.add_parser("view", help="Launch interactive mesh viewer")
-    view_parser.add_argument("mesh", nargs="?", default=None, help="Path to mesh file (.obj, .ply, etc.)")
+    view_parser.add_argument(
+        "mesh", nargs="?", default=None, help="Path to mesh file (.obj, .ply, etc.)"
+    )
     view_parser.add_argument("--port", type=int, default=8777, help="Server port")
     view_parser.add_argument("--host", default="127.0.0.1", help="Server host")
     view_parser.add_argument(
