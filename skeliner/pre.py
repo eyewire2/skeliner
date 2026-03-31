@@ -2107,7 +2107,7 @@ def find_soma_via_ring_cutoff(
 
     # ── 7. Exclude organelle vertices from final soma ───────────
     #       Only remove vertices that appear exclusively on organelle
-    #       faces.  Rim vertices (shared between organelle and
+    #       faces.  Mouth vertices (shared between organelle and
     #       non-organelle faces) must stay in the soma.
     if organelles.any():
         org_verts = set(np.unique(mesh.faces[organelles]).tolist())
@@ -4229,7 +4229,7 @@ def _count_edge_loops(edges: list[tuple[int, int]]) -> int:
     return n_loops
 
 
-def find_rims(
+def find_pocket_mouths(
     mesh: trimesh.Trimesh,
     *,
     radius: float | None = None,
@@ -4241,19 +4241,19 @@ def find_rims(
     _adj: dict[int, set[int]] | None = None,
     _edge_to_face: dict[tuple[int, int], list[int]] | None = None,
 ) -> list[list[tuple[int, int]]]:
-    """Find rim edges — boundaries of negative-dot face clusters.
+    """Find mouth edges — boundaries of negative-dot face clusters.
 
     A valid pocket must satisfy:
 
     1. Multiple boundary loops (not a flat patch with a single outline).
     2. Fold ratio > *min_fold_ratio*: the pocket surface area must be
-       much larger than the rim's enclosed planar area, indicating the
+       much larger than the mouth's enclosed planar area, indicating the
        surface folds inward through a small opening.
 
     Returns
     -------
     list[list[tuple[int, int]]]
-        One list of edges per pocket rim.
+        One list of edges per pocket mouth.
     """
 
     if mesh_stats is not None:
@@ -4272,7 +4272,6 @@ def find_rims(
             mesh_stats.outward_dots,
             mesh_stats.main_face_mask,
         )
-    n_faces = len(mesh.faces)
     edge_to_face = _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
     adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
 
@@ -4302,7 +4301,7 @@ def find_rims(
     faces_arr = np.asarray(mesh.faces)  # snapshot — avoids trimesh caching
     area_arr = np.asarray(mesh.area_faces)
     verts_arr = np.asarray(mesh.vertices)
-    rims: list[list[tuple[int, int]]] = []
+    mouths: list[list[tuple[int, int]]] = []
     for cluster in clusters:
         if len(cluster) < min_pocket_size:
             continue
@@ -4331,7 +4330,7 @@ def find_rims(
         if not boundary_edges:
             continue
 
-        # Fold ratio: pocket surface area / rim enclosed planar area.
+        # Fold ratio: pocket surface area / mouth enclosed planar area.
         # A real pocket folds inward through a small opening (high ratio).
         # A flat patch has ratio near 1.
         pocket_area = float(area_arr[cluster].sum())
@@ -4342,16 +4341,16 @@ def find_rims(
         if fold_ratio < min_fold_ratio:
             continue
 
-        rims.append(boundary_edges)
+        mouths.append(boundary_edges)
 
     if verbose:
         print(
-            f"[skeliner.pre] Rims: {len(rims)} pockets "
+            f"[skeliner.pre] Rims: {len(mouths)} pockets "
             f"(fold >= {min_fold_ratio}), "
-            f"{sum(len(r) for r in rims):,} rim edges"
+            f"{sum(len(mouth) for mouth in mouths):,} mouth edges"
         )
 
-    return rims
+    return mouths
 
 
 def _face_adjacency(
@@ -4388,19 +4387,19 @@ def find_pocket_organelles(
 ) -> np.ndarray:
     """Detect pocket organelles — membrane folds connected to the neuron surface.
 
-    Uses rims (boundaries of negative-dot clusters) as seeds:
+    Uses mouths (boundaries of negative-dot clusters) as seeds:
 
-    1. Call :func:`find_rims` to get rim edges for each pocket.
-    2. Seed from the **negative-dot faces** of each rim's pocket cluster.
-    3. Flood-fill from seeds, stopping at rim edges and faces with
+    1. Call :func:`find_pocket_mouths` to get mouth edges for each pocket.
+    2. Seed from the **negative-dot faces** of each mouth's pocket cluster.
+    3. Flood-fill from seeds, stopping at mouth edges and faces with
        ``outward_dot > grow_threshold``.
     4. Bridging: flood-fill from pocket boundary using the relaxed
        ``bridge_threshold`` to cross narrow positive-dot barriers.
     5. Hole filling: small non-pocket clusters mostly enclosed by pocket
        faces are filled in.
 
-    Only regions behind a rim get detected — curved surfaces without a
-    rim are correctly excluded.
+    Only regions behind a mouth get detected — curved surfaces without a
+    mouth are correctly excluded.
 
     Parameters
     ----------
@@ -4422,7 +4421,7 @@ def find_pocket_organelles(
         Minimum fraction of a hole cluster's boundary neighbors that
         must be pocket faces for the hole to be filled.
     min_pocket_size : int
-        Minimum negative-face cluster size to produce a rim / be detected.
+        Minimum negative-face cluster size to produce a mouth / be detected.
     min_cluster_size : int
         Final pocket clusters smaller than this are discarded.
     verbose : bool
@@ -4454,8 +4453,8 @@ def find_pocket_organelles(
     edge_to_face = _edge_to_faces(mesh)
     adj = _face_adjacency(mesh, edge_to_face)
 
-    # Use find_rims to get rim edges for each pocket
-    rims = find_rims(
+    # Use find_pocket_mouths to get mouth edges for each pocket
+    mouths = find_pocket_mouths(
         mesh,
         radius=radius,
         radius_multiplier=radius_multiplier,
@@ -4467,39 +4466,39 @@ def find_pocket_organelles(
         _edge_to_face=edge_to_face,
     )
 
-    if not rims:
+    if not mouths:
         if verbose:
             print("[skeliner.pre] No pockets found")
         return np.zeros(n_faces, dtype=bool)
 
-    # Collect all rim edges and seed faces
-    # Seeds = negative-dot faces adjacent to rim edges (inward side)
-    rim_edge_set: set[tuple[int, int]] = set()
-    for rim in rims:
-        rim_edge_set.update(rim)
+    # Collect all mouth edges and seed faces
+    # Seeds = negative-dot faces adjacent to mouth edges (inward side)
+    mouth_edge_set: set[tuple[int, int]] = set()
+    for mouth in mouths:
+        mouth_edge_set.update(mouth)
 
-    # Seeds: negative-dot faces touching rim edges
+    # Seeds: negative-dot faces touching mouth edges
     seeds: set[int] = set()
-    for e in rim_edge_set:
+    for e in mouth_edge_set:
         for fi in edge_to_face.get(e, []):
             if main_face_mask[fi] and outward_dots[fi] < 0:
                 seeds.add(fi)
 
-    # Rim faces: positive-dot faces touching rim edges (block flood-fill)
-    rim_faces: set[int] = set()
-    for e in rim_edge_set:
+    # Mouth faces: positive-dot faces touching mouth edges (block flood-fill)
+    mouth_faces: set[int] = set()
+    for e in mouth_edge_set:
         for fi in edge_to_face.get(e, []):
             if fi not in seeds:
-                rim_faces.add(fi)
+                mouth_faces.add(fi)
 
     if verbose:
         print(
-            f"[skeliner.pre] Pockets: {len(rims)}, "
-            f"rim edges: {len(rim_edge_set):,}, "
+            f"[skeliner.pre] Pockets: {len(mouths)}, "
+            f"pocket mouth edges: {len(mouth_edge_set):,}, "
             f"seeds: {len(seeds):,}"
         )
 
-    # Flood-fill from seeds, blocked by rim faces and grow_threshold
+    # Flood-fill from seeds, blocked by mouth faces and grow_threshold
     pocket = np.zeros(n_faces, dtype=bool)
     visited = np.zeros(n_faces, dtype=bool)
     queue = deque(seeds)
@@ -4509,7 +4508,7 @@ def find_pocket_organelles(
         if visited[fi]:
             continue
         visited[fi] = True
-        if fi in rim_faces:
+        if fi in mouth_faces:
             continue
         if not main_face_mask[fi]:
             continue
@@ -4534,7 +4533,7 @@ def find_pocket_organelles(
         fi = bridge_queue.popleft()
         if pocket[fi]:
             continue
-        if fi in rim_faces or not main_face_mask[fi]:
+        if fi in mouth_faces or not main_face_mask[fi]:
             continue
         if outward_dots[fi] > bridge_threshold:
             continue
@@ -4745,7 +4744,7 @@ def find_organelles(
     non-overlapping masks plus precomputed mesh stats:
 
     * **pocket** — membrane folds connected to the neuron surface,
-      detected via gradient-based rim finding + flood-fill.
+      detected via gradient-based mouth finding + flood-fill.
     * **isolated** — entire vertex-disconnected components whose
       mean outward dot is negative (fully enclosed fragments).
 
