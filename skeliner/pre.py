@@ -5663,6 +5663,88 @@ def remove_nucleus(
     return clean
 
 
+# ── Chunk boundary / sandwich detection ────────────────────────────
+
+
+def find_chunk_boundaries(
+    mesh: trimesh.Trimesh,
+    *,
+    verbose: bool = False,
+) -> dict[int, np.ndarray]:
+    """Detect chunk boundary planes from vertex coordinate clustering.
+
+    EM meshes are built by running marching cubes per chunk and merging
+    at chunk boundaries.  At each boundary plane, many vertices share
+    the exact same coordinate on the boundary axis.  This function finds
+    those planes via vertex-count outlier detection (Otsu) on each axis.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    verbose : bool, default False
+        Print detected boundaries.
+
+    Returns
+    -------
+    dict[int, np.ndarray]
+        Mapping ``{axis: array_of_boundary_coordinates}`` where *axis*
+        is 0 (X), 1 (Y), or 2 (Z).  Each array is sorted.
+    """
+    verts = mesh.vertices
+    boundaries: dict[int, np.ndarray] = {}
+
+    for axis in range(3):
+        coords = np.round(verts[:, axis]).astype(np.int64)
+        unique, counts = np.unique(coords, return_counts=True)
+
+        if len(unique) < 3:
+            continue
+
+        # Chunk boundaries are sharp spikes: a single coordinate value
+        # with many more vertices than its neighbors.  Detect as values
+        # where count exceeds the local background by a large factor.
+        median_count = float(np.median(counts))
+        # Spike ratio: each value's count vs mean of its ±5 neighbors
+        n = len(counts)
+        local_bg = np.empty(n, dtype=float)
+        for i in range(n):
+            lo = max(0, i - 5)
+            hi = min(n, i + 6)
+            # Exclude self from local background
+            neighbors = np.concatenate([counts[lo:i], counts[i + 1 : hi]])
+            local_bg[i] = neighbors.mean() if len(neighbors) > 0 else 1.0
+        spike_ratio = counts / np.maximum(local_bg, 1.0)
+
+        # A boundary must be both a local spike AND globally high
+        is_spike = spike_ratio > 5.0
+        is_high = counts > 10.0 * median_count
+        is_boundary = is_spike & is_high
+
+        if not is_boundary.any():
+            continue
+
+        boundary_coords = unique[is_boundary]
+        boundary_counts = counts[is_boundary]
+        boundary_ratios = spike_ratio[is_boundary]
+
+        boundaries[axis] = boundary_coords
+
+        if verbose:
+            name = "XYZ"[axis]
+            print(
+                f"[skeliner.pre] Chunk boundaries {name}: "
+                f"{len(boundary_coords)} planes "
+                f"(median_count={median_count:.0f})"
+            )
+            for val, cnt, r in zip(
+                boundary_coords, boundary_counts, boundary_ratios
+            ):
+                print(f"  {name}={val}: {cnt} verts (spike {r:.1f}x)")
+
+    return boundaries
+
+
 # ── Offset detection and correction ─────────────────────────────────
 
 
