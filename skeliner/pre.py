@@ -5739,12 +5739,18 @@ def find_chunk_boundaries(
         base_mask = diffs < min_diff * 1.5
         chunk_spacing = int(np.median(diffs[base_mask]))
 
-        # Build the complete regular grid from the first seed
+        # Build the complete regular grid covering the full mesh extent.
+        # Extend outward from the first seed in both directions until
+        # we pass the vertex range on this axis.
         first = int(seed_coords[0])
-        last = int(seed_coords[-1])
-        n_steps = round((last - first) / chunk_spacing)
+        vmin, vmax = int(coords.min()), int(coords.max())
+        # Steps backward from first seed to cover vmin
+        n_back = max(0, int(np.ceil((first - vmin) / chunk_spacing)))
+        # Steps forward from first seed to cover vmax
+        n_fwd = max(0, int(np.ceil((vmax - first) / chunk_spacing)))
+        grid_start = first - n_back * chunk_spacing
         boundary_coords = np.array(
-            [first + i * chunk_spacing for i in range(n_steps + 1)],
+            [grid_start + i * chunk_spacing for i in range(n_back + n_fwd + 1)],
             dtype=np.int64,
         )
 
