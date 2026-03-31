@@ -5676,10 +5676,7 @@ def find_chunk_boundaries(
     EM meshes are built by running marching cubes per chunk and merging
     at chunk boundaries.  At each boundary plane, many vertices share
     the exact same coordinate on the boundary axis.  This function finds
-    those planes by detecting vertex-count spikes, inferring the chunk
-    spacing, and returning the complete regular grid of boundaries
-    within the mesh extent (including positions where the mesh has a
-    gap and no spike is present).
+    those planes by detecting local vertex-count spikes on each axis.
 
     Parameters
     ----------
@@ -5719,75 +5716,27 @@ def find_chunk_boundaries(
             local_bg[i] = neighbors.mean() if len(neighbors) > 0 else 1.0
         spike_ratio = counts / np.maximum(local_bg, 1.0)
 
-        # Detect spikes: local spike AND globally high
-        is_spike = spike_ratio > 5.0
-        is_high = counts > 10.0 * median_count
-        seed_coords = unique[is_spike & is_high]
+        # A boundary is any coordinate with a clear local spike
+        is_boundary = spike_ratio > 5.0
 
-        if len(seed_coords) < 2:
-            # Not enough seeds to infer spacing; return whatever we have
-            if len(seed_coords) == 1:
-                boundaries[axis] = seed_coords
+        if not is_boundary.any():
             continue
 
-        # Infer chunk spacing from the most common small spacing
-        diffs = np.diff(seed_coords)
-        # The smallest frequent diff is the true chunk spacing;
-        # larger diffs are multiples (from gaps).
-        min_diff = int(diffs.min())
-        # Accept diffs within 1% of min_diff as the same spacing
-        base_mask = diffs < min_diff * 1.5
-        chunk_spacing = int(np.median(diffs[base_mask]))
-
-        # Build the complete regular grid covering the full mesh extent.
-        # Extend outward from the first seed in both directions until
-        # we pass the vertex range on this axis.
-        first = int(seed_coords[0])
-        vmin, vmax = int(coords.min()), int(coords.max())
-        # Steps backward from first seed to cover vmin
-        n_back = max(0, int(np.ceil((first - vmin) / chunk_spacing)))
-        # Steps forward from first seed to cover vmax
-        n_fwd = max(0, int(np.ceil((vmax - first) / chunk_spacing)))
-        grid_start = first - n_back * chunk_spacing
-        boundary_coords = np.array(
-            [grid_start + i * chunk_spacing for i in range(n_back + n_fwd + 1)],
-            dtype=np.int64,
-        )
-
-        # Snap each grid position to the nearest vertex-count spike
-        # (seed or weaker) to use exact boundary coordinates.
-        # For true gaps with no spike at all, keep the grid position.
-        spike_coords = unique[is_spike]  # all local spikes, not just seeds
-        snapped = np.empty_like(boundary_coords)
-        for i, expected in enumerate(boundary_coords):
-            nearby = np.abs(spike_coords - expected)
-            best = nearby.argmin()
-            if nearby[best] < chunk_spacing * 0.4:
-                snapped[i] = spike_coords[best]
-            else:
-                # No spike found — this is a gap boundary.
-                # Use the expected grid position.
-                snapped[i] = expected
-
-        boundaries[axis] = snapped
+        boundaries[axis] = unique[is_boundary]
 
         if verbose:
+            boundary_coords = unique[is_boundary]
+            boundary_counts = counts[is_boundary]
+            boundary_ratios = spike_ratio[is_boundary]
             name = "XYZ"[axis]
             print(
                 f"[skeliner.pre] Chunk boundaries {name}: "
-                f"{len(snapped)} planes "
-                f"(chunk_spacing={chunk_spacing}, "
-                f"median_count={median_count:.0f})"
+                f"{len(boundary_coords)} planes"
             )
-            for val in snapped:
-                idx = np.searchsorted(unique, val)
-                if idx < len(unique) and unique[idx] == val:
-                    cnt = counts[idx]
-                    bg = local_bg[idx]
-                    r = cnt / max(bg, 1.0)
-                    print(f"  {name}={val}: {cnt} verts (spike {r:.1f}x)")
-                else:
-                    print(f"  {name}={val}: (gap — no vertex spike)")
+            for val, cnt, r in zip(
+                boundary_coords, boundary_counts, boundary_ratios
+            ):
+                print(f"  {name}={val}: {cnt} verts (spike {r:.1f}x)")
 
     return boundaries
 
