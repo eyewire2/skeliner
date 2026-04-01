@@ -1514,7 +1514,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             total_faces += len(r["faces"])
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
-        await _notify_annotations()
+        await broadcast({"type": "annotations_updated"})
         await _log(
             f"[skeliner.pre] {len(results)} parallel patches, "
             f"{total_faces} faces"
