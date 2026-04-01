@@ -5775,7 +5775,6 @@ def find_parallel_patches(
     boundaries: dict[int, np.ndarray] | None = None,
     normal_thresh: float = 0.99,
     boundary_dist: float = 30.0,
-    overlap_dist: float = 21.0,
     verbose: bool = False,
 ) -> list[dict]:
     """Detect parallel-patch artifacts at chunk boundaries.
@@ -5796,9 +5795,6 @@ def find_parallel_patches(
         Minimum |normal·axis| to count as axis-aligned (default 0.99).
     boundary_dist : float
         Max distance from a boundary plane in nm (default 30).
-    overlap_dist : float
-        Max perpendicular-plane distance between opposing faces to count
-        as overlapping (default 21, one grid step).
     verbose : bool
         Print summary.
 
@@ -5851,6 +5847,16 @@ def find_parallel_patches(
                 e = (min(a, b), max(a, b))
                 edge_to_faces[e].append(int(fi))
 
+        # Full edge→face for all faces near boundaries (for neighbor expansion)
+        all_near = np.where(near_mask)[0]
+        full_edge_to_faces: dict[tuple, list[int]] = defaultdict(list)
+        for fi in all_near:
+            f = faces[fi]
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                full_edge_to_faces[e].append(int(fi))
+
         # Connected components — same boundary only
         visited: set[int] = set()
         patches: list[tuple[list[int], int]] = []
@@ -5877,6 +5883,51 @@ def find_parallel_patches(
 
         # Check each patch for opposing faces
         perp_axes = perp[axis]
+
+        def _any_face_overlaps(faces_a, faces_b):
+            """Check if any face from A overlaps any face from B in perp plane.
+
+            Projects triangles onto the perpendicular plane and checks
+            for vertex-in-triangle overlap.
+            """
+            # Get triangle vertices projected onto perp plane
+            verts_a = verts[faces[faces_a]][:, :, perp_axes]  # (Na, 3, 2)
+            verts_b = verts[faces[faces_b]][:, :, perp_axes]  # (Nb, 3, 2)
+
+            # Quick bbox pre-filter
+            a_min, a_max = verts_a.reshape(-1, 2).min(0), verts_a.reshape(-1, 2).max(0)
+            b_min, b_max = verts_b.reshape(-1, 2).min(0), verts_b.reshape(-1, 2).max(0)
+            if not (np.all(a_min <= b_max) and np.all(b_min <= a_max)):
+                return False
+
+            # Check if any vertex from A is inside any triangle of B
+            # (and vice versa).  Use cross-product sign test.
+            def _point_in_tri(px, py, tri):
+                """Test points (px, py) against triangle tri (3,2)."""
+                x0, y0 = tri[0]
+                x1, y1 = tri[1]
+                x2, y2 = tri[2]
+                d00 = (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0)
+                d01 = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
+                d02 = (x0 - x2) * (py - y2) - (y0 - y2) * (px - x2)
+                return ((d00 >= 0) & (d01 >= 0) & (d02 >= 0)) | (
+                    (d00 <= 0) & (d01 <= 0) & (d02 <= 0)
+                )
+
+            # Collect all vertices from A, test against all triangles of B
+            pts_a = verts_a.reshape(-1, 2)
+            for tri in verts_b:
+                if np.any(_point_in_tri(pts_a[:, 0], pts_a[:, 1], tri)):
+                    return True
+
+            # Vice versa
+            pts_b = verts_b.reshape(-1, 2)
+            for tri in verts_a:
+                if np.any(_point_in_tri(pts_b[:, 0], pts_b[:, 1], tri)):
+                    return True
+
+            return False
+
         for comp, bv in patches:
             fi_arr = np.array(comp)
             n_ax_comp = n_ax[fi_arr]
@@ -5887,11 +5938,7 @@ def find_parallel_patches(
 
             # Self-opposing: up/down within same patch
             if len(pos_fi) > 0 and len(neg_fi) > 0:
-                pos_perp = centroids[pos_fi][:, perp_axes]
-                neg_perp = centroids[neg_fi][:, perp_axes]
-                tree = cKDTree(neg_perp)
-                dists, _ = tree.query(pos_perp, k=1)
-                if np.any(dists < overlap_dist):
+                if _any_face_overlaps(pos_fi, neg_fi):
                     has_overlap = True
 
             # Nearby opposing: other patches at same boundary
@@ -5910,20 +5957,40 @@ def find_parallel_patches(
                     else:
                         opp = [others[j] for j in range(len(others)) if other_nax[j] > normal_thresh]
                     if opp:
-                        opp_perp = centroids[opp][:, perp_axes]
-                        comp_perp = centroids[fi_arr][:, perp_axes]
-                        tree = cKDTree(opp_perp)
-                        dists, _ = tree.query(comp_perp, k=1)
-                        if np.any(dists < overlap_dist):
+                        if _any_face_overlaps(fi_arr, np.array(opp)):
                             has_overlap = True
 
             if has_overlap:
+                # Expand patch: include non-target neighbor faces that
+                # are adjacent to 2+ patch faces (likely part of the
+                # same artifact but slightly tilted).
+                patch_set = set(int(f) for f in fi_arr)
+                neighbor_count: dict[int, int] = defaultdict(int)
+                for fi in fi_arr:
+                    f = faces[fi]
+                    for i in range(3):
+                        a, b = int(f[i]), int(f[(i + 1) % 3])
+                        e = (min(a, b), max(a, b))
+                        for nb in full_edge_to_faces[e]:
+                            if nb not in patch_set:
+                                neighbor_count[nb] += 1
+                expanded = [
+                    nb for nb, cnt in neighbor_count.items() if cnt >= 2
+                ]
+                all_faces = sorted(patch_set | set(expanded))
+                # Re-split into up/down using the original threshold,
+                # plus expanded faces that are somewhat aligned
+                all_arr = np.array(all_faces)
+                n_ax_all = n_ax[all_arr]
+                all_pos = all_arr[n_ax_all > 0.5]
+                all_neg = all_arr[n_ax_all < -0.5]
+
                 results.append({
                     "axis": axis,
                     "bval": bv,
-                    "faces": [int(f) for f in fi_arr],
-                    "up_faces": [int(f) for f in pos_fi],
-                    "down_faces": [int(f) for f in neg_fi],
+                    "faces": all_faces,
+                    "up_faces": [int(f) for f in all_pos],
+                    "down_faces": [int(f) for f in all_neg],
                 })
 
     if verbose:
