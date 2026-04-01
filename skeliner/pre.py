@@ -5722,21 +5722,49 @@ def find_chunk_boundaries(
         if not is_boundary.any():
             continue
 
-        boundaries[axis] = unique[is_boundary]
+        # Remove false boundaries that are too close to a real one.
+        # Real chunk boundaries have consistent spacing; a spike much
+        # closer than the median spacing is a hard-cutoff or other
+        # non-chunk artifact.
+        bvals = unique[is_boundary]
+        if len(bvals) >= 3:
+            spacings = np.diff(bvals)
+            median_sp = float(np.median(spacings))
+            keep = np.ones(len(bvals), dtype=bool)
+            for i in range(len(bvals)):
+                left = spacings[i - 1] if i > 0 else median_sp
+                right = spacings[i] if i < len(spacings) else median_sp
+                # If BOTH neighbors are much closer than median, it's
+                # a cluster — keep the one with the highest spike.
+                # If only one side is short, this boundary is the
+                # non-chunk one if it has a lower spike than its
+                # close neighbor.
+                if min(left, right) < median_sp * 0.25:
+                    # Find the close neighbor
+                    if left < median_sp * 0.25 and i > 0:
+                        # Close to left neighbor — keep the stronger
+                        left_ratio = spike_ratio[np.where(unique == bvals[i - 1])[0][0]]
+                        this_ratio = spike_ratio[np.where(unique == bvals[i])[0][0]]
+                        if this_ratio < left_ratio:
+                            keep[i] = False
+                    if right < median_sp * 0.25 and i < len(spacings):
+                        right_ratio = spike_ratio[np.where(unique == bvals[i + 1])[0][0]]
+                        this_ratio = spike_ratio[np.where(unique == bvals[i])[0][0]]
+                        if this_ratio < right_ratio:
+                            keep[i] = False
+            bvals = bvals[keep]
+
+        boundaries[axis] = bvals
 
         if verbose:
-            boundary_coords = unique[is_boundary]
-            boundary_counts = counts[is_boundary]
-            boundary_ratios = spike_ratio[is_boundary]
             name = "XYZ"[axis]
             print(
                 f"[skeliner.pre] Chunk boundaries {name}: "
-                f"{len(boundary_coords)} planes"
+                f"{len(bvals)} planes"
             )
-            for val, cnt, r in zip(
-                boundary_coords, boundary_counts, boundary_ratios
-            ):
-                print(f"  {name}={val}: {cnt} verts (spike {r:.1f}x)")
+            for val in bvals:
+                idx = np.where(unique == val)[0][0]
+                print(f"  {name}={val}: {counts[idx]} verts (spike {spike_ratio[idx]:.1f}x)")
 
     return boundaries
 
