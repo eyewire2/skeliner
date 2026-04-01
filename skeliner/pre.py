@@ -5847,15 +5847,6 @@ def find_parallel_patches(
                 e = (min(a, b), max(a, b))
                 edge_to_faces[e].append(int(fi))
 
-        # Full edge→face for all faces near boundaries (for neighbor expansion)
-        all_near = np.where(near_mask)[0]
-        full_edge_to_faces: dict[tuple, list[int]] = defaultdict(list)
-        for fi in all_near:
-            f = faces[fi]
-            for i in range(3):
-                a, b = int(f[i]), int(f[(i + 1) % 3])
-                e = (min(a, b), max(a, b))
-                full_edge_to_faces[e].append(int(fi))
 
         # Connected components — same boundary only
         visited: set[int] = set()
@@ -5961,37 +5952,112 @@ def find_parallel_patches(
                             has_overlap = True
 
             if has_overlap:
-                # Expand patch: include non-target neighbor faces that
-                # are adjacent to 2+ patch faces (likely part of the
-                # same artifact but slightly tilted).
-                patch_set = set(int(f) for f in fi_arr)
-                neighbor_count: dict[int, int] = defaultdict(int)
-                for fi in fi_arr:
-                    f = faces[fi]
-                    for i in range(3):
-                        a, b = int(f[i]), int(f[(i + 1) % 3])
-                        e = (min(a, b), max(a, b))
-                        for nb in full_edge_to_faces[e]:
-                            if nb not in patch_set:
-                                neighbor_count[nb] += 1
-                expanded = [
-                    nb for nb, cnt in neighbor_count.items() if cnt >= 2
-                ]
-                all_faces = sorted(patch_set | set(expanded))
-                # Re-split into up/down using the original threshold,
-                # plus expanded faces that are somewhat aligned
-                all_arr = np.array(all_faces)
-                n_ax_all = n_ax[all_arr]
-                all_pos = all_arr[n_ax_all > 0.5]
-                all_neg = all_arr[n_ax_all < -0.5]
-
                 results.append({
                     "axis": axis,
                     "bval": bv,
-                    "faces": all_faces,
-                    "up_faces": [int(f) for f in all_pos],
-                    "down_faces": [int(f) for f in all_neg],
+                    "faces": [int(f) for f in fi_arr],
+                    "up_faces": [int(f) for f in pos_fi],
+                    "down_faces": [int(f) for f in neg_fi],
                 })
+
+    # ── Neighbor expansion across all patches ──────────────────────
+    # Include non-target faces adjacent to 2+ faces from ANY flagged
+    # patch (catches slightly-tilted faces between patches).
+    all_patch_faces: set[int] = set()
+    for r in results:
+        all_patch_faces.update(r["faces"])
+
+    # Build full edge→face for faces near any boundary
+    all_near_set: set[int] = set()
+    for axis_k in boundaries:
+        near_k = np.abs(centroids[:, axis_k, np.newaxis] - boundaries[axis_k]) < 30.0
+        all_near_set.update(int(i) for i in np.where(near_k.any(axis=1))[0])
+
+    full_e2f: dict[tuple, list[int]] = defaultdict(list)
+    for fi in all_near_set:
+        f = faces[fi]
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            full_e2f[(min(a, b), max(a, b))].append(fi)
+
+    neighbor_count: dict[int, int] = defaultdict(int)
+    for fi in all_patch_faces:
+        f = faces[fi]
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            e = (min(a, b), max(a, b))
+            for nb in full_e2f[e]:
+                if nb not in all_patch_faces:
+                    neighbor_count[nb] += 1
+
+    expanded = {nb for nb, cnt in neighbor_count.items() if cnt >= 2}
+    all_patch_faces.update(expanded)
+
+    # ── Merge into connected patches ──────────────────────────────
+    # Re-run connected components on all flagged faces so that
+    # neighboring patches (possibly linked through expanded faces)
+    # form a single patch.
+    merge_e2f: dict[tuple, list[int]] = defaultdict(list)
+    for fi in all_patch_faces:
+        f = faces[fi]
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            merge_e2f[(min(a, b), max(a, b))].append(fi)
+
+    visited_merge: set[int] = set()
+    merged: list[list[int]] = []
+    for seed in all_patch_faces:
+        if seed in visited_merge:
+            continue
+        comp: list[int] = []
+        queue = deque([seed])
+        visited_merge.add(seed)
+        while queue:
+            fi = queue.popleft()
+            comp.append(fi)
+            f = faces[fi]
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                for nb in merge_e2f[e]:
+                    if nb not in visited_merge and nb in all_patch_faces:
+                        visited_merge.add(nb)
+                        queue.append(nb)
+        merged.append(comp)
+
+    # Rebuild results from merged components.  Determine axis from
+    # the dominant normal direction among perfectly-aligned faces.
+    results = []
+    for comp in merged:
+        fi_arr = np.array(comp)
+        # Find dominant axis: the one with most |n| > normal_thresh faces
+        best_axis = 0
+        best_count = 0
+        for ax in range(3):
+            cnt = int(np.sum(np.abs(normals[fi_arr, ax]) > normal_thresh))
+            if cnt > best_count:
+                best_count = cnt
+                best_axis = ax
+        # Determine boundary value from centroids
+        bv = int(round(float(np.median(centroids[fi_arr, best_axis]))))
+        # Find nearest actual boundary
+        bvals_ax = boundaries.get(best_axis, np.array([]))
+        if len(bvals_ax) > 0:
+            idx = np.argmin(np.abs(bvals_ax - bv))
+            bv = int(round(bvals_ax[idx]))
+
+        n_ax_comp = normals[fi_arr, best_axis]
+        pos_fi = fi_arr[n_ax_comp > 0.5]
+        neg_fi = fi_arr[n_ax_comp < -0.5]
+        results.append({
+            "axis": best_axis,
+            "bval": bv,
+            "faces": [int(f) for f in fi_arr],
+            "up_faces": [int(f) for f in pos_fi],
+            "down_faces": [int(f) for f in neg_fi],
+        })
+
+    results.sort(key=lambda r: (r["axis"], r["bval"], -len(r["faces"])))
 
     if verbose:
         n_faces = sum(len(r["faces"]) for r in results)
