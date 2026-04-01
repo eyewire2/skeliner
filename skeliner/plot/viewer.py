@@ -1407,22 +1407,38 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             by = np.sort(boundaries.get(1, np.array([])))
             bz = np.sort(boundaries.get(2, np.array([])))
 
-            def _extend_grid(bvals, vmin, vmax):
-                """Extend boundary values to cover mesh extent using median spacing."""
-                if len(bvals) < 2:
+            # Compute spacings. X/Y share chunk size, Z is different.
+            all_spacings = {}
+            for ax, bv in [(0, bx), (1, by), (2, bz)]:
+                if len(bv) >= 2:
+                    all_spacings[ax] = float(np.median(np.diff(bv)))
+
+            def _get_spacing(ax):
+                if ax in all_spacings:
+                    return all_spacings[ax]
+                # X/Y share spacing — borrow from the other
+                if ax in (0, 1):
+                    partner = 1 - ax
+                    if partner in all_spacings:
+                        return all_spacings[partner]
+                # Fall back to any available spacing
+                if all_spacings:
+                    return next(iter(all_spacings.values()))
+                return None
+
+            def _extend_grid(bvals, vmin, vmax, spacing):
+                """Extend boundary values to cover mesh extent."""
+                if len(bvals) == 0 or spacing is None:
                     return bvals
-                spacing = float(np.median(np.diff(bvals)))
-                # Extend below
                 while bvals[0] - spacing > vmin - spacing:
                     bvals = np.concatenate([[bvals[0] - spacing], bvals])
-                # Extend above
                 while bvals[-1] + spacing < vmax + spacing:
                     bvals = np.concatenate([bvals, [bvals[-1] + spacing]])
                 return bvals
 
-            x_vals = _extend_grid(bx, verts[:, 0].min(), verts[:, 0].max()) - centroid[0]
-            y_vals = _extend_grid(by, verts[:, 1].min(), verts[:, 1].max()) - centroid[1]
-            z_vals = _extend_grid(bz, verts[:, 2].min(), verts[:, 2].max()) - centroid[2]
+            x_vals = _extend_grid(bx, verts[:, 0].min(), verts[:, 0].max(), _get_spacing(0)) - centroid[0]
+            y_vals = _extend_grid(by, verts[:, 1].min(), verts[:, 1].max(), _get_spacing(1)) - centroid[1]
+            z_vals = _extend_grid(bz, verts[:, 2].min(), verts[:, 2].max(), _get_spacing(2)) - centroid[2]
 
             segs = []
             for y in y_vals:
