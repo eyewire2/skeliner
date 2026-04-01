@@ -1387,6 +1387,66 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             }
         )
 
+    async def chunk_grid(request):
+        """Compute chunk boundary grid and return as line segments."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        mesh = mesh_state["mesh"]
+        centroid = mesh_state["centroid"]
+
+        def _run():
+            from skeliner.pre import find_chunk_boundaries
+
+            boundaries = find_chunk_boundaries(mesh)
+            verts = mesh.vertices
+
+            bx = np.sort(boundaries.get(0, np.array([])))
+            by = np.sort(boundaries.get(1, np.array([])))
+            bz = np.sort(boundaries.get(2, np.array([])))
+
+            x_vals = np.concatenate(
+                [[verts[:, 0].min()], bx, [verts[:, 0].max()]]
+            ) - centroid[0]
+            y_vals = np.concatenate(
+                [[verts[:, 1].min()], by, [verts[:, 1].max()]]
+            ) - centroid[1]
+            z_vals = np.concatenate(
+                [[verts[:, 2].min()], bz, [verts[:, 2].max()]]
+            ) - centroid[2]
+
+            segs = []
+            for y in y_vals:
+                for z in z_vals:
+                    segs.append(
+                        [[float(x_vals[0]), float(y), float(z)],
+                         [float(x_vals[-1]), float(y), float(z)]]
+                    )
+            for x in x_vals:
+                for z in z_vals:
+                    segs.append(
+                        [[float(x), float(y_vals[0]), float(z)],
+                         [float(x), float(y_vals[-1]), float(z)]]
+                    )
+            for x in x_vals:
+                for y in y_vals:
+                    segs.append(
+                        [[float(x), float(y), float(z_vals[0])],
+                         [float(x), float(y), float(z_vals[-1])]]
+                    )
+
+            n_boundaries = len(bx) + len(by) + len(bz)
+            return segs, n_boundaries
+
+        segs, n_boundaries = await asyncio.get_event_loop().run_in_executor(
+            None, _run
+        )
+        return JSONResponse(
+            {"ok": True, "segments": segs, "n_boundaries": n_boundaries}
+        )
+
     async def check_fusion(request):
         """Analyze highlighted faces for fusion signals."""
         if mesh_state["mesh"] is None:
@@ -2782,6 +2842,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/load_offsets", load_offsets, methods=["POST"]),
             Route("/remove_offsets", do_remove_offsets, methods=["POST"]),
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
+            Route("/chunk_grid", chunk_grid, methods=["POST"]),
             Route("/check_fusion", check_fusion, methods=["POST"]),
             Route("/detect_fusions", detect_fusions, methods=["POST"]),
             Route("/detect_rims", detect_rims, methods=["POST"]),

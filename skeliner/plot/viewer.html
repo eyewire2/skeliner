@@ -491,13 +491,19 @@
             </div>
             <div id="fusionResult" style="margin-top: 4px; font-size: 11px; color: #adf; display: none"></div>
             <div id="hlList" style="margin-top: 4px; max-height: 200px; overflow-y: auto"></div>
-            <div id="hlClearAllRow" style="display: none; margin-top: 2px">
-                <button id="hlHideAll" style="font-size: 10px; cursor: pointer">
-                    Hide All
-                </button>
-                <button id="hlClearAll" style="font-size: 10px; cursor: pointer; margin-left: 6px">
-                    Clear All
-                </button>
+            <div style="margin-top: 2px; display: flex; justify-content: space-between; align-items: center">
+                <div id="hlClearAllRow" style="display: none">
+                    <button id="hlHideAll" style="font-size: 10px; cursor: pointer">
+                        Hide All
+                    </button>
+                    <button id="hlClearAll" style="font-size: 10px; cursor: pointer; margin-left: 6px">
+                        Clear All
+                    </button>
+                </div>
+                <div style="margin-left: auto">
+                    <button id="showGridBtn" style="font-size: 10px; cursor: pointer">Show Grid</button>
+                    <span id="gridStatus" style="font-size: 10px; color: #aaa; margin-left: 4px"></span>
+                </div>
             </div>
         </div>
 
@@ -646,6 +652,7 @@ let meshCentroid = [0, 0, 0];
                 });
                 document.getElementById("hlCheckFusion").addEventListener("click", checkFusion);
                 document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
+                document.getElementById("showGridBtn").addEventListener("click", toggleChunkGrid);
 
                 renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
                 renderer.domElement.addEventListener("pointerdown", onRecenter);
@@ -2233,6 +2240,56 @@ let meshCentroid = [0, 0, 0];
                 } catch (e) {
                     resultDiv.textContent = "Error: " + e.message;
                 }
+            }
+
+            // ── Chunk grid toggle ─────────────────────────────────────────────
+            let chunkGridMesh = null;
+            async function toggleChunkGrid() {
+                const btn = document.getElementById("showGridBtn");
+                const status = document.getElementById("gridStatus");
+
+                // Toggle off if already showing
+                if (chunkGridMesh) {
+                    scene.remove(chunkGridMesh);
+                    chunkGridMesh.geometry.dispose();
+                    chunkGridMesh.material.dispose();
+                    chunkGridMesh = null;
+                    btn.textContent = "Show Grid";
+                    status.textContent = "";
+                    return;
+                }
+
+                status.textContent = "Computing...";
+                btn.disabled = true;
+                try {
+                    const resp = await fetch("/chunk_grid", { method: "POST" });
+                    const data = await resp.json();
+                    if (!data.ok) {
+                        status.textContent = data.error || "Error";
+                        btn.disabled = false;
+                        return;
+                    }
+                    const segs = data.segments;
+                    const pts = new Float32Array(segs.length * 6);
+                    for (let i = 0; i < segs.length; i++) {
+                        pts[i * 6]     = segs[i][0][0];
+                        pts[i * 6 + 1] = segs[i][0][1];
+                        pts[i * 6 + 2] = segs[i][0][2];
+                        pts[i * 6 + 3] = segs[i][1][0];
+                        pts[i * 6 + 4] = segs[i][1][1];
+                        pts[i * 6 + 5] = segs[i][1][2];
+                    }
+                    const geo = new THREE.BufferGeometry();
+                    geo.setAttribute("position", new THREE.BufferAttribute(pts, 3));
+                    const mat = new THREE.LineBasicMaterial({ color: 0x888888, linewidth: 1 });
+                    chunkGridMesh = new THREE.LineSegments(geo, mat);
+                    scene.add(chunkGridMesh);
+                    btn.textContent = "Hide Grid";
+                    status.textContent = `${data.n_boundaries} boundaries`;
+                } catch (e) {
+                    status.textContent = "Error: " + e.message;
+                }
+                btn.disabled = false;
             }
 
             // ── Lasso (rectangle) selection ───────────────────────────────────
