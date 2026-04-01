@@ -756,6 +756,10 @@ let meshCentroid = [0, 0, 0];
                             if (has("hole")) setBtnState(document.getElementById("detectHolesBtn"), "done");
                             if (has("gap")) setBtnState(document.getElementById("detectGapsBtn"), "done");
                             if (has("disconn")) setBtnState(document.getElementById("detectDisconnectedBtn"), "done");
+                            if (has("chunk grid")) {
+                                chunkGridLoaded = true;
+                                document.getElementById("showGridBtn").textContent = "Hide Grid";
+                            }
                         }
                     })
                     .catch(() => {});
@@ -941,6 +945,11 @@ let meshCentroid = [0, 0, 0];
 
             // ── Build mesh ───────────────────────────────────────────────────────
             function buildMesh(data) {
+                // Reset chunk grid state
+                chunkGridLoaded = false;
+                document.getElementById("showGridBtn").textContent = "Show Grid";
+                document.getElementById("gridStatus").textContent = "";
+
                 // Remove old mesh
                 if (meshObj) {
                     scene.remove(meshObj);
@@ -2243,17 +2252,20 @@ let meshCentroid = [0, 0, 0];
             }
 
             // ── Chunk grid toggle ─────────────────────────────────────────────
-            let chunkGridMesh = null;
+            let chunkGridLoaded = false;
             async function toggleChunkGrid() {
                 const btn = document.getElementById("showGridBtn");
                 const status = document.getElementById("gridStatus");
 
-                // Toggle off if already showing
-                if (chunkGridMesh) {
-                    scene.remove(chunkGridMesh);
-                    chunkGridMesh.geometry.dispose();
-                    chunkGridMesh.material.dispose();
-                    chunkGridMesh = null;
+                // Toggle off: remove the annotation
+                if (chunkGridLoaded) {
+                    if (currentAnnotations && currentAnnotations.edge_groups) {
+                        const idx = currentAnnotations.edge_groups.findIndex(
+                            g => g.label === "chunk grid"
+                        );
+                        if (idx >= 0) removeEdgeGroup(idx);
+                    }
+                    chunkGridLoaded = false;
                     btn.textContent = "Show Grid";
                     status.textContent = "";
                     return;
@@ -2269,21 +2281,23 @@ let meshCentroid = [0, 0, 0];
                         btn.disabled = false;
                         return;
                     }
-                    const segs = data.segments;
-                    const pts = new Float32Array(segs.length * 6);
-                    for (let i = 0; i < segs.length; i++) {
-                        pts[i * 6]     = segs[i][0][0];
-                        pts[i * 6 + 1] = segs[i][0][1];
-                        pts[i * 6 + 2] = segs[i][0][2];
-                        pts[i * 6 + 3] = segs[i][1][0];
-                        pts[i * 6 + 4] = segs[i][1][1];
-                        pts[i * 6 + 5] = segs[i][1][2];
-                    }
-                    const geo = new THREE.BufferGeometry();
-                    geo.setAttribute("position", new THREE.BufferAttribute(pts, 3));
-                    const mat = new THREE.LineBasicMaterial({ color: 0x888888, linewidth: 1 });
-                    chunkGridMesh = new THREE.LineSegments(geo, mat);
-                    scene.add(chunkGridMesh);
+                    // Add as edge_group annotation
+                    if (!currentAnnotations) currentAnnotations = { highlights: [], markers: [], edge_groups: [] };
+                    if (!currentAnnotations.edge_groups) currentAnnotations.edge_groups = [];
+                    currentAnnotations.edge_groups.push({
+                        segments: data.segments,
+                        label: "chunk grid",
+                        color: [1.0, 0.6, 0.0],
+                    });
+                    applyAnnotations(currentAnnotations);
+                    updateHighlightsPanel();
+                    // Persist to disk
+                    fetch("/update_annotations", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(currentAnnotations),
+                    }).catch(() => {});
+                    chunkGridLoaded = true;
                     btn.textContent = "Hide Grid";
                     status.textContent = `${data.n_boundaries} boundaries`;
                 } catch (e) {
@@ -3051,6 +3065,9 @@ let meshCentroid = [0, 0, 0];
                 }
                 edgeGroupMeshes = [];
                 currentAnnotations = { highlights: [], markers: [], edge_groups: [] };
+                chunkGridLoaded = false;
+                document.getElementById("showGridBtn").textContent = "Show Grid";
+                document.getElementById("gridStatus").textContent = "";
                 updateHighlightsPanel();
                 fetch("/update_annotations", {
                     method: "POST",
