@@ -5741,6 +5741,179 @@ def find_chunk_boundaries(
     return boundaries
 
 
+def find_parallel_patches(
+    mesh: trimesh.Trimesh,
+    *,
+    boundaries: dict[int, np.ndarray] | None = None,
+    normal_thresh: float = 0.99,
+    boundary_dist: float = 30.0,
+    overlap_dist: float = 21.0,
+    verbose: bool = False,
+) -> list[dict]:
+    """Detect parallel-patch artifacts at chunk boundaries.
+
+    At chunk merge failures, marching cubes produces pairs of perfectly
+    axis-aligned face patches on opposite sides of the boundary plane.
+    This function finds connected patches of such faces and flags those
+    that have an opposing patch (same boundary, overlapping in the
+    perpendicular plane).
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    boundaries : dict or None
+        Output of :func:`find_chunk_boundaries`.  Computed if *None*.
+    normal_thresh : float
+        Minimum |normal·axis| to count as axis-aligned (default 0.99).
+    boundary_dist : float
+        Max distance from a boundary plane in nm (default 30).
+    overlap_dist : float
+        Max perpendicular-plane distance between opposing faces to count
+        as overlapping (default 21, one grid step).
+    verbose : bool
+        Print summary.
+
+    Returns
+    -------
+    list[dict]
+        Each entry: ``{"axis": int, "bval": int, "faces": list[int],
+        "up_faces": list[int], "down_faces": list[int]}``.
+    """
+    from collections import defaultdict, deque
+    from scipy.spatial import cKDTree
+
+    if boundaries is None:
+        boundaries = find_chunk_boundaries(mesh)
+
+    verts = mesh.vertices
+    faces = mesh.faces
+    normals = mesh.face_normals
+    centroids = verts[faces].mean(axis=1)
+
+    # Perpendicular axes for overlap check
+    perp = {0: [1, 2], 1: [0, 2], 2: [0, 1]}
+
+    results = []
+
+    for axis, bvals in boundaries.items():
+        n_ax = normals[:, axis]
+        aligned = np.abs(n_ax) > normal_thresh
+
+        # For each face, find nearest boundary on this axis
+        near_mask = np.zeros(len(faces), dtype=bool)
+        face_bval = np.full(len(faces), -1, dtype=np.int64)
+        for bval in bvals:
+            m = np.abs(centroids[:, axis] - bval) < boundary_dist
+            near_mask |= m
+            face_bval[m] = int(round(bval))
+
+        target_mask = aligned & near_mask
+        target = np.where(target_mask)[0]
+        if len(target) < 2:
+            continue
+        target_set = set(int(fi) for fi in target)
+
+        # Face adjacency among target faces
+        edge_to_faces: dict[tuple, list[int]] = defaultdict(list)
+        for fi in target:
+            f = faces[fi]
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                edge_to_faces[e].append(int(fi))
+
+        # Connected components — same boundary only
+        visited: set[int] = set()
+        patches: list[tuple[list[int], int]] = []
+        for seed in target:
+            seed = int(seed)
+            if seed in visited:
+                continue
+            seed_bv = face_bval[seed]
+            comp: list[int] = []
+            queue = deque([seed])
+            visited.add(seed)
+            while queue:
+                fi = queue.popleft()
+                comp.append(fi)
+                f = faces[fi]
+                for i in range(3):
+                    a, b = int(f[i]), int(f[(i + 1) % 3])
+                    e = (min(a, b), max(a, b))
+                    for nb in edge_to_faces[e]:
+                        if nb not in visited and nb in target_set and face_bval[nb] == seed_bv:
+                            visited.add(nb)
+                            queue.append(nb)
+            patches.append((comp, int(seed_bv)))
+
+        # Check each patch for opposing faces
+        perp_axes = perp[axis]
+        for comp, bv in patches:
+            fi_arr = np.array(comp)
+            n_ax_comp = n_ax[fi_arr]
+            pos_fi = fi_arr[n_ax_comp > normal_thresh]
+            neg_fi = fi_arr[n_ax_comp < -normal_thresh]
+
+            has_overlap = False
+
+            # Self-opposing: up/down within same patch
+            if len(pos_fi) > 0 and len(neg_fi) > 0:
+                pos_perp = centroids[pos_fi][:, perp_axes]
+                neg_perp = centroids[neg_fi][:, perp_axes]
+                tree = cKDTree(neg_perp)
+                dists, _ = tree.query(pos_perp, k=1)
+                if np.any(dists < overlap_dist):
+                    has_overlap = True
+
+            # Nearby opposing: other patches at same boundary
+            if not has_overlap:
+                comp_set = set(comp)
+                others = [
+                    int(fi)
+                    for fi in target
+                    if face_bval[fi] == bv and fi not in comp_set
+                ]
+                if others:
+                    other_nax = n_ax[others]
+                    mean_dir = n_ax_comp.mean()
+                    if mean_dir > 0:
+                        opp = [others[j] for j in range(len(others)) if other_nax[j] < -normal_thresh]
+                    else:
+                        opp = [others[j] for j in range(len(others)) if other_nax[j] > normal_thresh]
+                    if opp:
+                        opp_perp = centroids[opp][:, perp_axes]
+                        comp_perp = centroids[fi_arr][:, perp_axes]
+                        tree = cKDTree(opp_perp)
+                        dists, _ = tree.query(comp_perp, k=1)
+                        if np.any(dists < overlap_dist):
+                            has_overlap = True
+
+            if has_overlap:
+                results.append({
+                    "axis": axis,
+                    "bval": bv,
+                    "faces": [int(f) for f in fi_arr],
+                    "up_faces": [int(f) for f in pos_fi],
+                    "down_faces": [int(f) for f in neg_fi],
+                })
+
+    if verbose:
+        n_faces = sum(len(r["faces"]) for r in results)
+        print(
+            f"[skeliner.pre] Parallel patches: {len(results)} patches, "
+            f"{n_faces} faces"
+        )
+        for r in results:
+            name = "XYZ"[r["axis"]]
+            print(
+                f"  {name}={r['bval']}: {len(r['faces'])}f "
+                f"(+{len(r['up_faces'])} / -{len(r['down_faces'])})"
+            )
+
+    return results
+
+
 # ── Offset detection and correction ─────────────────────────────────
 
 
