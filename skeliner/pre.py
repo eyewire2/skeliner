@@ -5891,31 +5891,53 @@ def find_parallel_patches(
             if not (np.all(a_min <= b_max) and np.all(b_min <= a_max)):
                 return False
 
-            # Check if any vertex from A is inside any triangle of B
-            # (and vice versa).  Use cross-product sign test.
+            # Check if any vertex from A is strictly inside any triangle
+            # of B (and vice versa).  Use cross-product sign test with
+            # strict inequalities — points on edges/vertices don't count
+            # as "inside" so that adjacent (but non-overlapping) triangles
+            # sharing a vertex or edge are not flagged.
             def _point_in_tri(px, py, tri):
-                """Test points (px, py) against triangle tri (3,2)."""
+                """Test points strictly inside triangle tri (3,2)."""
                 x0, y0 = tri[0]
                 x1, y1 = tri[1]
                 x2, y2 = tri[2]
                 d00 = (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0)
                 d01 = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
                 d02 = (x0 - x2) * (py - y2) - (y0 - y2) * (px - x2)
-                return ((d00 >= 0) & (d01 >= 0) & (d02 >= 0)) | (
-                    (d00 <= 0) & (d01 <= 0) & (d02 <= 0)
+                return ((d00 > 0) & (d01 > 0) & (d02 > 0)) | (
+                    (d00 < 0) & (d01 < 0) & (d02 < 0)
                 )
 
-            # Collect all vertices from A, test against all triangles of B
+            # Exclude shared vertices between A and B
+            vidx_a = set(int(v) for v in faces[faces_a].ravel())
+            vidx_b = set(int(v) for v in faces[faces_b].ravel())
+            shared_vidx = vidx_a & vidx_b
+
+            # Collect vertices from A (excluding shared), test against B
             pts_a = verts_a.reshape(-1, 2)
-            for tri in verts_b:
-                if np.any(_point_in_tri(pts_a[:, 0], pts_a[:, 1], tri)):
-                    return True
+            mask_a = np.ones(len(pts_a), dtype=bool)
+            flat_vidx_a = faces[faces_a].ravel()
+            for k, vi in enumerate(flat_vidx_a):
+                if int(vi) in shared_vidx:
+                    mask_a[k] = False
+            pts_a_filtered = pts_a[mask_a]
+            if len(pts_a_filtered) > 0:
+                for tri in verts_b:
+                    if np.any(_point_in_tri(pts_a_filtered[:, 0], pts_a_filtered[:, 1], tri)):
+                        return True
 
             # Vice versa
             pts_b = verts_b.reshape(-1, 2)
-            for tri in verts_a:
-                if np.any(_point_in_tri(pts_b[:, 0], pts_b[:, 1], tri)):
-                    return True
+            mask_b = np.ones(len(pts_b), dtype=bool)
+            flat_vidx_b = faces[faces_b].ravel()
+            for k, vi in enumerate(flat_vidx_b):
+                if int(vi) in shared_vidx:
+                    mask_b[k] = False
+            pts_b_filtered = pts_b[mask_b]
+            if len(pts_b_filtered) > 0:
+                for tri in verts_a:
+                    if np.any(_point_in_tri(pts_b_filtered[:, 0], pts_b_filtered[:, 1], tri)):
+                        return True
 
             return False
 
