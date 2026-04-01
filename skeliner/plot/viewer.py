@@ -1407,15 +1407,22 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             by = np.sort(boundaries.get(1, np.array([])))
             bz = np.sort(boundaries.get(2, np.array([])))
 
-            x_vals = np.concatenate(
-                [[verts[:, 0].min()], bx, [verts[:, 0].max()]]
-            ) - centroid[0]
-            y_vals = np.concatenate(
-                [[verts[:, 1].min()], by, [verts[:, 1].max()]]
-            ) - centroid[1]
-            z_vals = np.concatenate(
-                [[verts[:, 2].min()], bz, [verts[:, 2].max()]]
-            ) - centroid[2]
+            def _extend_grid(bvals, vmin, vmax):
+                """Extend boundary values to cover mesh extent using median spacing."""
+                if len(bvals) < 2:
+                    return bvals
+                spacing = float(np.median(np.diff(bvals)))
+                # Extend below
+                while bvals[0] - spacing > vmin - spacing:
+                    bvals = np.concatenate([[bvals[0] - spacing], bvals])
+                # Extend above
+                while bvals[-1] + spacing < vmax + spacing:
+                    bvals = np.concatenate([bvals, [bvals[-1] + spacing]])
+                return bvals
+
+            x_vals = _extend_grid(bx, verts[:, 0].min(), verts[:, 0].max()) - centroid[0]
+            y_vals = _extend_grid(by, verts[:, 1].min(), verts[:, 1].max()) - centroid[1]
+            z_vals = _extend_grid(bz, verts[:, 2].min(), verts[:, 2].max()) - centroid[2]
 
             segs = []
             for y in y_vals:
