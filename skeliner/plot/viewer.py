@@ -1454,6 +1454,77 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             {"ok": True, "segments": segs, "n_boundaries": n_boundaries}
         )
 
+    async def detect_parallel_patches(request):
+        """Detect parallel-patch merge artifacts at chunk boundaries."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        mesh = mesh_state["mesh"]
+
+        await _log("[skeliner.pre] Detecting parallel patches...")
+        from skeliner.pre import find_parallel_patches
+
+        results = await _run_with_log(
+            find_parallel_patches, mesh, verbose=True
+        )
+
+        if not results:
+            await _log("[skeliner.pre] No parallel patches found")
+            return JSONResponse({"ok": True, "nPatches": 0})
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        if "highlights" not in ann:
+            ann["highlights"] = []
+
+        # Remove previous patch highlights
+        ann["highlights"] = [
+            h for h in ann["highlights"]
+            if not h.get("label", "").startswith("patch:")
+        ]
+
+        axis_colors = {
+            0: {"up": [1.0, 0.3, 0.3], "down": [0.6, 0, 0]},
+            1: {"up": [0.3, 1.0, 0.3], "down": [0, 0.6, 0]},
+            2: {"up": [0.3, 0.3, 1.0], "down": [0, 0, 0.6]},
+        }
+        axis_names = ["X", "Y", "Z"]
+
+        total_faces = 0
+        for r in results:
+            ax = r["axis"]
+            colors = axis_colors[ax]
+            name = axis_names[ax]
+            bval = r["bval"]
+            if r["up_faces"]:
+                ann["highlights"].append({
+                    "faces": r["up_faces"],
+                    "color": colors["up"],
+                    "label": f"patch: {name}={bval} + ({len(r['up_faces'])}f)",
+                })
+            if r["down_faces"]:
+                ann["highlights"].append({
+                    "faces": r["down_faces"],
+                    "color": colors["down"],
+                    "label": f"patch: {name}={bval} - ({len(r['down_faces'])}f)",
+                })
+            total_faces += len(r["faces"])
+
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        await _notify_annotations()
+        await _log(
+            f"[skeliner.pre] {len(results)} parallel patches, "
+            f"{total_faces} faces"
+        )
+        return JSONResponse({
+            "ok": True,
+            "nPatches": len(results),
+            "totalFaces": total_faces,
+        })
+
     async def check_fusion(request):
         """Analyze highlighted faces for fusion signals."""
         if mesh_state["mesh"] is None:
@@ -2850,6 +2921,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/remove_offsets", do_remove_offsets, methods=["POST"]),
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
             Route("/chunk_grid", chunk_grid, methods=["POST"]),
+            Route("/detect_parallel_patches", detect_parallel_patches, methods=["POST"]),
             Route("/check_fusion", check_fusion, methods=["POST"]),
             Route("/detect_fusions", detect_fusions, methods=["POST"]),
             Route("/detect_rims", detect_rims, methods=["POST"]),

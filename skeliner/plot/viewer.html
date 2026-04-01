@@ -289,6 +289,7 @@
 
                 <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
+                <button id="detectParallelBtn" style="margin-left: 4px">Parallel</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
                 <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
                 <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
@@ -653,6 +654,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("hlCheckFusion").addEventListener("click", checkFusion);
                 document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
                 document.getElementById("showGridBtn").addEventListener("click", toggleChunkGrid);
+                document.getElementById("detectParallelBtn").addEventListener("click", detectParallelPatches);
 
                 renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
                 renderer.domElement.addEventListener("pointerdown", onRecenter);
@@ -756,6 +758,7 @@ let meshCentroid = [0, 0, 0];
                             if (has("hole")) setBtnState(document.getElementById("detectHolesBtn"), "done");
                             if (has("gap")) setBtnState(document.getElementById("detectGapsBtn"), "done");
                             if (has("disconn")) setBtnState(document.getElementById("detectDisconnectedBtn"), "done");
+                            if (has("patch:")) setBtnState(document.getElementById("detectParallelBtn"), "done");
                             if (has("chunk grid")) {
                                 chunkGridLoaded = true;
                                 document.getElementById("showGridBtn").textContent = "Hide Grid";
@@ -2304,6 +2307,14 @@ let meshCentroid = [0, 0, 0];
                     status.textContent = "Error: " + e.message;
                 }
                 btn.disabled = false;
+            }
+
+            // ── Detect parallel patches ───────────────────────────────────────
+            async function detectParallelPatches() {
+                await _runAction(
+                    document.getElementById("detectParallelBtn"),
+                    () => fetch("/detect_parallel_patches", { method: "POST" }),
+                );
             }
 
             // ── Lasso (rectangle) selection ───────────────────────────────────
