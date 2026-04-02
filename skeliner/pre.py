@@ -6149,16 +6149,26 @@ def _remove_disconnected_overlap(
 ) -> trimesh.Trimesh:
     """Remove Mode B (disconnected overlap) parallel patches.
 
-    A separate fragment overlaps the main surface at the boundary.
-    Not yet implemented.
+    Placeholder: removes the up_faces and down_faces (the overlapping
+    caps) from both sides.  Does not stitch the resulting openings.
     """
-    if verbose and patches:
-        n_faces = sum(len(p["faces"]) for p in patches)
+    remove_faces: set[int] = set()
+    for patch in patches:
+        remove_faces.update(patch["up_faces"])
+        remove_faces.update(patch["down_faces"])
+
+    if verbose:
         print(
-            f"[skeliner.pre] Mode B: {len(patches)} patches, "
-            f"{n_faces} faces (skipped — not yet implemented)"
+            f"[skeliner.pre] Mode B: removing {len(remove_faces)} faces "
+            f"from {len(patches)} patches (overlap caps only)"
         )
-    return mesh
+
+    if not remove_faces:
+        return mesh
+
+    keep_mask = np.ones(len(mesh.faces), dtype=bool)
+    keep_mask[list(remove_faces)] = False
+    return _rebuild_mesh(mesh, keep_mask)
 
 
 def remove_parallel_patches(
@@ -6201,7 +6211,7 @@ def remove_parallel_patches(
         return mesh
 
     # Classify patches into Mode A vs Mode B
-    labels, _ = _face_edge_components(mesh)
+    labels, main_comp = _face_edge_components(mesh)
 
     mode_a: list[dict] = []
     mode_b: list[dict] = []
@@ -6209,16 +6219,22 @@ def remove_parallel_patches(
     for patch in patches:
         up = patch["up_faces"]
         down = patch["down_faces"]
-        if not up or not down:
-            continue
 
-        up_labels = set(labels[up])
-        down_labels = set(labels[down])
-
-        if up_labels & down_labels:
-            mode_a.append(patch)
+        if up and down:
+            # Both sides present — check if same component
+            up_labels = set(labels[up])
+            down_labels = set(labels[down])
+            if up_labels & down_labels:
+                mode_a.append(patch)
+            else:
+                mode_b.append(patch)
         else:
-            mode_b.append(patch)
+            # Single-sided patch: in main component → Mode A, else Mode B
+            all_faces = patch["faces"]
+            if main_comp in set(labels[all_faces]):
+                mode_a.append(patch)
+            else:
+                mode_b.append(patch)
 
     if verbose:
         print(
