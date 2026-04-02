@@ -6097,6 +6097,140 @@ def find_parallel_patches(
     return results
 
 
+def _remove_self_intersection(
+    mesh: trimesh.Trimesh,
+    patches: list[dict],
+    *,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove Mode A (self-intersection) parallel patches.
+
+    The surface folds back through itself at the chunk boundary.
+    Both layers are in the same connected component.  Remove all
+    patch faces, leaving a hole (acceptable for the pipeline).
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    patches : list[dict]
+        Mode A patches only (already filtered by caller).
+    verbose : bool
+        Print summary.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with Mode A patch faces degenerated.
+    """
+    remove_faces: set[int] = set()
+    for patch in patches:
+        remove_faces.update(patch["faces"])
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Mode A: removing {len(remove_faces)} faces "
+            f"from {len(patches)} patches"
+        )
+
+    if not remove_faces:
+        return mesh
+
+    keep_mask = np.ones(len(mesh.faces), dtype=bool)
+    keep_mask[list(remove_faces)] = False
+    return _rebuild_mesh(mesh, keep_mask)
+
+
+def _remove_disconnected_overlap(
+    mesh: trimesh.Trimesh,
+    patches: list[dict],
+    *,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove Mode B (disconnected overlap) parallel patches.
+
+    A separate fragment overlaps the main surface at the boundary.
+    Not yet implemented.
+    """
+    if verbose and patches:
+        n_faces = sum(len(p["faces"]) for p in patches)
+        print(
+            f"[skeliner.pre] Mode B: {len(patches)} patches, "
+            f"{n_faces} faces (skipped — not yet implemented)"
+        )
+    return mesh
+
+
+def remove_parallel_patches(
+    mesh: trimesh.Trimesh,
+    *,
+    patches: list[dict] | None = None,
+    boundaries: dict[int, np.ndarray] | None = None,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove parallel-patch artifacts at chunk boundaries.
+
+    Classifies each patch as Mode A (self-intersection, up/down faces
+    in same mesh component) or Mode B (disconnected overlap, different
+    components), then routes to the appropriate repair function.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    patches : list[dict] or None
+        Output of :func:`find_parallel_patches`.  Computed if *None*.
+    boundaries : dict or None
+        Passed through to :func:`find_parallel_patches` if *patches* is None.
+    verbose : bool
+        Print summary.
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with patch artifacts repaired.
+    """
+    if patches is None:
+        patches = find_parallel_patches(
+            mesh, boundaries=boundaries, verbose=verbose
+        )
+
+    if not patches:
+        if verbose:
+            print("[skeliner.pre] No parallel patches to remove")
+        return mesh
+
+    # Classify patches into Mode A vs Mode B
+    labels, _ = _face_edge_components(mesh)
+
+    mode_a: list[dict] = []
+    mode_b: list[dict] = []
+
+    for patch in patches:
+        up = patch["up_faces"]
+        down = patch["down_faces"]
+        if not up or not down:
+            continue
+
+        up_labels = set(labels[up])
+        down_labels = set(labels[down])
+
+        if up_labels & down_labels:
+            mode_a.append(patch)
+        else:
+            mode_b.append(patch)
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Parallel patches: "
+            f"{len(mode_a)} Mode A, {len(mode_b)} Mode B"
+        )
+
+    mesh = _remove_self_intersection(mesh, mode_a, verbose=verbose)
+    mesh = _remove_disconnected_overlap(mesh, mode_b, verbose=verbose)
+    return mesh
+
+
 # ── Offset detection and correction ─────────────────────────────────
 
 

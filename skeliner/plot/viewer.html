@@ -281,7 +281,8 @@
         <div id="detect-panel">
             <div style="white-space: nowrap">
                 <span style="color: #888">Detect:</span>
-                <button id="detectOrganellesBtn" style="margin-left:4px">Organelles</button>
+                <button id="detectParallelBtn" style="margin-left:4px">Parallel</button>
+                <button id="detectOrganellesBtn" style="margin-left: 4px">Organelles</button>
                 <button id="detectFusionsBtn" style="margin-left: 4px">Fusions</button>
                 <button id="detectFragmentsBtn" style="margin-left: 4px">Fragments</button>
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
@@ -289,7 +290,6 @@
 
                 <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
-                <button id="detectParallelBtn" style="margin-left: 4px">Parallel</button>
                 <span style="color: #888; margin-left: 12px">Skeleton:</span>
                 <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
                 <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
@@ -305,6 +305,7 @@
             >
                 <span>
                     <span style="color: #888">Remove:</span>
+                    <button id="removeParallelBtn" style="margin-left: 4px">Parallel</button>
                     <button id="removeOrganellesBtn" style="margin-left: 4px">Organelles</button>
                     <button id="removeFusionsBtn" style="margin-left: 4px">Fusions</button>
                     <button id="removeFragmentsBtn" style="margin-left: 4px">Fragments</button>
@@ -666,6 +667,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("detectSomaBtn").addEventListener("click", () => runDetectSoma("ring_cutoff"));
                 document.getElementById("detectDisconnectedBtn").addEventListener("click", runDetectDisconnected);
                 document.getElementById("detectGapsBtn").addEventListener("click", runDetectGaps);
+                document.getElementById("removeParallelBtn").addEventListener("click", runRemoveParallel);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
                 document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
                 document.getElementById("removeFragmentsBtn").addEventListener("click", runRemoveFragments);
@@ -1492,6 +1494,13 @@ let meshCentroid = [0, 0, 0];
                 await _runAction(
                     document.getElementById("detectRimsBtn"),
                     () => fetch("/detect_rims", { method: "POST" }),
+                );
+            }
+
+            async function runRemoveParallel() {
+                await _runAction(
+                    document.getElementById("removeParallelBtn"),
+                    () => fetch("/remove_parallel_patches", { method: "POST" }),
                 );
             }
 

@@ -1541,6 +1541,48 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "totalFaces": total_faces,
         })
 
+    async def do_remove_parallel(request):
+        """Remove parallel-patch artifacts (Mode A only)."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        from skeliner.pre import remove_parallel_patches
+
+        mesh = mesh_state["mesh"]
+        n_before = len(mesh.faces)
+        new_mesh = await _run_with_log(
+            remove_parallel_patches, mesh, verbose=True
+        )
+
+        # Clear only annotations whose faces were actually removed
+        removed = set(int(i) for i in np.where(np.all(new_mesh.faces == 0, axis=1))[0])
+        if annotations_path.exists():
+            try:
+                ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+                if "highlights" in ann:
+                    ann["highlights"] = [
+                        h for h in ann["highlights"]
+                        if not (
+                            h.get("label", "").startswith("patch:")
+                            and all(f in removed for f in h.get("faces", []))
+                        )
+                    ]
+                    annotations_path.write_text(
+                        json.dumps(ann, separators=(",", ":")), encoding="utf-8"
+                    )
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        await _apply_new_mesh(new_mesh)
+        n_degen = len(removed)
+        await _log(f"Remove parallel: {n_degen:,} faces degenerated")
+        return JSONResponse({
+            "ok": True,
+            "facesBefore": n_before,
+            "facesRemoved": n_degen,
+        })
+
     async def check_fusion(request):
         """Analyze highlighted faces for fusion signals."""
         if mesh_state["mesh"] is None:
@@ -2938,6 +2980,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
             Route("/chunk_grid", chunk_grid, methods=["POST"]),
             Route("/detect_parallel_patches", detect_parallel_patches, methods=["POST"]),
+            Route("/remove_parallel_patches", do_remove_parallel, methods=["POST"]),
             Route("/check_fusion", check_fusion, methods=["POST"]),
             Route("/detect_fusions", detect_fusions, methods=["POST"]),
             Route("/detect_rims", detect_rims, methods=["POST"]),
