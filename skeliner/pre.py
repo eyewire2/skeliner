@@ -4075,31 +4075,31 @@ def compute_mesh_stats(
                 f"({radius_multiplier}x median edge {median_edge:.1f})"
             )
 
-    # Compute connected components first so _outward_dot can use
-    # per-component KDTrees for correct local COM.
-    edge_list = set()
-    for face in mesh.faces:
-        for i in range(3):
-            a, b = int(face[i]), int(face[(i + 1) % 3])
-            edge_list.add((min(a, b), max(a, b)))
-
-    g = ig.Graph(n=len(mesh.vertices), edges=list(edge_list), directed=False)
-    comps = g.connected_components()
-    main_ci = max(range(len(comps)), key=lambda i: len(comps[i]))
-
-    vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
-    for ci, cl in enumerate(comps):
-        for v in cl:
-            vert_comp[v] = ci
-    face_comp = vert_comp[mesh.faces[:, 0]]
+    # Compute connected components using edge adjacency so that
+    # faces sharing only a vertex (not an edge) are correctly
+    # separated.  This matters after _rebuild_mesh where degenerate
+    # faces ([0,0,0]) share vertex 0 and removed patches leave
+    # shared boundary vertices.
+    face_comp, main_ci = _face_edge_components(mesh)
     main_face_mask = face_comp == main_ci
 
+    # Vertex component labels (needed by _outward_dot for per-component COM)
+    vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
+    for fi in range(len(mesh.faces)):
+        ci = int(face_comp[fi])
+        if ci < 0:
+            continue
+        for v in mesh.faces[fi]:
+            vert_comp[int(v)] = ci
+
     if verbose:
-        n_comps = len(comps)
-        n_structural = sum(1 for c in comps if len(c) >= 100)
+        n_comps = int(face_comp.max()) + 1 if len(face_comp) else 0
+        from collections import Counter
+        comp_sizes = Counter(int(face_comp[fi]) for fi in range(len(face_comp)) if face_comp[fi] >= 0)
+        n_structural = sum(1 for n in comp_sizes.values() if n >= 100)
         print(
             f"[skeliner.pre] Components: {n_comps} total, "
-            f"{n_structural} structural (>= 100 verts)"
+            f"{n_structural} structural (>= 100 faces)"
         )
 
     outward_dots = _outward_dot(mesh, radius, vert_comp=vert_comp)
@@ -6097,78 +6097,35 @@ def find_parallel_patches(
     return results
 
 
-def _remove_self_intersection(
-    mesh: trimesh.Trimesh,
-    patches: list[dict],
-    *,
-    verbose: bool = False,
-) -> trimesh.Trimesh:
-    """Remove Mode A (self-intersection) parallel patches.
+def _find_fold_faces(mesh, patch):
+    """Find faces on fold edges within a patch.
 
-    The surface folds back through itself at the chunk boundary.
-    Both layers are in the same connected component.  Remove all
-    patch faces, leaving a hole (acceptable for the pipeline).
-
-    Parameters
-    ----------
-    mesh : trimesh.Trimesh
-        Input mesh.
-    patches : list[dict]
-        Mode A patches only (already filtered by caller).
-    verbose : bool
-        Print summary.
-
-    Returns
-    -------
-    trimesh.Trimesh
-        Mesh with Mode A patch faces degenerated.
+    A fold edge is where an up face shares an edge with a down face —
+    the surface turns 180°.  Returns the set of face indices directly
+    on fold edges.
     """
-    remove_faces: set[int] = set()
-    for patch in patches:
-        remove_faces.update(patch["faces"])
+    from collections import defaultdict
 
-    if verbose:
-        print(
-            f"[skeliner.pre] Mode A: removing {len(remove_faces)} faces "
-            f"from {len(patches)} patches"
-        )
+    up_set = set(patch["up_faces"])
+    down_set = set(patch["down_faces"])
+    faces = mesh.faces
 
-    if not remove_faces:
-        return mesh
+    edge_faces: dict[tuple, list[int]] = defaultdict(list)
+    for fi in patch["faces"]:
+        f = faces[fi]
+        for i in range(3):
+            e = (min(int(f[i]), int(f[(i + 1) % 3])),
+                 max(int(f[i]), int(f[(i + 1) % 3])))
+            edge_faces[e].append(fi)
 
-    keep_mask = np.ones(len(mesh.faces), dtype=bool)
-    keep_mask[list(remove_faces)] = False
-    return _rebuild_mesh(mesh, keep_mask)
+    fold: set[int] = set()
+    for e, fis in edge_faces.items():
+        has_up = any(fi in up_set for fi in fis)
+        has_down = any(fi in down_set for fi in fis)
+        if has_up and has_down:
+            fold.update(fis)
 
-
-def _remove_disconnected_overlap(
-    mesh: trimesh.Trimesh,
-    patches: list[dict],
-    *,
-    verbose: bool = False,
-) -> trimesh.Trimesh:
-    """Remove Mode B (disconnected overlap) parallel patches.
-
-    Placeholder: removes the up_faces and down_faces (the overlapping
-    caps) from both sides.  Does not stitch the resulting openings.
-    """
-    remove_faces: set[int] = set()
-    for patch in patches:
-        remove_faces.update(patch["up_faces"])
-        remove_faces.update(patch["down_faces"])
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Mode B: removing {len(remove_faces)} faces "
-            f"from {len(patches)} patches (overlap caps only)"
-        )
-
-    if not remove_faces:
-        return mesh
-
-    keep_mask = np.ones(len(mesh.faces), dtype=bool)
-    keep_mask[list(remove_faces)] = False
-    return _rebuild_mesh(mesh, keep_mask)
+    return fold
 
 
 def remove_parallel_patches(
@@ -6180,9 +6137,13 @@ def remove_parallel_patches(
 ) -> trimesh.Trimesh:
     """Remove parallel-patch artifacts at chunk boundaries.
 
-    Classifies each patch as Mode A (self-intersection, up/down faces
-    in same mesh component) or Mode B (disconnected overlap, different
-    components), then routes to the appropriate repair function.
+    1. Classify each patch as Mode A (has fold edges) or Mode B (no
+       fold edges) using :func:`_find_fold_faces`.
+    2. Remove all detected patch faces.
+    3. Find new disconnected components created by the removal.
+    4. For each new component, check which removed patches it borders:
+       - borders only Mode A → orphan from fold removal → remove
+       - borders any Mode B → real neurite piece → keep (for stitching)
 
     Parameters
     ----------
@@ -6198,8 +6159,10 @@ def remove_parallel_patches(
     Returns
     -------
     trimesh.Trimesh
-        Mesh with patch artifacts repaired.
+        Mesh with patch artifacts and Mode A orphans removed.
     """
+    from collections import defaultdict
+
     if patches is None:
         patches = find_parallel_patches(
             mesh, boundaries=boundaries, verbose=verbose
@@ -6210,41 +6173,113 @@ def remove_parallel_patches(
             print("[skeliner.pre] No parallel patches to remove")
         return mesh
 
-    # Classify patches into Mode A vs Mode B
-    labels, main_comp = _face_edge_components(mesh)
+    faces = mesh.faces
 
-    mode_a: list[dict] = []
-    mode_b: list[dict] = []
+    # ── Step 1: classify patches ──────────────────────────────────
+    mode_a_faces: set[int] = set()  # fold patches
+    mode_b_faces: set[int] = set()  # parallel patches
+    all_removed: set[int] = set()
+    n_a = 0
+    n_b = 0
 
     for patch in patches:
-        up = patch["up_faces"]
-        down = patch["down_faces"]
+        fold = _find_fold_faces(mesh, patch)
+        patch_set = set(patch["faces"])
+        all_removed.update(patch_set)
 
-        if up and down:
-            # Both sides present — check if same component
-            up_labels = set(labels[up])
-            down_labels = set(labels[down])
-            if up_labels & down_labels:
-                mode_a.append(patch)
-            else:
-                mode_b.append(patch)
+        if fold:
+            mode_a_faces.update(patch_set)
+            n_a += 1
         else:
-            # Single-sided patch: in main component → Mode A, else Mode B
-            all_faces = patch["faces"]
-            if main_comp in set(labels[all_faces]):
-                mode_a.append(patch)
-            else:
-                mode_b.append(patch)
+            mode_b_faces.update(patch_set)
+            n_b += 1
 
     if verbose:
         print(
             f"[skeliner.pre] Parallel patches: "
-            f"{len(mode_a)} Mode A, {len(mode_b)} Mode B"
+            f"{n_a} Mode A (fold), {n_b} Mode B (parallel)"
+        )
+        print(f"[skeliner.pre] Removing {len(all_removed)} patch faces")
+
+    # ── Step 2: remove all patch faces ────────────────────────────
+    keep_mask = np.ones(len(faces), dtype=bool)
+    keep_mask[list(all_removed)] = False
+    result = _rebuild_mesh(mesh, keep_mask)
+
+    # ── Step 3: find NEWLY disconnected components ─────────────────
+    # Only consider faces that were in the main component before
+    # removal but ended up in a non-main component after.
+    labels_before, main_before = _face_edge_components(mesh)
+    was_main = set(int(i) for i in np.where(labels_before == main_before)[0])
+
+    labels_after, main_after = _face_edge_components(result)
+    degen = np.all(result.faces == 0, axis=1)
+
+    # Faces that were main, survived removal, but are now non-main
+    newly_disconnected: set[int] = set()
+    for fi in was_main:
+        if not degen[fi] and labels_after[fi] != main_after:
+            newly_disconnected.add(fi)
+
+    if not newly_disconnected:
+        if verbose:
+            print("[skeliner.pre] No orphan components after removal")
+        return result
+
+    # ── Step 4: classify new orphan components ────────────────────
+    # Build edge→type map for removed faces
+    removed_edge_type: dict[tuple, str] = {}
+    for fi in all_removed:
+        f = faces[fi]
+        typ = "a" if fi in mode_a_faces else "b"
+        for i in range(3):
+            e = (min(int(f[i]), int(f[(i + 1) % 3])),
+                 max(int(f[i]), int(f[(i + 1) % 3])))
+            # If any bordering removed face is Mode B, mark as "b"
+            if removed_edge_type.get(e) != "b":
+                removed_edge_type[e] = typ
+
+    # Group newly disconnected faces by component
+    new_comp_ids = set(int(labels_after[fi]) for fi in newly_disconnected)
+    orphan_remove: set[int] = set()
+
+    for comp_id in new_comp_ids:
+        comp_face_idxs = [fi for fi in np.where(labels_after == comp_id)[0]
+                          if fi in newly_disconnected or not degen[fi]]
+        borders_mode_b = False
+
+        for fi in comp_face_idxs:
+            if borders_mode_b:
+                break
+            f = faces[fi]
+            for i in range(3):
+                e = (min(int(f[i]), int(f[(i + 1) % 3])),
+                     max(int(f[i]), int(f[(i + 1) % 3])))
+                if removed_edge_type.get(e) == "b":
+                    borders_mode_b = True
+                    break
+
+        if not borders_mode_b:
+            orphan_remove.update(int(fi) for fi in comp_face_idxs)
+
+    if orphan_remove:
+        if verbose:
+            n_comps = len({int(labels_after[fi]) for fi in orphan_remove})
+            print(
+                f"[skeliner.pre] Removing {len(orphan_remove)} orphan faces "
+                f"({n_comps} components from Mode A removal)"
+            )
+        keep_mask2 = np.ones(len(faces), dtype=bool)
+        keep_mask2[list(all_removed)] = False
+        keep_mask2[list(orphan_remove)] = False
+        result = _rebuild_mesh(mesh, keep_mask2)
+    elif verbose:
+        print(
+            f"[skeliner.pre] Keeping {len(new_comp_ids)} new disconnected "
+            f"components (border Mode B, need stitching)"
         )
 
-    mesh = _remove_self_intersection(mesh, mode_a, verbose=verbose)
-    mesh = _remove_disconnected_overlap(mesh, mode_b, verbose=verbose)
-    return mesh
+    return result
 
 
 # ── Offset detection and correction ─────────────────────────────────
