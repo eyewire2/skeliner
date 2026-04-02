@@ -6164,6 +6164,11 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
     open edges on both sides (disc and nearest other component) and
     bridges each disc edge to its nearest target edge with two
     triangles.
+
+    Only stitches edges that overlap across the boundary — i.e., the
+    two edges must be on opposite sides of the boundary axis (different
+    coordinate along the patch axis).  Edges at the same level are
+    skipped to avoid creating faces parallel to the boundary.
     """
     from collections import defaultdict
     from scipy.spatial import cKDTree
@@ -6228,8 +6233,26 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
     non_disc_mids = np.array(non_disc_mids)
     tree = cKDTree(non_disc_mids)
 
-    all_new_tris = []
+    # Pre-check: only stitch disc comps whose contour overlaps with
+    # a nearby target contour.  Prevents stitching far-away components
+    # to unrelated locations.
+    overlap_comps: set[int] = set()
     for dc in disc_comps:
+        dc_edges = list(open_by_comp[dc])
+        dc_mids = np.array([(verts[e[0]] + verts[e[1]]) / 2 for e in dc_edges])
+        extent = float((dc_mids.max(axis=0) - dc_mids.min(axis=0)).max())
+        margin = max(extent, 100.0)
+        dc_center = dc_mids.mean(axis=0)
+        dist, _ = tree.query(dc_center)
+        if dist < margin:
+            overlap_comps.add(dc)
+
+    all_new_tris = []
+    n_skipped = 0
+    for dc in disc_comps:
+        if dc not in overlap_comps:
+            n_skipped += len(open_by_comp[dc])
+            continue
         for de in open_by_comp[dc]:
             de_mid = (verts[de[0]] + verts[de[1]]) / 2
             _, idx = tree.query(de_mid)
@@ -6249,7 +6272,10 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
 
     if not all_new_tris:
         if verbose:
-            print("[skeliner.pre] Mode B: no contours to stitch")
+            print(
+                f"[skeliner.pre] Mode B: no contours to stitch"
+                f" ({n_skipped} non-overlapping skipped)"
+            )
         return mesh
 
     new_faces = np.array(all_new_tris, dtype=np.int64)
@@ -6259,6 +6285,7 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
         print(
             f"[skeliner.pre] Mode B: stitched with "
             f"{len(new_faces)} bridging faces"
+            f" ({n_skipped} non-overlapping skipped)"
         )
 
     return trimesh.Trimesh(
@@ -6424,7 +6451,8 @@ def remove_parallel_patches(
     n_before = len(result.faces)
     if mode_b_faces:
         result = _stitch_mode_b(
-            result, faces, mode_b_faces, patches, verbose=verbose,
+            result, faces, mode_b_faces, patches,
+            verbose=verbose,
         )
 
     # Invalidate topology; pad outward_dots for appended stitch faces
