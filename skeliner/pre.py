@@ -1662,7 +1662,7 @@ def find_soma_via_ring_cutoff(
         too few indicators exist.
     """
 
-    if mesh_stats is not None:
+    if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
@@ -2421,7 +2421,7 @@ def find_soma_via_neurite_exclusion(
       4. Fit ellipsoid to the cleaned set
     """
 
-    if mesh_stats is not None:
+    if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
@@ -2848,7 +2848,7 @@ def find_soma_via_geodesic(
       4. Fit ellipsoid (same).
     """
 
-    if mesh_stats is not None:
+    if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
@@ -3289,7 +3289,7 @@ def find_disconnected(
         Each element is a list of face indices for one disconnected
         component, sorted largest-first.
     """
-    if mesh_stats is not None:
+    if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
@@ -3438,7 +3438,7 @@ def find_gaps(
         the gap, *disc_a* and *disc_b* are disconnected component indices
         (``-1`` for main), sorted by gap distance (smallest first).
     """
-    if mesh_stats is not None:
+    if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
@@ -3726,7 +3726,19 @@ def remove_gaps(
     if verbose:
         print(f"[skeliner.pre] Removing {len(faces_to_remove)} tip faces")
 
-    return _stitch_and_rebuild(mesh, faces_to_remove, loop_pairs, verbose=verbose)
+    result = _stitch_and_rebuild(mesh, faces_to_remove, loop_pairs, verbose=verbose)
+
+    # Invalidate topology (components merged); pad outward_dots for appended faces
+    if mesh_stats is not None:
+        n_added = len(result.faces) - len(mesh.faces)
+        if n_added > 0 and mesh_stats.outward_dots is not None:
+            mesh_stats.outward_dots = np.concatenate([
+                mesh_stats.outward_dots,
+                np.ones(n_added, dtype=mesh_stats.outward_dots.dtype),
+            ])
+        mesh_stats.invalidate_topology()
+
+    return result
 
 
 def remove_islands(
@@ -4262,11 +4274,13 @@ def find_pocket_mouths(
         One list of edges per pocket mouth.
     """
 
-    if mesh_stats is not None:
-        outward_dots, main_face_mask = (
-            mesh_stats.outward_dots,
-            mesh_stats.main_face_mask,
-        )
+    if mesh_stats is not None and mesh_stats.outward_dots is not None:
+        outward_dots = mesh_stats.outward_dots
+        if mesh_stats.face_comp is not None:
+            main_face_mask = mesh_stats.main_face_mask
+        else:
+            _fc, _mc = _face_edge_components(mesh)
+            main_face_mask = _fc == _mc
     else:
         mesh_stats = compute_mesh_stats(
             mesh,
@@ -4274,10 +4288,8 @@ def find_pocket_mouths(
             radius_multiplier,
             verbose,
         )
-        outward_dots, main_face_mask = (
-            mesh_stats.outward_dots,
-            mesh_stats.main_face_mask,
-        )
+        outward_dots = mesh_stats.outward_dots
+        main_face_mask = mesh_stats.main_face_mask
     edge_to_face = _edge_to_face if _edge_to_face is not None else _edge_to_faces(mesh)
     adj = _adj if _adj is not None else _face_adjacency(mesh, edge_to_face)
 
@@ -4438,11 +4450,13 @@ def find_pocket_organelles(
         Boolean mask ``(nFaces,)`` — pocket organelle faces.
     """
 
-    if mesh_stats is not None:
-        outward_dots, main_face_mask = (
-            mesh_stats.outward_dots,
-            mesh_stats.main_face_mask,
-        )
+    if mesh_stats is not None and mesh_stats.outward_dots is not None:
+        outward_dots = mesh_stats.outward_dots
+        if mesh_stats.face_comp is not None:
+            main_face_mask = mesh_stats.main_face_mask
+        else:
+            _fc, _mc = _face_edge_components(mesh)
+            main_face_mask = _fc == _mc
     else:
         mesh_stats = compute_mesh_stats(
             mesh,
@@ -4450,10 +4464,8 @@ def find_pocket_organelles(
             radius_multiplier,
             verbose,
         )
-        outward_dots, main_face_mask = (
-            mesh_stats.outward_dots,
-            mesh_stats.main_face_mask,
-        )
+        outward_dots = mesh_stats.outward_dots
+        main_face_mask = mesh_stats.main_face_mask
     n_faces = len(mesh.faces)
     # Compute shared structures once
     edge_to_face = _edge_to_faces(mesh)
@@ -4660,7 +4672,7 @@ def find_isolated_organelles(
     np.ndarray
         Boolean mask ``(nFaces,)`` — isolated organelle faces.
     """
-    if mesh_stats is None:
+    if mesh_stats is None or mesh_stats.outward_dots is None:
         mesh_stats = compute_mesh_stats(
             mesh,
             radius,
@@ -4668,8 +4680,11 @@ def find_isolated_organelles(
             verbose,
         )
     outward_dots = mesh_stats.outward_dots
-    face_comp = mesh_stats.face_comp
-    main_ci = mesh_stats.main_ci
+    if mesh_stats.face_comp is not None:
+        face_comp = mesh_stats.face_comp
+        main_ci = mesh_stats.main_ci
+    else:
+        face_comp, main_ci = _face_edge_components(mesh)
     n_comps = face_comp.max() + 1
     isolated = np.zeros(len(mesh.faces), dtype=bool)
     n_internal_frags = 0
@@ -4785,14 +4800,17 @@ def find_organelles(
     t_total = _time.perf_counter()
 
     # ── 1. Precompute outward dots and components ─────────────────
-    if mesh_stats is None:
+    if mesh_stats is None or mesh_stats.outward_dots is None:
         mesh_stats = compute_mesh_stats(
             mesh,
             radius,
             radius_multiplier,
             verbose,
         )
-    face_comp, main_ci = mesh_stats.face_comp, mesh_stats.main_ci
+    if mesh_stats.face_comp is not None:
+        face_comp, main_ci = mesh_stats.face_comp, mesh_stats.main_ci
+    else:
+        face_comp, main_ci = _face_edge_components(mesh)
 
     # ── 2. Find isolated organelles (small internal components) ───
     isolated = find_isolated_organelles(
@@ -4840,7 +4858,7 @@ def find_organelles(
     # We achieve this by setting face_comp to 0 for structural faces and
     # main_ci=0, so main_face_mask == structural_mask.
     structural_face_comp = np.where(structural_mask, 0, -1).astype(
-        mesh_stats.face_comp.dtype
+        face_comp.dtype
     )
     precomputed_structural = MeshStats(
         outward_dots=mesh_stats.outward_dots,
@@ -4915,7 +4933,7 @@ def _find_nonmanifold_fusions(
             f"{len(zero_faces)} zero-area, {nm_edges} non-manifold edges"
         )
 
-    if mesh_stats is not None:
+    if mesh_stats is not None and mesh_stats.outward_dots is not None:
         outward_dots = mesh_stats.outward_dots
     else:
         if verbose:
@@ -5317,6 +5335,7 @@ def remove_fusions(
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     verbose: bool = False,
+    mesh_stats: tuple | None = None,
 ) -> trimesh.Trimesh:
     """Remove fusion faces and split shared vertices between branches.
 
@@ -5385,6 +5404,10 @@ def remove_fusions(
         print(
             f"[skeliner.pre] Fusions: {len(all_fusion)} faces removed, vertices split"
         )
+
+    # Invalidate topology (components split at fan vertices)
+    if mesh_stats is not None:
+        mesh_stats.invalidate_topology()
 
     return mesh
 
@@ -6249,6 +6272,7 @@ def remove_parallel_patches(
     patches: list[dict] | None = None,
     boundaries: dict[int, np.ndarray] | None = None,
     verbose: bool = False,
+    mesh_stats: tuple | None = None,
 ) -> trimesh.Trimesh:
     """Remove parallel-patch artifacts at chunk boundaries.
 
@@ -6339,6 +6363,8 @@ def remove_parallel_patches(
     if not newly_disconnected:
         if verbose:
             print("[skeliner.pre] No orphan components after removal")
+        if mesh_stats is not None:
+            mesh_stats.invalidate_topology()
         return result
 
     # ── Step 4: classify new orphan components ────────────────────
@@ -6395,10 +6421,21 @@ def remove_parallel_patches(
         )
 
     # ── Step 5: stitch Mode B gaps ───────────────────────────────
+    n_before = len(result.faces)
     if mode_b_faces:
         result = _stitch_mode_b(
             result, faces, mode_b_faces, patches, verbose=verbose,
         )
+
+    # Invalidate topology; pad outward_dots for appended stitch faces
+    if mesh_stats is not None:
+        n_added = len(result.faces) - n_before
+        if n_added > 0 and mesh_stats.outward_dots is not None:
+            mesh_stats.outward_dots = np.concatenate([
+                mesh_stats.outward_dots,
+                np.ones(n_added, dtype=mesh_stats.outward_dots.dtype),
+            ])
+        mesh_stats.invalidate_topology()
 
     return result
 
@@ -6808,6 +6845,7 @@ def remove_offsets(
     *,
     offsets: list[dict] | None = None,
     verbose: bool = False,
+    mesh_stats: tuple | None = None,
 ) -> trimesh.Trimesh:
     """Correct vertex positions for detected Z-plane alignment offsets.
 
@@ -6968,6 +7006,11 @@ def remove_offsets(
             f"removed {n_removed:,} faces, "
             f"centroid drift {drift:.0f} nm (restored)"
         )
+
+    # Invalidate geometry (vertex positions changed) and topology (cap faces removed)
+    if mesh_stats is not None:
+        mesh_stats.invalidate_geometry()
+        mesh_stats.invalidate_topology()
 
     return result
 

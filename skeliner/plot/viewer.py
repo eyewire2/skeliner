@@ -832,16 +832,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh = mesh_state["mesh"]
         cached = mesh_state.get("offsets")
+        ms = mesh_state.get("mesh_stats")
 
         def _do_remove():
-            return remove_offsets(mesh, offsets=cached, verbose=True)
+            return remove_offsets(mesh, offsets=cached, verbose=True, mesh_stats=ms)
 
         new_mesh = await _run_with_log(_do_remove)
         await _apply_new_mesh(new_mesh)
 
-        # Clear cached offsets
+        # Clear cached offsets; mesh_stats invalidated in-place by remove_offsets
         mesh_state["offsets"] = None
-        mesh_state["mesh_stats"] = None
 
         return JSONResponse({"ok": True})
 
@@ -1322,58 +1322,39 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         soma = mesh_state.get("soma")
         cached_gaps = mesh_state.get("gap_clusters")
 
+        # Pass mesh_stats so remove_gaps can invalidate/pad it
+        ms = mesh_state.get("mesh_stats")
+        org = mesh_state.get("organelles")
+        if ms is None and org is not None:
+            ms = org.mesh_stats
+
         new_mesh = await _run_with_log(
             remove_gaps,
             mesh,
             verbose=True,
             soma=soma,
             gaps=cached_gaps,
+            mesh_stats=ms,
         )
         n_after = len(new_mesh.faces)
         n_added = n_after - n_before
 
-        # Stitch faces were appended — extend cached masks so indices stay valid
-        if n_added > 0:
-            from skeliner.dataclass import MeshStats, Organelles
+        # Pad organelle masks for appended stitch faces
+        if n_added > 0 and org is not None:
+            from skeliner.dataclass import Organelles
 
             pad = np.zeros(n_added, dtype=bool)
-            org = mesh_state.get("organelles")
-            if org is not None:
-                s = org.mesh_stats
-                new_stats = MeshStats(
-                    outward_dots=np.concatenate(
-                        [s.outward_dots, np.ones(n_added, dtype=s.outward_dots.dtype)]
-                    ),
-                    face_comp=np.concatenate(
-                        [
-                            s.face_comp,
-                            np.full(n_added, s.main_ci, dtype=s.face_comp.dtype),
-                        ]
-                    ),
-                    main_ci=s.main_ci,
-                )
-                new_org = Organelles(
-                    pocket=np.concatenate([org.pocket, pad]),
-                    isolated=np.concatenate([org.isolated, pad]),
-                    expanded=np.concatenate([org.expanded, pad]),
-                    mesh_stats=new_stats,
-                )
-                mesh_state["organelles"] = new_org
-                mesh_state["mesh_stats"] = new_stats
-            elif mesh_state.get("mesh_stats") is not None:
-                s = mesh_state["mesh_stats"]
-                mesh_state["mesh_stats"] = MeshStats(
-                    outward_dots=np.concatenate(
-                        [s.outward_dots, np.ones(n_added, dtype=s.outward_dots.dtype)]
-                    ),
-                    face_comp=np.concatenate(
-                        [
-                            s.face_comp,
-                            np.full(n_added, s.main_ci, dtype=s.face_comp.dtype),
-                        ]
-                    ),
-                    main_ci=s.main_ci,
-                )
+            mesh_state["organelles"] = Organelles(
+                pocket=np.concatenate([org.pocket, pad]),
+                isolated=np.concatenate([org.isolated, pad]),
+                expanded=np.concatenate([org.expanded, pad]),
+                mesh_stats=ms,
+            )
+
+        # ms was mutated in-place by remove_gaps (topology invalidated,
+        # outward_dots padded) — update the reference in mesh_state
+        if ms is not None:
+            mesh_state["mesh_stats"] = ms
 
         _clear_annotations("gap ", "disconnected ")
         await _apply_new_mesh(new_mesh)
@@ -1550,9 +1531,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import remove_parallel_patches
 
         mesh = mesh_state["mesh"]
+        ms = mesh_state.get("mesh_stats")
         n_before = len(mesh.faces)
         new_mesh = await _run_with_log(
-            remove_parallel_patches, mesh, verbose=True
+            remove_parallel_patches, mesh, verbose=True, mesh_stats=ms
         )
 
         # Clear only annotations whose faces were actually removed
@@ -1937,6 +1919,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import remove_fusions as _remove_fusions
 
         mesh = mesh_state["mesh"]
+        ms = mesh_state.get("mesh_stats")
         n_before = len(mesh.faces)
         cached = mesh_state.get("fusion_clusters")
         new_mesh = await _run_with_log(
@@ -1944,6 +1927,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             mesh,
             fusion_clusters=cached,
             verbose=True,
+            mesh_stats=ms,
         )
         n_after = len(new_mesh.faces)
 
@@ -2184,14 +2168,14 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         from skeliner.pre import remove_offsets
 
         mesh = mesh_state["mesh"]
+        ms = mesh_state.get("mesh_stats")
 
         def _run():
-            return remove_offsets(mesh, verbose=True)
+            return remove_offsets(mesh, verbose=True, mesh_stats=ms)
 
         new_mesh = await _run_with_log(_run)
         await _apply_new_mesh(new_mesh)
         mesh_state["offsets"] = None
-        mesh_state["mesh_stats"] = None
 
         return JSONResponse({"ok": True})
 

@@ -69,14 +69,27 @@ class MeshStats:
         Largest component ID.
     """
 
-    outward_dots: np.ndarray
-    face_comp: np.ndarray
-    main_ci: int
+    outward_dots: np.ndarray | None = None
+    face_comp: np.ndarray | None = None
+    main_ci: int | None = None
 
     @property
     def main_face_mask(self) -> np.ndarray:
         """Bool mask for faces in the main component."""
+        if self.face_comp is None or self.main_ci is None:
+            raise AttributeError(
+                "face_comp/main_ci invalidated; recompute via _face_edge_components"
+            )
         return self.face_comp == self.main_ci
+
+    def invalidate_topology(self) -> None:
+        """Mark face_comp/main_ci as stale (after connectivity changes)."""
+        self.face_comp = None
+        self.main_ci = None
+
+    def invalidate_geometry(self) -> None:
+        """Mark outward_dots as stale (after vertex position changes)."""
+        self.outward_dots = None
 
     def as_tuple(self) -> tuple:
         """Backward-compatible tuple ``(outward_dots, face_comp, main_ci, main_face_mask)``."""
