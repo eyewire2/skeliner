@@ -2213,16 +2213,16 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 status_code=400,
             )
 
-        from skeliner.pre import break_at_soma
+        from skeliner.pre import break_up_mesh
         from skeliner.dataclass import Organelles
 
         mesh = mesh_state["mesh"]
         org_mask = org.mask
 
         def _run():
-            return break_at_soma(mesh, soma, org_mask, verbose=True)
+            return break_up_mesh(mesh, soma, org_mask, verbose=True)
 
-        new_soma, new_org, neurites = await _run_with_log(_run)
+        new_soma, new_org, neurites, discarded = await _run_with_log(_run)
 
         mesh_state["soma"] = new_soma
         mesh_state["organelles"] = Organelles(
@@ -2289,6 +2289,15 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 }
             )
 
+        for i, df in enumerate(discarded):
+            highlights.append(
+                {
+                    "faces": df.tolist(),
+                    "color": [0.5, 0.5, 0.5],
+                    "label": f"discarded {i} ({len(df):,}f)",
+                }
+            )
+
         ann["highlights"] = highlights
         ann["ellipsoids"] = [
             {
@@ -2305,6 +2314,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             {
                 "ok": True,
                 "nNeurites": len(neurites),
+                "nDiscarded": len(discarded),
                 "somaVerts": len(new_soma.verts),
                 "orgFaces": int(new_org.sum()),
             }

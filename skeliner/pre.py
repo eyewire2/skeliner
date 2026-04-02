@@ -2198,23 +2198,27 @@ def _face_components(faces, edge_to_faces, face_indices):
     return components
 
 
-def break_at_soma(
+def break_up_mesh(
     mesh: trimesh.Trimesh,
     soma: Soma,
     organelle: np.ndarray,
     *,
     verbose: bool = False,
-) -> tuple[Soma, np.ndarray, list[np.ndarray]]:
-    """Break the mesh at the soma and classify the pieces.
+) -> tuple[Soma, np.ndarray, list[np.ndarray], list[np.ndarray]]:
+    """Break the mesh using soma and organelles, classify the pieces.
 
-    Removes soma +
-    organelle faces, finds connected components of the remainder,
-    and classifies each as:
+    Removes soma + organelle faces, finds connected components of
+    the remainder, and classifies each as:
 
     - **missed organelle** — not reachable from the main mesh body
       without crossing organelle faces (topologically trapped).
     - **missed soma** — reachable, but boundary is mostly soma faces.
-    - **neurite** — reachable, everything else.
+    - **neurite** — reachable, large enough to be a real branch.
+    - **discarded** — reachable, but too small (below auto threshold).
+
+    The discard threshold is auto-inferred: components are sorted by
+    size descending; once the cumulative face count reaches 95% of
+    the total, the remaining components are discarded.
 
     Parameters
     ----------
@@ -2234,6 +2238,9 @@ def break_at_soma(
     neurites : list[np.ndarray]
         Face index arrays for each neurite component, sorted by
         descending face count.
+    discarded : list[np.ndarray]
+        Face index arrays for small fragments below the auto
+        threshold, sorted by descending face count.
     """
     faces = np.asarray(mesh.faces)
     verts = mesh.vertices
@@ -2308,14 +2315,11 @@ def break_at_soma(
     components = _face_components(faces, ef_all, remain_fi)
 
     # --- classify ---
-    neurites: list[np.ndarray] = []
+    neurite_candidates: list[np.ndarray] = []
     extra_soma_vi: list[int] = []
     organelle_expanded = organelle.copy()
 
     for comp in components:
-        if len(comp) <= 100:
-            continue
-
         # Reachability: is any face in its mesh component's body?
         in_main = reachable[comp].any()
 
@@ -2324,7 +2328,7 @@ def break_at_soma(
             organelle_expanded[comp] = True
             if verbose:
                 print(
-                    f"break_at_soma: absorbed {len(comp)} faces "
+                    f"break_up_mesh: absorbed {len(comp)} faces "
                     f"as missed organelle (trapped)"
                 )
             continue
@@ -2344,20 +2348,17 @@ def break_at_soma(
                         if soma_face[nb]:
                             n_soma += 1
 
-        if n_total == 0:
-            continue
-
-        soma_frac = n_soma / n_total
+        soma_frac = n_soma / n_total if n_total > 0 else 0.0
         if soma_frac > 0.5:
             comp_vi = np.unique(faces[comp])
             extra_soma_vi.extend(comp_vi.tolist())
             if verbose:
                 print(
-                    f"break_at_soma: absorbed {len(comp)} faces "
+                    f"break_up_mesh: absorbed {len(comp)} faces "
                     f"({len(comp_vi)} verts) as missed soma"
                 )
         else:
-            neurites.append(comp)
+            neurite_candidates.append(comp)
 
     # --- refit soma if we absorbed extra verts ---
     if extra_soma_vi:
@@ -2366,14 +2367,36 @@ def break_at_soma(
         soma = Soma.fit(verts[all_soma_vi], verts=all_soma_vi)
         soma.nucleus = prev_nucleus
 
+    # --- auto-threshold: keep components covering 95% of total faces ---
+    neurite_candidates.sort(key=len, reverse=True)
+    total_faces = sum(len(c) for c in neurite_candidates)
+    cumsum = 0
+    split_idx = len(neurite_candidates)
+    for i, comp in enumerate(neurite_candidates):
+        cumsum += len(comp)
+        if cumsum >= total_faces * 0.95:
+            split_idx = i + 1
+            break
+
+    neurites = neurite_candidates[:split_idx]
+    discarded = neurite_candidates[split_idx:]
+
     if verbose:
+        n_disc_faces = sum(len(c) for c in discarded)
+        thresh = len(neurites[-1]) if neurites else 0
         print(
-            f"break_at_soma: {len(neurites)} neurite components, "
+            f"break_up_mesh: {len(neurites)} neurites, "
+            f"{len(discarded)} discarded ({n_disc_faces:,} faces, "
+            f"threshold ~{thresh} faces), "
             f"soma {len(soma.verts):,} verts, "
             f"organelle {organelle_expanded.sum():,} faces"
         )
 
-    return soma, organelle_expanded, neurites
+    return soma, organelle_expanded, neurites, discarded
+
+
+# Keep old name as alias
+break_at_soma = break_up_mesh
 
 
 def find_soma_via_neurite_exclusion(
