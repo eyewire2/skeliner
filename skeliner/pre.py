@@ -3617,23 +3617,6 @@ def find_gaps(
     # Sort by gap distance
     gaps.sort(key=lambda x: x[2])
 
-    # Filter outlier gaps using Otsu on log distances.
-    # Only filter when there are enough gaps to form distinct groups
-    # and the max distance is at least 5x the median (clear outlier).
-    if len(gaps) >= 3:
-        dists_arr = np.array([g[2] for g in gaps], dtype=np.float64)
-        if dists_arr[-1] > 5.0 * np.median(dists_arr):
-            log_dists = np.log(np.maximum(dists_arr, 1.0))
-            thresh, _ = _otsu_threshold(log_dists)
-            n_before = len(gaps)
-            gaps = [g for g in gaps if np.log(max(g[2], 1.0)) <= thresh]
-            n_dropped = n_before - len(gaps)
-            if verbose and n_dropped:
-                print(
-                    f"[skeliner.pre] Gaps: dropped {n_dropped} outlier gap(s) "
-                    f"(> {np.exp(thresh):.0f}nm)"
-                )
-
     if verbose:
         print(f"[skeliner.pre] Gaps: {len(gaps)} gaps found")
         for i, (fa, fb, dist, da, db) in enumerate(gaps):
