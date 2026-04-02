@@ -6128,6 +6128,115 @@ def _find_fold_faces(mesh, patch):
     return fold
 
 
+def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
+    """Bridge gaps left by Mode B parallel patch removal.
+
+    For each disconnected component created by Mode B removal, finds
+    open edges on both sides (disc and nearest other component) and
+    bridges each disc edge to its nearest target edge with two
+    triangles.
+    """
+    from collections import defaultdict
+    from scipy.spatial import cKDTree
+
+    verts = mesh.vertices
+    faces = mesh.faces
+    degen = np.all(faces == 0, axis=1)
+    labels, main_c = _face_edge_components(mesh)
+
+    # Edge→face for surviving faces
+    surv_ef = defaultdict(set)
+    for fi in range(len(faces)):
+        if degen[fi]:
+            continue
+        f = faces[fi]
+        a, b, c = int(f[0]), int(f[1]), int(f[2])
+        if a == b or b == c or a == c:
+            continue
+        surv_ef[(min(a, b), max(a, b))].add(fi)
+        surv_ef[(min(b, c), max(b, c))].add(fi)
+        surv_ef[(min(a, c), max(a, c))].add(fi)
+
+    # Open edges from removal, by component
+    open_by_comp = defaultdict(set)
+    for fi in range(len(faces)):
+        if not degen[fi]:
+            continue
+        f = orig_faces[fi]
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            if a == b:
+                continue
+            e = (min(a, b), max(a, b))
+            surv = surv_ef.get(e, set())
+            if len(surv) == 1:
+                c = int(labels[next(iter(surv))])
+                open_by_comp[c].add(e)
+
+    disc_comps = set(c for c in open_by_comp if c != main_c)
+    if not disc_comps:
+        if verbose:
+            print("[skeliner.pre] Mode B: no contours to stitch")
+        return mesh
+
+    # Collect all non-disc open edges with midpoints for KDTree
+    non_disc_edges = []
+    non_disc_mids = []
+    non_disc_comp = []
+    for c, edges in open_by_comp.items():
+        if c in disc_comps:
+            continue
+        for e in edges:
+            non_disc_edges.append(e)
+            non_disc_mids.append((verts[e[0]] + verts[e[1]]) / 2)
+            non_disc_comp.append(c)
+
+    if not non_disc_mids:
+        if verbose:
+            print("[skeliner.pre] Mode B: no target edges to stitch to")
+        return mesh
+
+    non_disc_mids = np.array(non_disc_mids)
+    tree = cKDTree(non_disc_mids)
+
+    all_new_tris = []
+    for dc in disc_comps:
+        for de in open_by_comp[dc]:
+            de_mid = (verts[de[0]] + verts[de[1]]) / 2
+            _, idx = tree.query(de_mid)
+            te = non_disc_edges[idx]
+
+            a0, a1 = de
+            b0, b1 = te
+            # Orient: b0 closer to a0
+            if np.linalg.norm(verts[b1] - verts[a0]) < \
+               np.linalg.norm(verts[b0] - verts[a0]):
+                b0, b1 = b1, b0
+            # Skip if edges share vertices (already connected)
+            if {a0, a1} & {b0, b1}:
+                continue
+            all_new_tris.append((a0, a1, b0))
+            all_new_tris.append((a1, b0, b1))
+
+    if not all_new_tris:
+        if verbose:
+            print("[skeliner.pre] Mode B: no contours to stitch")
+        return mesh
+
+    new_faces = np.array(all_new_tris, dtype=np.int64)
+    combined = np.vstack([faces, new_faces])
+
+    if verbose:
+        print(
+            f"[skeliner.pre] Mode B: stitched with "
+            f"{len(new_faces)} bridging faces"
+        )
+
+    return trimesh.Trimesh(
+        vertices=verts, faces=combined, process=False
+    )
+
+
 def remove_parallel_patches(
     mesh: trimesh.Trimesh,
     *,
@@ -6277,6 +6386,12 @@ def remove_parallel_patches(
         print(
             f"[skeliner.pre] Keeping {len(new_comp_ids)} new disconnected "
             f"components (border Mode B, need stitching)"
+        )
+
+    # ── Step 5: stitch Mode B gaps ───────────────────────────────
+    if mode_b_faces:
+        result = _stitch_mode_b(
+            result, faces, mode_b_faces, patches, verbose=verbose,
         )
 
     return result
