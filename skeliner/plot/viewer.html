@@ -330,7 +330,7 @@
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
                     <span style="color: #888; margin-left: 12px">Mesh:</span>
                     <button id="hlMerge" style="margin-left: 4px">Merge</button>
-                    <button id="breakAtSomaBtn" style="margin-left: 4px">Break</button>
+                    <button id="breakUpMeshBtn" style="margin-left: 4px">Break</button>
                     <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
                 </span>
                 <span style="margin-left: 12px">
@@ -694,7 +694,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
                 document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
-                document.getElementById("breakAtSomaBtn").addEventListener("click", runBreakAtSoma);
+                document.getElementById("breakUpMeshBtn").addEventListener("click", runBreakUpMesh);
                 document.getElementById("compactMeshBtn").addEventListener("click", runCompactMesh);
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
                 document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
@@ -1608,10 +1608,10 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            async function runBreakAtSoma() {
+            async function runBreakUpMesh() {
                 const data = await _runAction(
-                    document.getElementById("breakAtSomaBtn"),
-                    () => fetch("/break_at_soma", { method: "POST" }),
+                    document.getElementById("breakUpMeshBtn"),
+                    () => fetch("/break_up_mesh", { method: "POST" }),
                 );
                 if (data && data.ok) fetchAnnotations();
             }

@@ -2071,7 +2071,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             }
         )
 
-    async def do_break_at_soma(request):
+    async def do_break_up_mesh(request):
         """Break mesh at soma: classify components, expand soma + organelles."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2123,7 +2123,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         if annotations_path.exists():
             ann = json.loads(annotations_path.read_text(encoding="utf-8"))
 
-        # Replace all highlights and ellipsoids with break_at_soma results
+        # Replace all highlights and ellipsoids with break_up_mesh results
         highlights = []
         highlights.append(
             {
@@ -2882,7 +2882,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
             Route("/edit_vertices", edit_vertices, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
-            Route("/break_at_soma", do_break_at_soma, methods=["POST"]),
+            Route("/break_up_mesh", do_break_up_mesh, methods=["POST"]),
             Route("/compact_mesh", do_compact_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
