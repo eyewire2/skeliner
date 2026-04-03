@@ -428,12 +428,18 @@
             </div>
             <div style="display:flex;gap:16px;margin-bottom:12px">
                 <div>
-                    <div style="color:#888;margin-bottom:4px;font-size:11px">OBJ</div>
-                    <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Mesh</button>
-                    <div style="color:#888;margin-bottom:4px;margin-top:10px;font-size:11px">SWC</div>
-                    <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Skeleton</button>
-                    <div style="color:#888;margin-bottom:4px;margin-top:10px;font-size:11px">JSON</div>
-                    <button id="saveAnnotations" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Annotations</button>
+                    <div id="saveMeshGroup">
+                        <div style="color:#888;margin-bottom:4px;font-size:11px">OBJ</div>
+                        <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Mesh</button>
+                    </div>
+                    <div id="saveSkelSwcGroup" style="margin-top:10px">
+                        <div style="color:#888;margin-bottom:4px;font-size:11px">SWC</div>
+                        <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Skeleton</button>
+                    </div>
+                    <div id="saveAnnotationsGroup" style="margin-top:10px">
+                        <div style="color:#888;margin-bottom:4px;font-size:11px">JSON</div>
+                        <button id="saveAnnotations" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Annotations</button>
+                    </div>
                 </div>
                 <div>
                     <div style="color:#888;margin-bottom:4px;font-size:11px">NPZ</div>
@@ -1642,10 +1648,38 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
-            function openSaveDialog() {
+            async function openSaveDialog() {
                 document.getElementById("saveDialogStatus").textContent = "";
                 document.getElementById("save-dialog").style.display = "block";
                 document.getElementById("save-dialog-backdrop").style.display = "block";
+
+                // Show/hide buttons based on available data
+                const btnMap = {
+                    saveSkelNpz: "skeleton",
+                    saveSomaNpz: "soma",
+                    saveOrgMasks: "organelles",
+                    saveNeurites: "neurites",
+                    saveDiscarded: "discarded",
+                    saveComponents: "components",
+                };
+                const groupMap = {
+                    saveMeshGroup: "mesh",
+                    saveSkelSwcGroup: "skeleton",
+                    saveAnnotationsGroup: "annotations",
+                };
+                try {
+                    const resp = await fetch("/save_availability");
+                    const avail = await resp.json();
+                    for (const [btnId, key] of Object.entries(btnMap)) {
+                        const btn = document.getElementById(btnId);
+                        if (btn) btn.style.display = avail[key] ? "block" : "none";
+                    }
+                    for (const [grpId, key] of Object.entries(groupMap)) {
+                        const grp = document.getElementById(grpId);
+                        if (grp) grp.style.display = avail[key] ? "" : "none";
+                    }
+                    document.getElementById("saveAll").style.display = avail.mesh ? "" : "none";
+                } catch (e) {}
             }
 
             function closeSaveDialog() {

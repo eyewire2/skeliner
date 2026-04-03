@@ -374,6 +374,19 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             )
         return JSONResponse({})
 
+    async def get_save_availability(request):
+        """Return which data is available for saving."""
+        return JSONResponse({
+            "mesh": mesh_state["mesh"] is not None,
+            "skeleton": len(skeleton_states) > 0,
+            "soma": mesh_state.get("soma") is not None,
+            "organelles": mesh_state.get("organelles") is not None,
+            "neurites": mesh_state.get("neurites") is not None and len(mesh_state["neurites"]) > 0,
+            "discarded": mesh_state.get("discarded") is not None and len(mesh_state["discarded"]) > 0,
+            "components": mesh_state.get("neurites") is not None,
+            "annotations": annotations_path.exists(),
+        })
+
     async def get_loaded(request):
         """Return what's currently loaded."""
         result = {"mesh": None, "skeletons": {}}
@@ -3078,6 +3091,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/skeletons", get_skeletons),
             Route("/loaded", get_loaded),
             Route("/state", get_state, methods=["GET"]),
+            Route("/save_availability", get_save_availability, methods=["GET"]),
             Route("/annotations", get_annotations, methods=["GET"]),
             Route("/update_annotations", update_annotations, methods=["POST"]),
             Route("/upload", upload_file, methods=["POST"]),
