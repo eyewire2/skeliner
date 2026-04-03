@@ -25,6 +25,9 @@ dependencies = [
     "shapely>=2.1.2",
     "scikit-image>=0.25.2",
     "flake8>=7.3.0",
+    "starlette>=0.52.1",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
 ]
 license = "GPL-3.0-or-later"
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -38,13 +41,7 @@ dev = [
     "ipykernel>=7.1.0",
     "watermark>=2.5.0",
 ]
-3d = [
-    "vtk>=9.4.2",
-]
-viewer = [
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.34.0",
-]
+
 
 [project.scripts]
 skeliner = "skeliner.__main__:main"

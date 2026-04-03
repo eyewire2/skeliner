@@ -208,7 +208,17 @@ def _get_viewer_html() -> str:
 # ── Server ────────────────────────────────────────────────────────────
 
 
-def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
+def _create_app(
+    mesh_path: str | Path | None = None,
+    port: int = 8777,
+    *,
+    preload_mesh: trimesh.Trimesh | None = None,
+    preload_centroid: np.ndarray | None = None,
+    extra_meshes: dict[str, dict[str, Any]] | None = None,
+    contact_state: dict[str, Any] | None = None,
+    mesh_color: list[float] | None = None,
+    preload_skeletons: list[tuple[str, Any]] | None = None,
+):
     """Create the Starlette app."""
     from starlette.applications import Starlette
     from starlette.responses import HTMLResponse, JSONResponse
@@ -248,8 +258,26 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         [1.0, 0.9, 0.1],  # yellow
     ]
 
-    # Pre-load mesh if path given
-    if mesh_path is not None:
+    # Extra meshes (keyed by name), each: {mesh, buffers, color, opacity}
+    extra_mesh_states: dict[str, dict[str, Any]] = {}
+    if extra_meshes is not None:
+        extra_mesh_states.update(extra_meshes)
+
+    # Contact-site overlay data (set by view_contacts)
+    _contact_state: dict[str, Any] | None = contact_state
+
+    # Pre-load mesh from path or object
+    if preload_mesh is not None:
+        mesh = preload_mesh
+        print(
+            f"Loaded mesh: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces"
+        )
+        buffers = _mesh_to_buffers(mesh, centroid=preload_centroid)
+        mesh_state["mesh"] = mesh
+        mesh_state["buffers"] = buffers
+        mesh_state["path"] = "(preloaded)"
+        mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
+    elif mesh_path is not None:
         mesh_path = Path(mesh_path)
         mesh = trimesh.load_mesh(str(mesh_path), process=False)
         print(
@@ -263,6 +291,24 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         mesh_state["path"] = str(mesh_path.resolve())
         mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
 
+    # Pre-load skeletons if given
+    if preload_skeletons:
+        centroid = mesh_state["centroid"]
+        for name, skel in preload_skeletons:
+            color = SKEL_COLORS[len(skeleton_states) % len(SKEL_COLORS)]
+            buffers = _skeleton_to_buffers(skel, centroid)
+            buffers["color"] = color
+            skeleton_states[name] = {
+                "skeleton": skel,
+                "buffers": buffers,
+                "path": name,
+                "color": color,
+                "l2_graph": False,
+            }
+            print(
+                f"Loaded skeleton: {name} ({len(skel.nodes):,} nodes, {len(skel.edges):,} edges)"
+            )
+
     # ── State files ───────────────────────────────────────────────────
     _ensure_state_dir()
     port_dir = _STATE_DIR / str(port)
@@ -270,6 +316,11 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     state_path = port_dir / "state.json"
     annotations_path = port_dir / "annotations.json"
     camera_cmd_path = port_dir / "camera.json"
+
+    # Wipe leftover state from previous sessions
+    for f in port_dir.iterdir():
+        if f.is_file():
+            f.unlink()
 
     if not annotations_path.exists():
         annotations_path.write_text("{}", encoding="utf-8")
@@ -353,7 +404,10 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
     async def get_mesh(request):
         if mesh_state["buffers"] is None:
             return JSONResponse(None)
-        return JSONResponse(mesh_state["buffers"])
+        buf = mesh_state["buffers"]
+        if mesh_color is not None:
+            buf = {**buf, "color": mesh_color}
+        return JSONResponse(buf)
 
     async def get_skeletons(request):
         """Return all loaded skeletons."""
@@ -361,6 +415,25 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         for name, state in skeleton_states.items():
             result[name] = state["buffers"]
         return JSONResponse(result if result else None)
+
+    async def get_extra_meshes(request):
+        """Return all extra meshes (for multi-mesh / contact mode)."""
+        if not extra_mesh_states:
+            return JSONResponse(None)
+        result = {}
+        for name, state in extra_mesh_states.items():
+            result[name] = {
+                **state["buffers"],
+                "color": state.get("color", [0.55, 0.55, 0.6]),
+                "opacity": state.get("opacity", 1.0),
+            }
+        return JSONResponse(result)
+
+    async def get_contact_sites(request):
+        """Return contact-site overlay data."""
+        if _contact_state is None:
+            return JSONResponse(None)
+        return JSONResponse(_contact_state)
 
     async def get_state(request):
         if state_path.exists():
@@ -3081,14 +3154,21 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             except FileNotFoundError:
                 pass
 
-    async def on_startup():
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app):
         asyncio.create_task(file_watcher())
+        yield
 
     app = Starlette(
+        lifespan=lifespan,
         routes=[
             Route("/", index),
             Route("/mesh", get_mesh),
             Route("/skeletons", get_skeletons),
+            Route("/extra_meshes", get_extra_meshes),
+            Route("/contact_sites", get_contact_sites),
             Route("/loaded", get_loaded),
             Route("/state", get_state, methods=["GET"]),
             Route("/save_availability", get_save_availability, methods=["GET"]),
@@ -3135,20 +3215,38 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],
-        on_startup=[on_startup],
     )
 
     return app
 
 
-def view(
-    mesh_path: str | Path | None = None,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 8777,
-    no_browser: bool = False,
-):
-    """Launch the interactive viewer."""
+def _has_running_loop() -> bool:
+    """Check if we're inside an already-running asyncio event loop (e.g. Jupyter)."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+# Track background server so it can be stopped / replaced
+_active_server = None
+
+
+def stop_viewer():
+    """Stop the background viewer server (Jupyter only)."""
+    global _active_server
+    if _active_server is not None:
+        _active_server.should_exit = True
+        _active_server = None
+
+
+def _launch_app(app, *, host: str, port: int, no_browser: bool):
+    """Shared launcher: print info, open browser, run uvicorn."""
+    global _active_server
+
     try:
         import uvicorn
     except ImportError:
@@ -3157,7 +3255,10 @@ def view(
             "  pip install uvicorn[standard]"
         )
 
-    app = _create_app(mesh_path, port=port)
+    # Stop any previous background server on this port
+    if _active_server is not None:
+        _active_server.should_exit = True
+        _active_server = None
 
     port_dir = _STATE_DIR / str(port)
     url = f"http://{host}:{port}"
@@ -3177,4 +3278,325 @@ def view(
 
         threading.Timer(1.5, _open).start()
 
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    if _has_running_loop():
+        # Inside Jupyter / IPython — run uvicorn in a daemon thread
+        config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        _active_server = server
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        print(f"  Viewer running in background. Call sk.plot.stop_viewer() to stop.")
+    else:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+def view(
+    mesh_path: str | Path | None = None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8777,
+    no_browser: bool = False,
+):
+    """Launch the interactive viewer."""
+    app = _create_app(mesh_path, port=port)
+    _launch_app(app, host=host, port=port, no_browser=no_browser)
+
+
+def _bbox_from_faces(
+    mesh: trimesh.Trimesh,
+    faces_idx: np.ndarray,
+    centroid: np.ndarray,
+) -> list[list[float]] | None:
+    """AABB from a face subset, in centroid-shifted coordinates. Returns [[lo], [hi]]."""
+    faces_idx = np.asarray(faces_idx, np.int64)
+    if faces_idx.size == 0:
+        return None
+    vidx = np.unique(mesh.faces[faces_idx].ravel())
+    if vidx.size == 0:
+        return None
+    V = mesh.vertices[vidx].astype(np.float32) - centroid
+    lo = V.min(axis=0)
+    hi = V.max(axis=0)
+    return [lo.tolist(), hi.tolist()]
+
+
+def _bbox_union(
+    a: list[list[float]] | None, b: list[list[float]] | None
+) -> list[list[float]] | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    lo = np.minimum(a[0], b[0]).tolist()
+    hi = np.maximum(a[1], b[1]).tolist()
+    return [lo, hi]
+
+
+def _bbox_segments(box: list[list[float]]) -> list[list[list[float]]]:
+    """Convert [[lo_x,lo_y,lo_z],[hi_x,hi_y,hi_z]] to 12 line segments."""
+    lo, hi = box
+    c = [
+        [lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]],
+        [lo[0], hi[1], lo[2]], [lo[0], lo[1], hi[2]],
+        [hi[0], hi[1], lo[2]], [hi[0], lo[1], hi[2]],
+        [lo[0], hi[1], hi[2]], [hi[0], hi[1], hi[2]],
+    ]
+    edges = [
+        (0,1),(0,2),(0,3),(7,6),(7,5),(7,4),
+        (6,2),(6,3),(3,5),(5,1),(2,4),(4,1),
+    ]
+    return [[c[a], c[b]] for a, b in edges]
+
+
+def _as_iter(x):
+    if x is None:
+        return []
+    if isinstance(x, (list, tuple)):
+        return list(x)
+    return [x]
+
+
+def _resolve_mesh_colors(mesh_color, n: int) -> list[list[float]]:
+    """Resolve mesh_color argument into a list of [r, g, b] per mesh."""
+    DEFAULT = [
+        [0.55, 0.55, 0.6],
+        [0.6, 0.5, 0.5],
+        [0.5, 0.6, 0.5],
+        [0.5, 0.5, 0.6],
+        [0.6, 0.55, 0.5],
+    ]
+    if mesh_color == "same":
+        return [[0.55, 0.55, 0.6]] * n
+    if mesh_color is None:
+        return [DEFAULT[i % len(DEFAULT)] for i in range(n)]
+    # Array-like of RGB tuples (e.g. cm.tab20.colors)
+    colors = np.asarray(mesh_color, dtype=np.float64)
+    if colors.ndim == 1 and colors.size == 3:
+        return [colors.tolist()] * n
+    return [colors[i % len(colors)].tolist() for i in range(n)]
+
+
+def view3d(
+    skels=None,
+    meshes=None,
+    *,
+    scale: float | tuple[float, float] = 1.0,
+    mesh_color=None,
+    mesh_opacity: float = 0.2,
+    host: str = "127.0.0.1",
+    port: int = 8777,
+    no_browser: bool = False,
+):
+    """Launch viewer with pre-loaded skeletons and/or meshes.
+
+    """
+    skels = _as_iter(skels)
+    meshes = _as_iter(meshes)
+
+    # Parse scale
+    if isinstance(scale, (list, tuple)):
+        skel_scale, mesh_scale = float(scale[0]), float(scale[1])
+    else:
+        skel_scale = mesh_scale = float(scale)
+
+    # Scale meshes
+    scaled_meshes = []
+    for m in meshes:
+        if mesh_scale != 1.0:
+            mc = m.copy()
+            mc.vertices = m.vertices * mesh_scale
+            scaled_meshes.append(mc)
+        else:
+            scaled_meshes.append(m)
+
+    # Scale skeletons
+    scaled_skels = []
+    for s in skels:
+        if skel_scale != 1.0:
+            import copy
+            sc = copy.copy(s)
+            sc.nodes = s.nodes * skel_scale
+            sc.radii = {k: v * skel_scale for k, v in s.radii.items()}
+            scaled_skels.append(sc)
+        else:
+            scaled_skels.append(s)
+
+    # Resolve colors
+    colors = _resolve_mesh_colors(mesh_color, len(scaled_meshes))
+
+    # Shared centroid from all meshes
+    all_verts = [m.vertices for m in scaled_meshes if m.vertices.size]
+    centroid = (
+        np.concatenate(all_verts).mean(axis=0).astype(np.float32)
+        if all_verts
+        else np.zeros(3, dtype=np.float32)
+    )
+
+    primary = scaled_meshes[0] if scaled_meshes else None
+    primary_color = colors[0] if colors else None
+    extra = {}
+
+    for i, m in enumerate(scaled_meshes[1:], 1):
+        buffers = _mesh_to_buffers(m, centroid=centroid)
+        extra[f"mesh_{i}"] = {
+            "mesh": m,
+            "buffers": buffers,
+            "color": colors[i],
+            "opacity": mesh_opacity,
+        }
+
+    skel_pairs = [(f"skel_{i}", s) for i, s in enumerate(scaled_skels)]
+
+    app = _create_app(
+        port=port,
+        preload_mesh=primary,
+        preload_centroid=centroid if len(scaled_meshes) > 1 else None,
+        extra_meshes=extra if extra else None,
+        preload_skeletons=skel_pairs if skel_pairs else None,
+        mesh_color=primary_color,
+    )
+
+    _launch_app(app, host=host, port=port, no_browser=no_browser)
+
+
+def view_contacts(
+    A: trimesh.Trimesh,
+    B: trimesh.Trimesh,
+    contacts,  # ContactSites
+    *,
+    scale: float = 1.0,
+    color_A: tuple[float, float, float] = (0.82, 0.86, 1.00),
+    color_B: tuple[float, float, float] = (1.00, 0.85, 0.85),
+    sides: str = "A",
+    show_aabb: bool = True,
+    aabb_mode: str = "union",
+    host: str = "127.0.0.1",
+    port: int = 8777,
+    no_browser: bool = False,
+):
+    """Visualize two meshes with contact-site overlays in the web viewer."""
+    # Shared centroid from both meshes
+    all_verts = np.concatenate(
+        [A.vertices.astype(np.float32), B.vertices.astype(np.float32)]
+    )
+    centroid = all_verts.mean(axis=0)
+
+    # Scale meshes
+    A_scaled = A.copy()
+    B_scaled = B.copy()
+    if scale != 1.0:
+        A_scaled.vertices = A.vertices * float(scale)
+        B_scaled.vertices = B.vertices * float(scale)
+        centroid = centroid * float(scale)
+
+    # Buffers for A (primary) and B (extra)
+    buf_A = _mesh_to_buffers(A_scaled, centroid=centroid)
+    buf_B = _mesh_to_buffers(B_scaled, centroid=centroid)
+
+    extra_meshes = {
+        "mesh_B": {
+            "mesh": B_scaled,
+            "buffers": buf_B,
+            "color": list(color_B),
+            "opacity": 1.0,
+        },
+    }
+
+    # Build contact sites as annotations (highlights + edge_groups)
+    SITE_COLORS = [
+        [1.0, 0.4, 0.1],   # orange
+        [0.2, 0.6, 1.0],   # blue
+        [0.1, 0.9, 0.4],   # green
+        [0.9, 0.2, 0.8],   # magenta
+        [1.0, 0.9, 0.1],   # yellow
+        [0.0, 0.85, 0.7],  # teal
+        [0.95, 0.5, 0.5],  # salmon
+        [0.6, 0.4, 1.0],   # violet
+    ]
+
+    s = sides.lower()
+    doA = s in ("a", "both")
+    doB = s in ("b", "both")
+    n_sites = max(
+        len(contacts.faces_A) if doA else 0,
+        len(contacts.faces_B) if doB else 0,
+    )
+
+    highlights = []
+    edge_groups = []
+
+    for i in range(n_sites):
+        col = SITE_COLORS[i % len(SITE_COLORS)]
+        bbox_a, bbox_b = None, None
+
+        if doA and i < len(contacts.faces_A):
+            fa = np.asarray(contacts.faces_A[i], np.int64)
+            if fa.size > 0:
+                bbox_a = _bbox_from_faces(A_scaled, fa, centroid)
+                side_label = "A" if (doA and doB) else ""
+                highlights.append({
+                    "faces": fa.tolist(),
+                    "color": col,
+                    "label": f"Site {i}{side_label} ({fa.size} faces)",
+                    "meshKey": "primary",
+                })
+
+        if doB and i < len(contacts.faces_B):
+            fb = np.asarray(contacts.faces_B[i], np.int64)
+            if fb.size > 0:
+                bbox_b = _bbox_from_faces(B_scaled, fb, centroid)
+                side_label = "B" if (doA and doB) else ""
+                highlights.append({
+                    "faces": fb.tolist(),
+                    "color": col,
+                    "label": f"Site {i}{side_label} ({fb.size} faces)",
+                    "meshKey": "mesh_B",
+                })
+
+        # AABB wireframe as edge_group
+        if show_aabb:
+            box = None
+            if aabb_mode == "union":
+                box = _bbox_union(bbox_a, bbox_b)
+            elif aabb_mode == "split":
+                for bb in (bbox_a, bbox_b):
+                    if bb is not None:
+                        edge_groups.append({
+                            "segments": _bbox_segments(bb),
+                            "color": col,
+                            "label": f"AABB {i}",
+                        })
+                continue  # skip union path
+            if box is not None:
+                edge_groups.append({
+                    "segments": _bbox_segments(box),
+                    "color": col,
+                    "label": f"AABB {i}",
+                })
+
+    annotations = {}
+    if highlights:
+        annotations["highlights"] = highlights
+    if edge_groups:
+        annotations["edge_groups"] = edge_groups
+
+    contact_state = {
+        "sides": sides,
+        "nSites": n_sites,
+    }
+
+    app = _create_app(
+        port=port,
+        preload_mesh=A_scaled,
+        preload_centroid=centroid,
+        extra_meshes=extra_meshes,
+        contact_state=contact_state,
+        mesh_color=list(color_A),
+    )
+
+    # Write contact annotations (after _create_app clears state dir)
+    if annotations:
+        ann_path = _STATE_DIR / str(port) / "annotations.json"
+        ann_path.write_text(json.dumps(annotations), encoding="utf-8")
+
+    _launch_app(app, host=host, port=port, no_browser=no_browser)

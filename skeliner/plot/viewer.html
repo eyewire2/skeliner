@@ -249,6 +249,18 @@
         <div id="lasso-rect"></div>
         <div id="lockIndicator" style="display:none;position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(200,50,50,0.7);color:#fff;padding:4px 12px;border-radius:4px;font-size:12px;font-family:monospace;z-index:100;cursor:pointer;" onclick="this.style.display='none'">Camera Locked (L to unlock) x</div>
 
+        <div id="contact-info" style="display:none;position:absolute;top:10px;left:10px;color:#ccc;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.6);padding:8px 12px;border-radius:4px;pointer-events:none;z-index:10">
+            <div style="color:#adf;font-weight:bold;margin-bottom:4px">Contact Sites</div>
+            <div><span class="label">Sites: </span><span id="contactNSites">-</span></div>
+            <div><span class="label">Side: </span><span id="contactSide">-</span></div>
+            <div style="margin-top:6px;color:#888;font-size:11px">
+              <div>A &mdash; toggle mesh A</div>
+              <div>B &mdash; toggle mesh B</div>
+              <div>H &mdash; toggle this panel</div>
+              <div>R &mdash; reset camera</div>
+            </div>
+        </div>
+
         <div id="info">
             <div><span class="label">Vertices: </span><span class="value" id="nVerts">-</span></div>
             <div><span class="label">Faces: </span><span class="value" id="nFaces">-</span></div>
@@ -554,6 +566,9 @@ let meshCentroid = [0, 0, 0];
             let manualHighlightFaces = new Set();
             let manualHighlightMesh = null;
 
+            // ── Extra meshes ────────────────────────────────────────────────
+            let extraMeshObjs = {};   // name → {mesh, wireframe, geometry}
+
             // ── Transform (edit mesh) state ─────────────────────────────────
             let transformMode = null;         // 'translate' | 'rotate' | null
             let transformDragging = false;    // true while mouse is held down
@@ -636,6 +651,40 @@ let meshCentroid = [0, 0, 0];
                 if (skelDataAll) {
                     for (const [name, data] of Object.entries(skelDataAll)) {
                         buildSkeleton({ name, ...data });
+                    }
+                }
+
+                // Try loading extra meshes (multi-mesh / contact mode)
+                const extraResp = await fetch("/extra_meshes");
+                const extraData = await extraResp.json();
+                if (extraData) {
+                    for (const [name, data] of Object.entries(extraData)) {
+                        buildExtraMesh(name, data);
+                    }
+                    fitCamera();
+                }
+
+                // Try loading contact mode
+                const contactResp = await fetch("/contact_sites");
+                const contactData = await contactResp.json();
+                if (contactData) {
+                    contactMode = true;
+                    // Switch to contact mode UI: hide single-mesh panels
+                    for (const id of ['info', 'controls', 'detect-panel', 'loaded-panel']) {
+                        const el = document.getElementById(id);
+                        if (el) el.style.display = 'none';
+                    }
+                    const cp = document.getElementById('contact-info');
+                    if (cp) {
+                        cp.style.display = '';
+                        document.getElementById('contactNSites').textContent = contactData.nSites || '?';
+                        document.getElementById('contactSide').textContent = contactData.sides || '?';
+                    }
+                    // Load contact annotations immediately (don't wait for file watcher)
+                    const annResp = await fetch("/annotations");
+                    const annData = await annResp.json();
+                    if (annData && (annData.highlights || annData.edge_groups)) {
+                        applyAnnotations(annData);
                     }
                 }
 
@@ -995,7 +1044,7 @@ let meshCentroid = [0, 0, 0];
                         positions[i * 9 + 6 + k] = verts[c * 3 + k];
                     }
                     const savedMeshColor = localStorage.getItem('skeliner_meshColor');
-                    const mc = savedMeshColor ? hexToRgb01(savedMeshColor) : [0.55, 0.55, 0.6];
+                    const mc = data.color || (savedMeshColor ? hexToRgb01(savedMeshColor) : [0.55, 0.55, 0.6]);
                     const r = mc[0], g = mc[1], bl = mc[2];
                     for (let v = 0; v < 3; v++) {
                         colors[i * 9 + v * 3] = r;
@@ -1039,6 +1088,58 @@ let meshCentroid = [0, 0, 0];
                 if (!data.keepCamera) fitCamera();
                 // Rebuild highlights (e.g. after edit_vertices broadcast)
                 if (manualHighlightFaces.size > 0) rebuildManualHighlight();
+            }
+
+            // ── Build extra mesh (multi-mesh / contact mode) ────────────────────
+            function buildExtraMesh(name, data) {
+                // Remove old version
+                if (extraMeshObjs[name]) {
+                    scene.remove(extraMeshObjs[name].mesh);
+                    extraMeshObjs[name].mesh.geometry.dispose();
+                    extraMeshObjs[name].mesh.material.dispose();
+                    delete extraMeshObjs[name];
+                }
+
+                const { vertices, faces, nVertices, nFaces } = data;
+                const color = data.color || [0.55, 0.55, 0.6];
+                const opacity = data.opacity != null ? data.opacity : 1.0;
+
+                const geo = new THREE.BufferGeometry();
+                const positions = new Float32Array(nFaces * 9);
+                const colors = new Float32Array(nFaces * 9);
+                const verts = new Float32Array(vertices);
+
+                for (let i = 0; i < nFaces; i++) {
+                    const a = faces[i * 3], b = faces[i * 3 + 1], c = faces[i * 3 + 2];
+                    for (let k = 0; k < 3; k++) {
+                        positions[i * 9 + k] = verts[a * 3 + k];
+                        positions[i * 9 + 3 + k] = verts[b * 3 + k];
+                        positions[i * 9 + 6 + k] = verts[c * 3 + k];
+                    }
+                    for (let v = 0; v < 3; v++) {
+                        colors[i * 9 + v * 3] = color[0];
+                        colors[i * 9 + v * 3 + 1] = color[1];
+                        colors[i * 9 + v * 3 + 2] = color[2];
+                    }
+                }
+
+                geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+                geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+                geo.computeVertexNormals();
+
+                const meshMat = new THREE.MeshPhongMaterial({
+                    vertexColors: true,
+                    side: THREE.DoubleSide,
+                    clippingPlanes: [clipPlane],
+                    shininess: 30,
+                    transparent: opacity < 1.0,
+                    opacity: opacity,
+                    depthWrite: opacity >= 1.0,
+                });
+                const obj = new THREE.Mesh(geo, meshMat);
+                scene.add(obj);
+
+                extraMeshObjs[name] = { mesh: obj, geometry: geo };
             }
 
             // ── Build skeleton ───────────────────────────────────────────────────
@@ -1199,6 +1300,12 @@ let meshCentroid = [0, 0, 0];
                     if (sg && sg.group) {
                         const skelBox = new THREE.Box3().setFromObject(sg.group);
                         box.union(skelBox);
+                    }
+                }
+                for (const em of Object.values(extraMeshObjs)) {
+                    if (em && em.geometry) {
+                        em.geometry.computeBoundingBox();
+                        box.union(em.geometry.boundingBox);
                     }
                 }
                 if (box.isEmpty()) return;
@@ -2462,10 +2569,19 @@ let meshCentroid = [0, 0, 0];
                     mouse.x = (upEvent.clientX / window.innerWidth) * 2 - 1;
                     mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
                     raycaster.setFromCamera(mouse, camera);
-                    if (!meshObj) return;
-                    const hits = raycaster.intersectObject(meshObj);
-                    if (hits.length === 0) return;
-                    const pickPoint = hits[0].point;
+                    const targets = [];
+                    if (meshObj) targets.push(meshObj);
+                    for (const em of Object.values(extraMeshObjs)) {
+                        if (em && em.mesh) targets.push(em.mesh);
+                    }
+                    if (targets.length === 0) return;
+                    let best = null;
+                    for (const t of targets) {
+                        const h = raycaster.intersectObject(t);
+                        if (h.length > 0 && (!best || h[0].distance < best.distance)) best = h[0];
+                    }
+                    if (!best) return;
+                    const pickPoint = best.point;
                     const offset = camera.position.clone().sub(controls.target);
                     controls.target.copy(pickPoint);
                     camera.position.copy(pickPoint).add(offset);
@@ -2585,12 +2701,20 @@ let meshCentroid = [0, 0, 0];
                 updateHighlightsPanel();
                 if (!annotations) return;
                 // Face highlights
-                if (annotations.highlights && meshGeometry) {
-                    const posAttr = meshGeometry.getAttribute("position");
+                if (annotations.highlights) {
                     for (const group of annotations.highlights) {
                         const fi = group.faces || [];
                         if (fi.length === 0) continue;
                         const color = group.color || [1, 0, 0];
+
+                        // Resolve source geometry (support meshKey for multi-mesh)
+                        let srcGeo = meshGeometry;
+                        if (group.meshKey && group.meshKey !== "primary" && extraMeshObjs[group.meshKey]) {
+                            srcGeo = extraMeshObjs[group.meshKey].geometry;
+                        }
+                        if (!srcGeo) continue;
+                        const posAttr = srcGeo.getAttribute("position");
+
                         const pos = new Float32Array(fi.length * 9);
                         for (let j = 0; j < fi.length; j++) {
                             const base = fi[j] * 9;
@@ -3228,7 +3352,13 @@ let meshCentroid = [0, 0, 0];
 
             const UI_PANELS = ['info', 'controls', 'detect-panel', 'selection-info', 'loaded-panel'];
             let panelsVisible = true;
+            let contactMode = false;
             function togglePanels() {
+              if (contactMode) {
+                const cp = document.getElementById('contact-info');
+                if (cp) cp.style.display = cp.style.display === 'none' ? '' : 'none';
+                return;
+              }
               panelsVisible = !panelsVisible;
               const display = panelsVisible ? '' : 'none';
               for (const id of UI_PANELS) {
@@ -3277,6 +3407,21 @@ let meshCentroid = [0, 0, 0];
               }
 
               if (transformMode) return; // block other keys during transform
+
+              // [a]/[b] toggle mesh A (primary) / B (first extra mesh)
+              if (e.key === 'a' || e.key === 'A') {
+                  if (meshObj) meshObj.visible = !meshObj.visible;
+                  if (wireframeObj) wireframeObj.visible = meshObj && meshObj.visible && document.getElementById("wireToggle").checked;
+                  return;
+              }
+              if (e.key === 'b' || e.key === 'B') {
+                  const names = Object.keys(extraMeshObjs);
+                  if (names.length > 0) {
+                      const obj = extraMeshObjs[names[0]].mesh;
+                      obj.visible = !obj.visible;
+                  }
+                  return;
+              }
 
               if (e.key === 's' || e.key === 'S') { const d = document.getElementById('shortcutsPanel'); d.open = !d.open; }
               if (e.key === 'h' || e.key === 'H') togglePanels();
