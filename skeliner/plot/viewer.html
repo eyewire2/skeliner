@@ -258,6 +258,7 @@
             <details id="shortcutsPanel" style="margin-top:4px;color:#666;font-size:11px;">
               <summary>Shortcuts (S)</summary>
               <div>Click: select</div>
+              <div>Dbl-click: select annotation</div>
               <div>Shift+click: highlight</div>
               <div>Shift+drag: lasso</div>
               <div>G: grab (drag to move)</div>
@@ -646,6 +647,7 @@ let meshCentroid = [0, 0, 0];
                 setupDragDrop();
 
                 renderer.domElement.addEventListener("click", onClickSelect);
+                renderer.domElement.addEventListener("dblclick", onDblClickAnnotation);
                 setupLassoSelection();
                 document.getElementById("hlClear").addEventListener("click", () => {
                     manualHighlightFaces.clear();
@@ -1357,6 +1359,40 @@ let meshCentroid = [0, 0, 0];
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify(selInfo),
                     }).catch(() => {});
+            }
+
+            // ── Double-click: select annotation ──────────────────────────────────
+            function onDblClickAnnotation(event) {
+                if (transformMode || !meshObj) return;
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+                const hits = raycaster.intersectObject(meshObj);
+                if (hits.length === 0) return;
+                const faceIndex = hits[0].faceIndex;
+
+                if (!currentAnnotations || !currentAnnotations.highlights) return;
+                const faceSets = currentAnnotations.highlights.map(
+                    (g) => new Set(g.faces || [])
+                );
+                for (let i = 0; i < faceSets.length; i++) {
+                    if (!faceSets[i].has(faceIndex)) continue;
+                    const annFaces = currentAnnotations.highlights[i].faces || [];
+                    // Toggle: if all faces of this annotation are already selected, remove them
+                    const allSelected = annFaces.every((fi) => manualHighlightFaces.has(fi));
+                    if (allSelected) {
+                        for (const fi of annFaces) manualHighlightFaces.delete(fi);
+                    } else {
+                        for (const fi of annFaces) manualHighlightFaces.add(fi);
+                    }
+                    rebuildManualHighlight();
+                    syncManualHighlight();
+                    const label = currentAnnotations.highlights[i].label || `highlight ${i}`;
+                    const verb = allSelected ? "Deselected" : "Selected";
+                    document.getElementById("selDetail").innerHTML =
+                        `<div>${verb}: <b>${label}</b> (${manualHighlightFaces.size} faces total)</div>`;
+                    return;
+                }
             }
 
             // ── Node selection display & sync ─────────────────────────────────────
