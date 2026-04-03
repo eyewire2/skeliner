@@ -1583,109 +1583,6 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             "facesRemoved": n_degen,
         })
 
-    async def check_fusion(request):
-        """Analyze highlighted faces for fusion signals."""
-        if mesh_state["mesh"] is None:
-            return JSONResponse(
-                {"ok": False, "error": "No mesh loaded"}, status_code=400
-            )
-
-        body = await request.json()
-        query_faces = set(body.get("faces", []))
-        if not query_faces:
-            return JSONResponse({"ok": False, "error": "No faces"})
-
-        mesh = mesh_state["mesh"]
-
-        def _run():
-            from collections import Counter
-
-            areas = mesh.area_faces
-            zero_faces = set(int(i) for i in np.where(areas < 1e-6)[0])
-
-            # Build edge-to-face, excluding zero-area
-            edge_to_face = {}
-            for fi, f in enumerate(mesh.faces):
-                if fi in zero_faces:
-                    continue
-                for i in range(3):
-                    a, b = int(f[i]), int(f[(i + 1) % 3])
-                    e = (min(a, b), max(a, b))
-                    edge_to_face.setdefault(e, []).append(fi)
-
-            # Collect all edges and vertices in the query region
-            region_edges = set()
-            region_verts = set()
-            for fi in query_faces:
-                f = mesh.faces[fi]
-                for v in f:
-                    region_verts.add(int(v))
-                for i in range(3):
-                    a, b = int(f[i]), int(f[(i + 1) % 3])
-                    region_edges.add((min(a, b), max(a, b)))
-
-            # Non-manifold edges in region
-            nm_edges = []
-            for e in region_edges:
-                faces_on_e = edge_to_face.get(e, [])
-                if len(faces_on_e) > 2:
-                    nm_edges.append((e, len(faces_on_e)))
-
-            # Duplicate faces in region
-            face_tuples = {
-                fi: tuple(sorted(int(v) for v in mesh.faces[fi])) for fi in query_faces
-            }
-            # Also check all faces sharing vertices with region
-            all_nearby = set()
-            for fi, f in enumerate(mesh.faces):
-                if fi in zero_faces:
-                    continue
-                if any(int(v) in region_verts for v in f):
-                    all_nearby.add(fi)
-
-            all_tuples = {}
-            for fi in all_nearby:
-                all_tuples[fi] = tuple(sorted(int(v) for v in mesh.faces[fi]))
-            tuple_count = Counter(all_tuples.values())
-            dup_faces = [
-                fi
-                for fi in query_faces
-                if face_tuples.get(fi) in tuple_count
-                and tuple_count[face_tuples[fi]] > 1
-            ]
-
-            # Faces with >3 neighbors
-            high_nb = []
-            for fi in query_faces:
-                f = mesh.faces[fi]
-                nb = set()
-                for i in range(3):
-                    a, b = int(f[i]), int(f[(i + 1) % 3])
-                    e = (min(a, b), max(a, b))
-                    for nfi in edge_to_face.get(e, []):
-                        if nfi != fi:
-                            nb.add(nfi)
-                if len(nb) > 3:
-                    high_nb.append(fi)
-
-            # All fusion faces: union of signals
-            fusion = set(high_nb) | set(dup_faces)
-            # Also add faces at non-manifold edges
-            for e, _ in nm_edges:
-                for fi in edge_to_face.get(e, []):
-                    if fi in query_faces:
-                        fusion.add(fi)
-
-            return {
-                "nm_edges": len(nm_edges),
-                "duplicate_faces": len(dup_faces),
-                "high_neighbor_faces": len(high_nb),
-                "fusion_faces": sorted(fusion),
-            }
-
-        result = await _run_with_log(_run)
-        return JSONResponse({"ok": True, **result})
-
     async def detect_fusions(request):
         """Run fusion detection and write results to annotations."""
         if mesh_state["mesh"] is None:
@@ -2970,7 +2867,6 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/chunk_grid", chunk_grid, methods=["POST"]),
             Route("/detect_parallel_patches", detect_parallel_patches, methods=["POST"]),
             Route("/remove_parallel_patches", do_remove_parallel, methods=["POST"]),
-            Route("/check_fusion", check_fusion, methods=["POST"]),
             Route("/detect_fusions", detect_fusions, methods=["POST"]),
             Route("/detect_rims", detect_rims, methods=["POST"]),
             Route("/detect_holes", detect_holes, methods=["POST"]),

@@ -329,6 +329,7 @@
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
                     <span style="color: #888; margin-left: 12px">Mesh:</span>
+                    <button id="hlMerge" style="margin-left: 4px">Merge</button>
                     <button id="breakAtSomaBtn" style="margin-left: 4px">Break</button>
                     <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
                 </span>
@@ -489,14 +490,7 @@
                 <button id="hlSaveBtn" style="font-size: 11px; cursor: pointer; margin-left: 4px">
                     Save
                 </button>
-                <button id="hlCheckFusion" style="font-size: 11px; cursor: pointer; margin-left: 4px">
-                    Check Fusion
-                </button>
-                <button id="hlMerge" style="font-size: 11px; cursor: pointer; margin-left: 4px">
-                    Merge
-                </button>
             </div>
-            <div id="fusionResult" style="margin-top: 4px; font-size: 11px; color: #adf; display: none"></div>
             <div id="hlList" style="margin-top: 4px; max-height: 200px; overflow-y: auto"></div>
             <div style="margin-top: 2px; display: flex; justify-content: space-between; align-items: center">
                 <div id="hlClearAllRow" style="display: none">
@@ -658,8 +652,6 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("hlSaveName").addEventListener("keydown", (e) => {
                     if (e.key === "Enter") saveHighlightAsAnnotation();
                 });
-                document.getElementById("hlCheckFusion").addEventListener("click", checkFusion);
-                document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
                 document.getElementById("showGridBtn").addEventListener("click", toggleChunkGrid);
                 document.getElementById("detectParallelBtn").addEventListener("click", detectParallelPatches);
 
@@ -701,6 +693,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
+                document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
                 document.getElementById("breakAtSomaBtn").addEventListener("click", runBreakAtSoma);
                 document.getElementById("compactMeshBtn").addEventListener("click", runCompactMesh);
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
@@ -2246,41 +2239,6 @@ let meshCentroid = [0, 0, 0];
                 rebuildManualHighlight();
                 syncManualHighlight();
                 nameInput.value = "";
-            }
-
-            async function checkFusion() {
-                if (manualHighlightFaces.size === 0) return;
-                const resultDiv = document.getElementById("fusionResult");
-                resultDiv.style.display = "block";
-                resultDiv.textContent = "Analyzing...";
-                try {
-                    const resp = await fetch("/check_fusion", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
-                    });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        const lines = [];
-                        if (data.nm_edges > 0) lines.push(`${data.nm_edges} non-manifold edges`);
-                        if (data.duplicate_faces > 0) lines.push(`${data.duplicate_faces} duplicate faces`);
-                        if (data.high_neighbor_faces > 0)
-                            lines.push(`${data.high_neighbor_faces} faces with >3 neighbors`);
-                        if (data.fusion_faces && data.fusion_faces.length > 0) {
-                            lines.push(`${data.fusion_faces.length} fusion face(s) found`);
-                            // Add fusion faces to highlight
-                            for (const fi of data.fusion_faces) manualHighlightFaces.add(fi);
-                            rebuildManualHighlight();
-                            syncManualHighlight();
-                        }
-                        resultDiv.textContent =
-                            lines.length > 0 ? lines.join(" | ") : "No fusion signals found";
-                    } else {
-                        resultDiv.textContent = data.error || "Error";
-                    }
-                } catch (e) {
-                    resultDiv.textContent = "Error: " + e.message;
-                }
             }
 
             // ── Chunk grid toggle ─────────────────────────────────────────────
