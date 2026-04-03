@@ -31,6 +31,9 @@
                 pointer-events: none;
                 max-width: 400px;
             }
+            #info details { pointer-events: auto; }
+            #info details summary { cursor: pointer; list-style: none; color: #666; }
+            #info details summary::-webkit-details-marker { display: none; }
             #info .label {
                 color: #888;
             }
@@ -252,16 +255,18 @@
             <div><span class="label">Skel nodes: </span><span class="value" id="nNodes">-</span></div>
             <div><span class="label">Camera: </span><span class="value" id="camPos">-</span></div>
             <div><span class="label">Visible faces: </span><span class="value" id="visCount">-</span></div>
-            <div style="margin-top:4px;color:#666;font-size:11px;">
+            <details id="shortcutsPanel" style="margin-top:4px;color:#666;font-size:11px;">
+              <summary>Shortcuts (S)</summary>
               <div>Click: select</div>
               <div>Shift+click: highlight</div>
               <div>Shift+drag: lasso</div>
               <div>G: grab (drag to move)</div>
               <div>T: rotate (drag to rotate)</div>
+              <div>S: toggle shortcuts</div>
               <div>H: toggle UI</div>
               <div>L: lock camera</div>
               <div>R: reset camera</div>
-            </div>
+            </details>
         </div>
 
         <div id="controls">
@@ -3230,6 +3235,7 @@ let meshCentroid = [0, 0, 0];
 
               if (transformMode) return; // block other keys during transform
 
+              if (e.key === 's' || e.key === 'S') { const d = document.getElementById('shortcutsPanel'); d.open = !d.open; }
               if (e.key === 'h' || e.key === 'H') togglePanels();
               if (e.key === 'l' || e.key === 'L') toggleCameraLock();
               if (e.key === 'r' || e.key === 'R') { localStorage.removeItem('skeliner_camera'); fitCamera(); }
