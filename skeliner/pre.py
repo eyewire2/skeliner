@@ -942,6 +942,35 @@ def _trace_border_loops(
     return loops
 
 
+def _fit_loop_circle(pts: np.ndarray) -> tuple[np.ndarray, float, np.ndarray]:
+    """Fit a circle to a 3D point loop.  Returns (center, radius, normal)."""
+    center = pts.mean(axis=0)
+    radii = np.linalg.norm(pts - center, axis=1)
+    radius = float(np.mean(radii))
+    # Normal from PCA: smallest eigenvector of covariance
+    cov = np.cov((pts - center).T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    normal = eigvecs[:, 0]  # smallest eigenvalue = normal direction
+    return center, radius, normal
+
+
+def _hermite_spline(
+    p0: np.ndarray, t0: np.ndarray,
+    p1: np.ndarray, t1: np.ndarray,
+    n: int,
+) -> np.ndarray:
+    """Evaluate cubic Hermite spline at *n* evenly spaced stations.
+
+    Returns ``(n, 3)`` array including endpoints.
+    """
+    s = np.linspace(0, 1, n)[:, None]
+    h00 = 2 * s**3 - 3 * s**2 + 1
+    h10 = s**3 - 2 * s**2 + s
+    h01 = -2 * s**3 + 3 * s**2
+    h11 = s**3 - s**2
+    return h00 * p0 + h10 * t0 + h01 * p1 + h11 * t1
+
+
 def _zipper_stitch(
     mesh: trimesh.Trimesh,
     loop_a: list[int],
@@ -949,11 +978,12 @@ def _zipper_stitch(
     vert_to_faces: list[list[int]],
     new_verts: list[np.ndarray] | None = None,
 ) -> list[list[int]]:
-    """Zipper-stitch two boundary loops, returning new triangles.
+    """Bridge two boundary loops with a tubular surface, returning new triangles.
 
-    When the gap between loops is much larger than the mesh's median
-    edge length, intermediate vertex rings are interpolated so that
-    the resulting faces match the typical mesh resolution.
+    Generates circular cross-sections along a curved Hermite-spline
+    centerline so the result looks like a realistic neurite segment.
+    The radius interpolates smoothly between the two loop radii, and
+    parallel transport keeps the frame twist-free.
 
     Parameters
     ----------
@@ -1003,113 +1033,115 @@ def _zipper_stitch(
     la = la[start_a:] + la[:start_a]
     lb = lb[start_b:] + lb[:start_b]
 
-    # ── Determine if intermediate rings are needed ────────────────
-    gap_dist = float(np.linalg.norm(ca - cb))
+    # ── Fit circles and build curved centerline ───────────────────
+    ca_fit, ra, na = _fit_loop_circle(pts_a)
+    cb_fit, rb, nb = _fit_loop_circle(pts_b)
+
+    direction = cb_fit - ca_fit
+    gap_dist = float(np.linalg.norm(direction))
+    if np.dot(na, direction) < 0:
+        na = -na
+    if np.dot(nb, direction) < 0:
+        nb = -nb
+
     median_edge = float(np.median(mesh.edges_unique_length))
-    n_rings = max(0, int(round(gap_dist / median_edge)) - 1)
+    n_rings = max(1, int(round(gap_dist / median_edge)) - 1)
 
-    if n_rings > 0:
-        # Build matched correspondences: resample both loops to the
-        # same vertex count, then interpolate intermediate rings.
-        n_pts = max(len(la), len(lb))
-        pts_la = mesh.vertices[la]
-        pts_lb = mesh.vertices[lb]
+    # Hermite tangents: scale by gap distance for natural curvature
+    tangent_a = na * gap_dist
+    tangent_b = nb * gap_dist
 
-        # Resample each loop to n_pts evenly spaced points
-        def _resample(pts, n):
-            """Resample closed loop to *n* evenly spaced points."""
-            closed = np.vstack([pts, pts[:1]])
-            seg_lens = np.linalg.norm(np.diff(closed, axis=0), axis=1)
-            cum = np.concatenate([[0], np.cumsum(seg_lens)])
-            total = cum[-1]
-            targets = np.linspace(0, total, n, endpoint=False)
-            resampled = np.empty((n, 3))
-            for i, t in enumerate(targets):
-                idx = np.searchsorted(cum, t, side="right") - 1
-                idx = min(idx, len(pts) - 1)
-                frac = (t - cum[idx]) / max(seg_lens[idx], 1e-10)
-                nxt = (idx + 1) % len(pts)
-                resampled[i] = pts[idx] * (1 - frac) + pts[nxt] * frac
-            return resampled
+    # n_rings intermediate + 2 endpoints = n_rings + 2 stations
+    n_stations = n_rings + 2
+    centers = _hermite_spline(ca_fit, tangent_a, cb_fit, tangent_b, n_stations)
+    radii = np.linspace(ra, rb, n_stations)
+    n_ring_pts = max(len(la), len(lb))
+    n_existing = len(mesh.vertices)
 
-        ring_a = _resample(pts_la, n_pts)
-        ring_b = _resample(pts_lb, n_pts)
+    # Tangent at each station via finite differences
+    tangents = np.zeros_like(centers)
+    tangents[0] = centers[1] - centers[0]
+    tangents[-1] = centers[-1] - centers[-2]
+    for i in range(1, len(centers) - 1):
+        tangents[i] = centers[i + 1] - centers[i - 1]
+    tangents /= np.linalg.norm(tangents, axis=1, keepdims=True) + 1e-10
 
-        # Create intermediate rings as new vertices
-        n_existing = len(mesh.vertices)
-        rings: list[list[int]] = []  # each ring is a list of vert indices
-        rings.append(la)  # ring 0 = loop_a (existing verts)
-        for r in range(1, n_rings + 1):
-            t = r / (n_rings + 1)
-            ring_pts = ring_a * (1 - t) + ring_b * t
-            ring_ids = []
-            for pt in ring_pts:
-                ring_ids.append(n_existing + len(new_verts_local))
-                new_verts_local.append(pt)
-            rings.append(ring_ids)
-        rings.append(lb)  # last ring = loop_b (existing verts)
+    # Parallel-transport a stable "up" vector along the centerline
+    up = np.zeros_like(tangents)
+    t0 = tangents[0]
+    seed_up = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(seed_up, t0)) > 0.9:
+        seed_up = np.array([0.0, 1.0, 0.0])
+    up[0] = seed_up - np.dot(seed_up, t0) * t0
+    up[0] /= np.linalg.norm(up[0]) + 1e-10
+    for i in range(1, len(centers)):
+        u = up[i - 1] - np.dot(up[i - 1], tangents[i]) * tangents[i]
+        norm = np.linalg.norm(u)
+        up[i] = u / norm if norm > 1e-10 else up[i - 1]
 
-        # Stitch consecutive rings
-        triangles: list[list[int]] = []
+    # ── Generate circular rings at intermediate stations ──────────
+    ring_ids: list[list[int]] = []
+    ring_ids.append(la)  # ring 0 = boundary loop A
 
-        def _vpos(vid):
-            if vid < n_existing:
-                return mesh.vertices[vid]
-            return new_verts_local[vid - n_existing]
+    angles = np.linspace(0, 2 * np.pi, n_ring_pts, endpoint=False)
+    for si in range(1, n_stations - 1):
+        c = centers[si]
+        r = radii[si]
+        u = up[si]
+        right = np.cross(tangents[si], u)
+        right /= np.linalg.norm(right) + 1e-10
+        ids = []
+        for angle in angles:
+            pt = c + r * (np.cos(angle) * u + np.sin(angle) * right)
+            ids.append(n_existing + len(new_verts_local))
+            new_verts_local.append(pt)
+        ring_ids.append(ids)
 
-        for ri in range(len(rings) - 1):
-            ra_ids = rings[ri]
-            rb_ids = rings[ri + 1]
-            na_r, nb_r = len(ra_ids), len(rb_ids)
-            ia, ib, sa, sb = 0, 0, 0, 0
-            while sa < na_r or sb < nb_r:
-                ia_n = (ia + 1) % na_r
-                ib_n = (ib + 1) % nb_r
-                can_a, can_b = sa < na_r, sb < nb_r
-                if can_a and can_b:
-                    da = float(np.linalg.norm(_vpos(ra_ids[ia_n]) - _vpos(rb_ids[ib])))
-                    db = float(np.linalg.norm(_vpos(ra_ids[ia]) - _vpos(rb_ids[ib_n])))
-                    adv_a = da <= db
-                else:
-                    adv_a = can_a
-                if adv_a:
-                    triangles.append([ra_ids[ia], ra_ids[ia_n], rb_ids[ib]])
-                    ia = ia_n
-                    sa += 1
-                else:
-                    triangles.append([ra_ids[ia], rb_ids[ib_n], rb_ids[ib]])
-                    ib = ib_n
-                    sb += 1
-    else:
-        # Direct zipper (gap is small enough)
-        na, nb = len(la), len(lb)
-        triangles: list[list[int]] = []
-        ia, ib, steps_a, steps_b = 0, 0, 0, 0
+    ring_ids.append(lb)  # last ring = boundary loop B
 
-        while steps_a < na or steps_b < nb:
-            ia_next = (ia + 1) % na
-            ib_next = (ib + 1) % nb
-            can_a, can_b = steps_a < na, steps_b < nb
+    # ── Stitch consecutive rings ──────────────────────────────────
+    triangles: list[list[int]] = []
 
+    def _vpos(vid):
+        if vid < n_existing:
+            return mesh.vertices[vid]
+        return new_verts_local[vid - n_existing]
+
+    for ri in range(len(ring_ids) - 1):
+        ra_ids = ring_ids[ri]
+        rb_ids = ring_ids[ri + 1]
+        na_r, nb_r = len(ra_ids), len(rb_ids)
+
+        # Align start of rb to closest vertex in ra
+        best_j = 0
+        best_d = float("inf")
+        p0 = _vpos(ra_ids[0])
+        for j in range(nb_r):
+            d = float(np.linalg.norm(_vpos(rb_ids[j]) - p0))
+            if d < best_d:
+                best_d = d
+                best_j = j
+        rb_ids = rb_ids[best_j:] + rb_ids[:best_j]
+
+        ia, ib, sa, sb = 0, 0, 0, 0
+        while sa < na_r or sb < nb_r:
+            ia_n = (ia + 1) % na_r
+            ib_n = (ib + 1) % nb_r
+            can_a, can_b = sa < na_r, sb < nb_r
             if can_a and can_b:
-                da = float(
-                    np.linalg.norm(mesh.vertices[la[ia_next]] - mesh.vertices[lb[ib]])
-                )
-                db = float(
-                    np.linalg.norm(mesh.vertices[la[ia]] - mesh.vertices[lb[ib_next]])
-                )
-                advance_a = da <= db
+                da = float(np.linalg.norm(_vpos(ra_ids[ia_n]) - _vpos(rb_ids[ib])))
+                db = float(np.linalg.norm(_vpos(ra_ids[ia]) - _vpos(rb_ids[ib_n])))
+                adv_a = da <= db
             else:
-                advance_a = can_a
-
-            if advance_a:
-                triangles.append([la[ia], la[ia_next], lb[ib]])
-                ia = ia_next
-                steps_a += 1
+                adv_a = can_a
+            if adv_a:
+                triangles.append([ra_ids[ia], ra_ids[ia_n], rb_ids[ib]])
+                ia = ia_n
+                sa += 1
             else:
-                triangles.append([la[ia], lb[ib_next], lb[ib]])
-                ib = ib_next
-                steps_b += 1
+                triangles.append([ra_ids[ia], rb_ids[ib_n], rb_ids[ib]])
+                ib = ib_n
+                sb += 1
 
     # Orient consistently with surrounding mesh
     ref_fis: list[int] = []
@@ -1117,12 +1149,6 @@ def _zipper_stitch(
         ref_fis.extend(vert_to_faces[vi][:5])
     if ref_fis:
         ref_n = mesh.face_normals[ref_fis].mean(axis=0)
-
-        def _vpos(vid):
-            if vid < len(mesh.vertices):
-                return mesh.vertices[vid]
-            return new_verts_local[vid - len(mesh.vertices)]
-
         tri_normals = [
             np.cross(
                 _vpos(t[1]) - _vpos(t[0]),
