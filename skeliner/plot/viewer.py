@@ -2174,27 +2174,6 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             }
         )
 
-    async def do_align_offsets(request):
-        """Align offset layers: detect and correct Z-plane offsets."""
-        if mesh_state["mesh"] is None:
-            return JSONResponse(
-                {"ok": False, "error": "No mesh loaded"}, status_code=400
-            )
-
-        from skeliner.pre import remove_offsets
-
-        mesh = mesh_state["mesh"]
-
-        def _run():
-            return remove_offsets(mesh, verbose=True)
-
-        new_mesh = await _run_with_log(_run)
-        await _apply_new_mesh(new_mesh)
-        mesh_state["offsets"] = None
-        mesh_state["mesh_stats"] = None
-
-        return JSONResponse({"ok": True})
-
     async def do_break_at_soma(request):
         """Break mesh at soma: classify components, expand soma + organelles."""
         if mesh_state["mesh"] is None:
@@ -3007,7 +2986,6 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
             Route("/edit_vertices", edit_vertices, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
-            Route("/align_offsets", do_align_offsets, methods=["POST"]),
             Route("/break_at_soma", do_break_at_soma, methods=["POST"]),
             Route("/compact_mesh", do_compact_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),

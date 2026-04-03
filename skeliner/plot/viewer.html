@@ -323,7 +323,6 @@
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
                     <span style="color: #888; margin-left: 12px">Mesh:</span>
-                    <button id="alignOffsetsBtn" style="margin-left: 4px">Align</button>
                     <button id="breakAtSomaBtn" style="margin-left: 4px">Break</button>
                     <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
                 </span>
@@ -695,10 +694,6 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
-                document.getElementById("alignOffsetsBtn").addEventListener("click", (e) => {
-                    if (e.shiftKey) _alignDismissed = true;
-                    runAlignOffsets();
-                });
                 document.getElementById("breakAtSomaBtn").addEventListener("click", runBreakAtSoma);
                 document.getElementById("compactMeshBtn").addEventListener("click", runCompactMesh);
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
@@ -1576,22 +1571,6 @@ let meshCentroid = [0, 0, 0];
                 await _runAction(
                     document.getElementById("undoBtn"),
                     () => fetch("/undo", { method: "POST" }),
-                );
-            }
-
-            let _alignDismissed = false;
-            async function runAlignOffsets() {
-                if (!_alignDismissed) {
-                    const proceed = confirm(
-                        "This feature is not finished and will likely not be able to yield any meaningful results.\n\n" +
-                        "Press OK to proceed anyway, or Cancel to abort.\n\n" +
-                        "(Hold Shift while clicking Align to skip this warning in the future.)"
-                    );
-                    if (!proceed) return;
-                }
-                await _runAction(
-                    document.getElementById("alignOffsetsBtn"),
-                    () => fetch("/align_offsets", { method: "POST" }),
                 );
             }
 

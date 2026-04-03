@@ -6426,6 +6426,10 @@ def remove_parallel_patches(
 def _detect_tile_size(vertices: np.ndarray) -> int:
     """Auto-detect XY tile size from vertex coordinate clustering.
 
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
+
     EM volume tiles create vertex clusters at tile boundaries.
     Tests powers of 2 and picks the size with the strongest
     boundary clustering (highest ratio of observed to expected
@@ -6467,7 +6471,12 @@ def _detect_tile_size(vertices: np.ndarray) -> int:
 
 
 def _detect_z_resolution(vertices: np.ndarray) -> float:
-    """Auto-detect Z section spacing from vertex coordinates."""
+    """Auto-detect Z section spacing from vertex coordinates.
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
+    """
     z_unique = np.unique(np.round(vertices[:, 2], 1))
     if len(z_unique) < 2:
         return 1.0
@@ -6476,7 +6485,12 @@ def _detect_z_resolution(vertices: np.ndarray) -> float:
 
 
 def _cluster_xy(points: np.ndarray, radius: float) -> list[np.ndarray]:
-    """Cluster 2-D points by proximity (connected components)."""
+    """Cluster 2-D points by proximity (connected components).
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
+    """
     if len(points) < 2:
         return [points] if len(points) else []
     tree = KDTree(points)
@@ -6506,6 +6520,10 @@ def _match_contour_offset(
     search_radius: int = 10,
 ) -> tuple[np.ndarray, float]:
     """Find the XY translation that best aligns *source* onto *target*.
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
 
     Searches a grid of ``±search_radius`` voxels around multiple
     starting points (centroid difference and zero) to avoid missing
@@ -6538,6 +6556,10 @@ def find_offsets(
     verbose: bool = False,
 ) -> list[dict]:
     """Detect Z-plane alignment offsets from EM volume registration errors.
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
 
     Scans the mesh for flat Z-facing cap faces that close off the tube
     at broken Z-boundaries.  Pairs FLOOR (cap pointing up) and CEIL
@@ -6827,6 +6849,10 @@ def remove_offsets(
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Correct vertex positions for detected Z-plane alignment offsets.
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
 
     Translates vertices on the shifted side of each gap by the inverse
     offset vector, then removes the flat cap faces at the gap boundaries.
