@@ -8,9 +8,10 @@ import numpy as np
 import trimesh
 from scipy.spatial import KDTree
 
-from skeliner.dataclass import Soma
+from skeliner.dataclass import Discarded, MeshComponents, Neurites, Organelles, Soma
 
 __all__ = [
+    "break_up_mesh",
     "compact_mesh",
     "compute_mesh_stats",
     "fill_holes",
@@ -2256,13 +2257,42 @@ def _face_components(faces, edge_to_faces, face_indices):
     return components
 
 
+def _build_org_output(
+    org_dc: Organelles | None,
+    orig_mask: np.ndarray,
+    expanded_mask: np.ndarray,
+) -> Organelles:
+    """Build an Organelles dataclass from break_up_mesh results."""
+    if org_dc is not None:
+        return Organelles(
+            pocket=org_dc.pocket,
+            isolated=org_dc.isolated,
+            expanded=expanded_mask & ~(org_dc.pocket | org_dc.isolated),
+            mesh_stats=org_dc.mesh_stats,
+        )
+    # Raw mask input — put everything in expanded, no pocket/isolated split
+    nF = len(orig_mask)
+    from skeliner.dataclass import MeshStats
+
+    return Organelles(
+        pocket=np.zeros(nF, dtype=bool),
+        isolated=np.zeros(nF, dtype=bool),
+        expanded=expanded_mask,
+        mesh_stats=MeshStats(
+            outward_dots=np.zeros(nF, dtype=np.float32),
+            face_comp=np.zeros(nF, dtype=np.intp),
+            main_ci=0,
+        ),
+    )
+
+
 def break_up_mesh(
     mesh: trimesh.Trimesh,
     soma: Soma,
-    organelle: np.ndarray,
+    organelle: np.ndarray | Organelles,
     *,
     verbose: bool = False,
-) -> tuple[Soma, np.ndarray, list[np.ndarray], list[np.ndarray]]:
+) -> MeshComponents:
     """Break the mesh using soma and organelles, classify the pieces.
 
     Removes soma + organelle faces, finds connected components of
@@ -2283,23 +2313,21 @@ def break_up_mesh(
     mesh : trimesh.Trimesh
     soma : Soma
         From ``find_soma_via_ring_cutoff`` (must have ``.verts``).
-    organelle : np.ndarray
-        (nFaces,) bool — union of pocket + isolated masks.
+    organelle : np.ndarray or Organelles
+        ``(nFaces,)`` bool mask, or an :class:`Organelles` instance
+        (the combined ``.mask`` is used).
     verbose : bool
 
     Returns
     -------
-    soma : Soma
-        Refitted ellipsoid with expanded vertex set.
-    organelle : np.ndarray
-        (nFaces,) bool — expanded organelle mask.
-    neurites : list[np.ndarray]
-        Face index arrays for each neurite component, sorted by
-        descending face count.
-    discarded : list[np.ndarray]
-        Face index arrays for small fragments below the auto
-        threshold, sorted by descending face count.
+    MeshComponents
     """
+    # Accept either raw mask or Organelles dataclass
+    if isinstance(organelle, Organelles):
+        org_dc = organelle
+        organelle = org_dc.mask
+    else:
+        org_dc = None
     faces = np.asarray(mesh.faces)
     verts = mesh.vertices
     nF = len(faces)
@@ -2366,8 +2394,14 @@ def break_up_mesh(
 
     if len(remain_fi) == 0:
         if verbose:
-            print("break_at_soma: no remaining faces after exclusion")
-        return soma, organelle, []
+            print("break_up_mesh: no remaining faces after exclusion")
+        org_out = _build_org_output(org_dc, organelle, organelle)
+        return MeshComponents(
+            soma=soma,
+            organelles=org_out,
+            neurites=Neurites([]),
+            discarded=Discarded([]),
+        )
 
     ef_all = _build_edge_to_faces(faces, usable)
     components = _face_components(faces, ef_all, remain_fi)
@@ -2450,7 +2484,13 @@ def break_up_mesh(
             f"organelle {organelle_expanded.sum():,} faces"
         )
 
-    return soma, organelle_expanded, neurites, discarded
+    org_out = _build_org_output(org_dc, organelle, organelle_expanded)
+    return MeshComponents(
+        soma=soma,
+        organelles=org_out,
+        neurites=Neurites(neurites),
+        discarded=Discarded(discarded),
+    )
 
 
 # Keep old name as alias

@@ -2090,27 +2090,22 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             )
 
         from skeliner.pre import break_up_mesh
-        from skeliner.dataclass import Organelles
 
         mesh = mesh_state["mesh"]
-        org_mask = org.mask
 
         def _run():
-            return break_up_mesh(mesh, soma, org_mask, verbose=True)
+            return break_up_mesh(mesh, soma, org, verbose=True)
 
-        new_soma, new_org, neurites, discarded = await _run_with_log(_run)
+        result = await _run_with_log(_run)
 
-        mesh_state["soma"] = new_soma
-        mesh_state["organelles"] = Organelles(
-            pocket=org.pocket,
-            isolated=org.isolated,
-            expanded=new_org & ~(org.pocket | org.isolated),
-            mesh_stats=org.mesh_stats,
-        )
+        mesh_state["soma"] = result.soma
+        mesh_state["organelles"] = result.organelles
 
         # Build annotations
         centroid = mesh_state["centroid"]
         faces = mesh.faces
+        new_soma = result.soma
+        new_org = result.organelles.mask
 
         soma_vset = set(int(v) for v in new_soma.verts)
         soma_faces = [
@@ -2155,7 +2150,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             [0.0, 0.9, 0.9],
             [1.0, 0.2, 0.6],
         ]
-        for i, nf in enumerate(neurites):
+        for i, nf in enumerate(result.neurites):
             c = neurite_colors[i % len(neurite_colors)]
             highlights.append(
                 {
@@ -2165,7 +2160,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                 }
             )
 
-        for i, df in enumerate(discarded):
+        for i, df in enumerate(result.discarded):
             highlights.append(
                 {
                     "faces": df.tolist(),
@@ -2189,8 +2184,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         return JSONResponse(
             {
                 "ok": True,
-                "nNeurites": len(neurites),
-                "nDiscarded": len(discarded),
+                "nNeurites": len(result.neurites),
+                "nDiscarded": len(result.discarded),
                 "somaVerts": len(new_soma.verts),
                 "orgFaces": int(new_org.sum()),
             }

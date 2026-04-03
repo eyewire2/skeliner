@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from . import post as _post_mod
 
 __all__ = [
+    "Discarded",
+    "MeshComponents",
+    "Neurites",
     "Soma",
     "Skeleton",
     "ContactSeeds",
@@ -100,7 +103,7 @@ class Organelles:
     isolated : (nFaces,) bool
         Isolated (disconnected) organelle faces.
     expanded : (nFaces,) bool
-        Faces added by :func:`~skeliner.pre.break_at_soma`.
+        Faces added by :func:`~skeliner.pre.break_up_mesh`.
     mesh_stats : MeshStats
         Precomputed mesh statistics from
         :func:`~skeliner.pre.compute_mesh_stats`.
@@ -115,6 +118,59 @@ class Organelles:
     def mask(self) -> np.ndarray:
         """Combined bool mask (pocket | isolated | expanded)."""
         return self.pocket | self.isolated | self.expanded
+
+
+# -----------------------------------------------------------------------------
+# Neurites / Discarded / MeshComponents dataclasses
+# -----------------------------------------------------------------------------
+@dataclass(slots=True)
+class Neurites:
+    """Neurite components from :func:`~skeliner.pre.break_up_mesh`.
+
+    Each element of *components* is a face-index array for one neurite,
+    sorted by descending face count.
+    """
+
+    components: list[np.ndarray]
+
+    def __len__(self) -> int:
+        return len(self.components)
+
+    def __iter__(self):
+        return iter(self.components)
+
+    def __getitem__(self, idx):
+        return self.components[idx]
+
+
+@dataclass(slots=True)
+class Discarded:
+    """Small fragments below the auto threshold from :func:`~skeliner.pre.break_up_mesh`."""
+
+    components: list[np.ndarray]
+
+    def __len__(self) -> int:
+        return len(self.components)
+
+    def __iter__(self):
+        return iter(self.components)
+
+    def __getitem__(self, idx):
+        return self.components[idx]
+
+
+@dataclass(slots=True)
+class MeshComponents:
+    """Result of :func:`~skeliner.pre.break_up_mesh`.
+
+    Holds the four classified pieces of a neuron mesh after breaking
+    at the soma and organelle boundaries.
+    """
+
+    soma: "Soma"
+    organelles: Organelles
+    neurites: Neurites
+    discarded: Discarded
 
 
 # -----------------------------------------------------------------------------
