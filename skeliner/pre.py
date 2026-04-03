@@ -1114,8 +1114,7 @@ def _zipper_stitch(
             return mesh.vertices[vid]
         return new_verts_local[vid - n_existing]
 
-    # Skip la→ring[0] and ring[-1]→lb bands — those create cap faces
-    # that seal the tube ends.  Only stitch ring-to-ring.
+    # Only stitch ring-to-ring (no boundary→ring bands that seal ends).
     all_bands: list[tuple[list[int], list[int]]] = []
     for ri in range(len(ring_ids) - 1):
         all_bands.append((ring_ids[ri], ring_ids[ri + 1]))
@@ -1153,6 +1152,27 @@ def _zipper_stitch(
                 triangles.append([ra_ids[ia], rb_ids[ib_n], rb_ids[ib]])
                 ib = ib_n
                 sb += 1
+
+    # ── Weld endpoint ring verts to boundary loop verts ──────────
+    # Replace each ring[0] / ring[-1] vertex ID in the triangles with
+    # the nearest boundary loop vertex.  This connects the tube to the
+    # existing mesh without creating cap faces across the opening.
+    def _build_weld_map(ring, loop):
+        """Map each ring vert to its nearest loop vert."""
+        ring_pts = np.array([_vpos(v) for v in ring])
+        loop_pts = np.array([_vpos(v) for v in loop])
+        tree = KDTree(loop_pts)
+        _, idxs = tree.query(ring_pts)
+        return {ring[i]: loop[int(idxs[i])] for i in range(len(ring))}
+
+    weld = {}
+    weld.update(_build_weld_map(ring_ids[0], la))
+    weld.update(_build_weld_map(ring_ids[-1], lb))
+
+    if weld:
+        triangles = [
+            [weld.get(v, v) for v in tri] for tri in triangles
+        ]
 
     # Orient consistently with surrounding mesh
     ref_fis: list[int] = []
