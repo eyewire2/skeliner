@@ -1033,9 +1033,9 @@ def _zipper_stitch(
     la = la[start_a:] + la[:start_a]
     lb = lb[start_b:] + lb[:start_b]
 
-    # ── Fit circles and build curved centerline ───────────────────
-    ca_fit, ra, na = _fit_loop_circle(pts_a)
-    cb_fit, rb, nb = _fit_loop_circle(pts_b)
+    # ── Fit loops and build curved centerline ───────────────────
+    ca_fit, ra, na = _fit_loop_circle(mesh.vertices[la])
+    cb_fit, rb, nb = _fit_loop_circle(mesh.vertices[lb])
 
     direction = cb_fit - ca_fit
     gap_dist = float(np.linalg.norm(direction))
@@ -1054,7 +1054,6 @@ def _zipper_stitch(
     # n_rings intermediate + 2 endpoints = n_rings + 2 stations
     n_stations = n_rings + 2
     centers = _hermite_spline(ca_fit, tangent_a, cb_fit, tangent_b, n_stations)
-    radii = np.linspace(ra, rb, n_stations)
     n_ring_pts = max(len(la), len(lb))
     n_existing = len(mesh.vertices)
 
@@ -1079,25 +1078,61 @@ def _zipper_stitch(
         norm = np.linalg.norm(u)
         up[i] = u / norm if norm > 1e-10 else up[i - 1]
 
-    # ── Generate circular rings at intermediate stations ──────────
-    ring_ids: list[list[int]] = []
-    ring_ids.append(la)  # ring 0 = boundary loop A
+    # ── Resample both loops to n_ring_pts as local 2D offsets ─────
+    # Express each loop's vertices as offsets from its center in the
+    # local (up, right) frame at its station, so we can interpolate
+    # the actual contour shape rather than snapping to circles.
+    def _resample_loop(pts, n):
+        """Resample a closed 3D loop to *n* evenly spaced points."""
+        closed = np.vstack([pts, pts[:1]])
+        seg_lens = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+        cum = np.concatenate([[0], np.cumsum(seg_lens)])
+        total = cum[-1]
+        targets = np.linspace(0, total, n, endpoint=False)
+        resampled = np.empty((n, 3))
+        for i, t in enumerate(targets):
+            idx = np.searchsorted(cum, t, side="right") - 1
+            idx = min(idx, len(pts) - 1)
+            frac = (t - cum[idx]) / max(seg_lens[idx], 1e-10)
+            nxt = (idx + 1) % len(pts)
+            resampled[i] = pts[idx] * (1 - frac) + pts[nxt] * frac
+        return resampled
 
-    angles = np.linspace(0, 2 * np.pi, n_ring_pts, endpoint=False)
+    def _to_local_offsets(pts_3d, center, tangent, up_vec):
+        """Project 3D points to 2D offsets in the (up, right) plane."""
+        right_vec = np.cross(tangent, up_vec)
+        right_vec /= np.linalg.norm(right_vec) + 1e-10
+        rel = pts_3d - center
+        u_coords = np.dot(rel, up_vec)
+        r_coords = np.dot(rel, right_vec)
+        return np.column_stack([u_coords, r_coords])
+
+    pts_la = _resample_loop(mesh.vertices[la], n_ring_pts)
+    pts_lb = _resample_loop(mesh.vertices[lb], n_ring_pts)
+
+    offsets_a = _to_local_offsets(pts_la, centers[0], tangents[0], up[0])
+    offsets_b = _to_local_offsets(pts_lb, centers[-1], tangents[-1], up[-1])
+
+    # ── Generate shape-interpolated rings at intermediate stations ─
+    ring_ids: list[list[int]] = []
+    ring_ids.append(la)  # ring 0 = boundary loop A (existing verts)
+
     for si in range(1, n_stations - 1):
+        t = si / (n_stations - 1)  # 0 at A, 1 at B
         c = centers[si]
-        r = radii[si]
-        u = up[si]
-        right = np.cross(tangents[si], u)
-        right /= np.linalg.norm(right) + 1e-10
+        u_vec = up[si]
+        right_vec = np.cross(tangents[si], u_vec)
+        right_vec /= np.linalg.norm(right_vec) + 1e-10
+        # Blend between the two actual contour shapes
+        offsets = offsets_a * (1 - t) + offsets_b * t
         ids = []
-        for angle in angles:
-            pt = c + r * (np.cos(angle) * u + np.sin(angle) * right)
+        for j in range(n_ring_pts):
+            pt = c + offsets[j, 0] * u_vec + offsets[j, 1] * right_vec
             ids.append(n_existing + len(new_verts_local))
             new_verts_local.append(pt)
         ring_ids.append(ids)
 
-    ring_ids.append(lb)  # last ring = boundary loop B
+    ring_ids.append(lb)  # last ring = boundary loop B (existing verts)
 
     # ── Stitch consecutive rings ──────────────────────────────────
     triangles: list[list[int]] = []
