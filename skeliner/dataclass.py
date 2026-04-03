@@ -142,6 +142,15 @@ class Neurites:
     def __getitem__(self, idx):
         return self.components[idx]
 
+    def to_npz(self, path: str | Path) -> None:
+        from . import io
+        io.save_neurites_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "Neurites":
+        from . import io
+        return io.load_neurites_npz(path)
+
 
 @dataclass(slots=True)
 class Discarded:
@@ -158,6 +167,15 @@ class Discarded:
     def __getitem__(self, idx):
         return self.components[idx]
 
+    def to_npz(self, path: str | Path) -> None:
+        from . import io
+        io.save_discarded_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "Discarded":
+        from . import io
+        return io.load_discarded_npz(path)
+
 
 @dataclass(slots=True)
 class MeshComponents:
@@ -171,6 +189,15 @@ class MeshComponents:
     organelles: Organelles
     neurites: Neurites
     discarded: Discarded
+
+    def to_npz(self, path: str | Path) -> None:
+        from . import io
+        io.save_mesh_components_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "MeshComponents":
+        from . import io
+        return io.load_mesh_components_npz(path)
 
 
 # -----------------------------------------------------------------------------

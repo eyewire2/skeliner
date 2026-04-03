@@ -2199,21 +2199,34 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             )
 
         from skeliner.pre import compact_mesh
+        from skeliner.dataclass import (
+            Discarded, MeshComponents, MeshStats, Neurites, Organelles,
+        )
 
         mesh = mesh_state["mesh"]
         soma = mesh_state.get("soma")
+        org = mesh_state.get("organelles")
         n_faces_before = len(mesh.faces)
         n_verts_before = len(mesh.vertices)
+        nF = len(mesh.faces)
+
+        # Build a MeshComponents from current viewer state
+        if org is None:
+            org = Organelles(
+                pocket=np.zeros(nF, dtype=bool),
+                isolated=np.zeros(nF, dtype=bool),
+                expanded=np.zeros(nF, dtype=bool),
+                mesh_stats=MeshStats(np.zeros(nF), np.zeros(nF, dtype=np.intp), 0),
+            )
+        components = MeshComponents(
+            soma=soma, organelles=org,
+            neurites=Neurites([]), discarded=Discarded([]),
+        )
 
         def _run():
-            return compact_mesh(mesh, soma=soma, verbose=True)
+            return compact_mesh(mesh, components, return_maps=True, verbose=True)
 
-        clean, vert_map, remapped_soma, _ = await _run_with_log(_run)
-
-        # Build face map: old face index → new face index (or -1)
-        good = ~np.all(mesh.faces == mesh.faces[:, :1], axis=1)
-        face_map = np.full(n_faces_before, -1, dtype=np.int64)
-        face_map[good] = np.arange(int(good.sum()), dtype=np.int64)
+        clean, components, vert_map, face_map = await _run_with_log(_run)
 
         # Compute new centroid and the delta from old
         old_centroid = mesh_state["centroid"].copy()
@@ -2256,8 +2269,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         # Update state — compact is destructive, clear all cached face-indexed data
         mesh_state["mesh"] = clean
-        mesh_state["soma"] = remapped_soma
-        mesh_state["organelles"] = None
+        mesh_state["soma"] = components.soma
+        mesh_state["organelles"] = components.organelles
         mesh_state["mesh_stats"] = None
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None

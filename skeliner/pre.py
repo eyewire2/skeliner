@@ -7135,25 +7135,25 @@ def remove_offsets(
 
 def compact_mesh(
     mesh: trimesh.Trimesh,
+    components: MeshComponents,
     *,
-    soma: Soma | None = None,
-    components: MeshComponents | None = None,
+    return_maps: bool = False,
     verbose: bool = False,
-) -> tuple[trimesh.Trimesh, np.ndarray, Soma | None, MeshComponents | None]:
+) -> tuple[trimesh.Trimesh, MeshComponents] | tuple[trimesh.Trimesh, MeshComponents, np.ndarray, np.ndarray]:
     """Remove degenerate faces, drop unreferenced vertices, reindex.
 
     Call once at the end of preprocessing, after all face removals.
-    Remaps vertex indices in *soma* and face indices / masks in
-    *components* so they stay valid against the returned mesh.
+    Remaps all face/vertex-indexed data inside *components*.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Mesh after face removals.
-    soma : Soma or None
-        If provided, ``soma.verts`` is remapped to the new indices.
-    components : MeshComponents or None
-        If provided, all face-indexed data inside is remapped.
+    components : MeshComponents
+        All face-indexed data is remapped to match the compacted mesh.
+    return_maps : bool, default False
+        If True, also return ``vert_map`` and ``face_map`` arrays for
+        remapping external data (e.g. viewer annotations).
     verbose : bool, default False
         Print summary.
 
@@ -7161,13 +7161,12 @@ def compact_mesh(
     -------
     clean : trimesh.Trimesh
         Compacted mesh with no unreferenced vertices.
-    vert_map : np.ndarray
-        ``(nOldVerts,)`` int64 — ``vert_map[old]`` is the new index,
-        or ``-1`` if the vertex was removed.
-    soma : Soma or None
-        Remapped soma, or None if not provided.
-    components : MeshComponents or None
-        Remapped components, or None if not provided.
+    components : MeshComponents
+        Remapped components.
+    vert_map : np.ndarray *(only when return_maps=True)*
+        ``(nOldVerts,)`` int64 — ``vert_map[old]`` → new index, or -1.
+    face_map : np.ndarray *(only when return_maps=True)*
+        ``(nOldFaces,)`` int64 — ``face_map[old]`` → new index, or -1.
     """
     # Strip degenerate faces (from _rebuild_mesh) and compact vertices
     good = ~np.all(mesh.faces == mesh.faces[:, :1], axis=1)
@@ -7196,47 +7195,47 @@ def compact_mesh(
 
     # Remap soma
     remapped_soma = None
-    if soma is not None:
-        remapped_soma = soma.remap(vert_map)
+    if components.soma is not None:
+        remapped_soma = components.soma.remap(vert_map)
         if verbose:
-            n_before = len(soma.verts) if soma.verts is not None else 0
+            n_before = len(components.soma.verts) if components.soma.verts is not None else 0
             n_after = len(remapped_soma.verts) if remapped_soma.verts is not None else 0
             print(
                 f"[skeliner.pre] Soma remap: {n_before:,} → {n_after:,} verts "
                 f"({n_before - n_after:,} dropped)"
             )
 
-    # Remap MeshComponents
-    remapped_components = None
-    if components is not None:
-        # Build face index map: old_fi → new_fi (or -1 if removed)
-        face_map = np.full(len(mesh.faces), -1, dtype=np.int64)
-        face_map[good] = np.arange(int(good.sum()), dtype=np.int64)
+    # Build face index map: old_fi → new_fi (or -1 if removed)
+    face_map = np.full(len(mesh.faces), -1, dtype=np.int64)
+    face_map[good] = np.arange(int(good.sum()), dtype=np.int64)
 
-        def _remap_face_list(arrays):
-            out = []
-            for arr in arrays:
-                mapped = face_map[arr]
-                mapped = mapped[mapped >= 0]
-                if len(mapped) > 0:
-                    out.append(mapped)
-            return out
+    def _remap_face_list(arrays):
+        out = []
+        for arr in arrays:
+            mapped = face_map[arr]
+            mapped = mapped[mapped >= 0]
+            if len(mapped) > 0:
+                out.append(mapped)
+        return out
 
-        org = components.organelles
-        remapped_org = Organelles(
-            pocket=org.pocket[good],
-            isolated=org.isolated[good],
-            expanded=org.expanded[good],
-            mesh_stats=org.mesh_stats,
-        )
-        remapped_components = MeshComponents(
-            soma=remapped_soma if remapped_soma is not None else components.soma,
-            organelles=remapped_org,
-            neurites=Neurites(_remap_face_list(components.neurites)),
-            discarded=Discarded(_remap_face_list(components.discarded)),
-        )
+    organelles = components.organelles
+    remapped_org = Organelles(
+        pocket=organelles.pocket[good],
+        isolated=organelles.isolated[good],
+        expanded=organelles.expanded[good],
+        mesh_stats=organelles.mesh_stats,
+    )
 
-    return clean, vert_map, remapped_soma, remapped_components
+    remapped = MeshComponents(
+        soma=remapped_soma,
+        organelles=remapped_org,
+        neurites=Neurites(_remap_face_list(components.neurites)),
+        discarded=Discarded(_remap_face_list(components.discarded)),
+    )
+
+    if return_maps:
+        return clean, remapped, vert_map, face_map
+    return clean, remapped
 
 
 # -----------------------------------------------------------------------------
@@ -7251,7 +7250,6 @@ class PreprocessResult:
 
     mesh: trimesh.Trimesh
     components: MeshComponents
-    vert_map: np.ndarray
 
 
 def preprocess(
@@ -7334,14 +7332,13 @@ def preprocess(
         )
 
     # 7. Compact (remaps everything in MeshComponents)
-    mesh, vert_map, _, components = compact_mesh(
-        mesh, soma=soma, components=components, verbose=verbose
+    mesh, components = compact_mesh(
+        mesh, components=components, verbose=verbose
     )
 
     return PreprocessResult(
         mesh=mesh,
         components=components,
-        vert_map=vert_map,
     )
 
 
