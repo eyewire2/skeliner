@@ -426,24 +426,23 @@
                     background: #111; color: #eee; border: 1px solid #555; border-radius: 3px;
                 " />
             </div>
-            <div style="display:flex;gap:12px;margin-bottom:12px">
+            <div style="display:flex;gap:16px;margin-bottom:12px">
                 <div>
-                    <div style="color:#888;margin-bottom:4px">OBJ</div>
-                    <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Mesh</button>
+                    <div style="color:#888;margin-bottom:4px;font-size:11px">OBJ</div>
+                    <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Mesh</button>
+                    <div style="color:#888;margin-bottom:4px;margin-top:10px;font-size:11px">SWC</div>
+                    <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Skeleton</button>
+                    <div style="color:#888;margin-bottom:4px;margin-top:10px;font-size:11px">JSON</div>
+                    <button id="saveAnnotations" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Annotations</button>
                 </div>
                 <div>
-                    <div style="color:#888;margin-bottom:4px">NPZ</div>
-                    <button id="saveSkelNpz" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Skeleton</button>
-                    <button id="saveSomaNpz" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Soma</button>
-                    <button id="saveOrgMasks" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Organelles</button>
-                </div>
-                <div>
-                    <div style="color:#888;margin-bottom:4px">SWC</div>
-                    <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Skeleton</button>
-                </div>
-                <div>
-                    <div style="color:#888;margin-bottom:4px">JSON</div>
-                    <button id="saveAnnotations" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Annotations</button>
+                    <div style="color:#888;margin-bottom:4px;font-size:11px">NPZ</div>
+                    <button id="saveSkelNpz" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Skeleton</button>
+                    <button id="saveSomaNpz" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Soma</button>
+                    <button id="saveOrgMasks" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Organelles</button>
+                    <button id="saveNeurites" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Neurites</button>
+                    <button id="saveDiscarded" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Discarded</button>
+                    <button id="saveComponents" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Components</button>
                 </div>
             </div>
             <hr style="border:none;border-top:1px solid #444;margin:12px 0" />
@@ -691,6 +690,9 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveSkelNpz").addEventListener("click", () => doSave("npz_skel"));
                 document.getElementById("saveSomaNpz").addEventListener("click", () => doSave("soma"));
                 document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
+                document.getElementById("saveComponents").addEventListener("click", () => doSave("components"));
+                document.getElementById("saveNeurites").addEventListener("click", () => doSave("neurites"));
+                document.getElementById("saveDiscarded").addEventListener("click", () => doSave("discarded"));
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
                 document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
@@ -1727,6 +1729,19 @@ let meshCentroid = [0, 0, 0];
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }
+                    }
+                    if (mode === "components" || mode === "all") {
+                        try {
+                            saved.push(await downloadFile(`/export_components?prefix=${pfx}`));
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
+                    }
+                    if (mode === "neurites") {
+                        saved.push(await downloadFile(`/export_neurites?prefix=${pfx}`));
+                    }
+                    if (mode === "discarded") {
+                        saved.push(await downloadFile(`/export_discarded?prefix=${pfx}`));
                     }
                     if (mode === "annotations" || mode === "all") {
                         try {

@@ -142,6 +142,24 @@ def _is_soma_data(path: Path) -> bool:
         return False
 
 
+def _is_components_data(path: Path) -> bool:
+    """Check if an npz file contains MeshComponents data."""
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            return "n_neurites" in data and "n_discarded" in data
+    except Exception:
+        return False
+
+
+def _is_neurites_data(path: Path) -> bool:
+    """Check if an npz file contains Neurites data."""
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            return "n" in data and "c0" in data and "n_neurites" not in data
+    except Exception:
+        return False
+
+
 def _is_l2_graph(path: Path) -> bool:
     """Check if an npz file is an L2 graph (not a skeliner skeleton)."""
     with np.load(path, allow_pickle=False) as data:
@@ -566,6 +584,115 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
                         "type": "soma",
                         "name": filename,
                     }
+                )
+
+            elif suffix == ".npz" and _is_components_data(tmp_path):
+                from skeliner.io import load_components_npz
+
+                comp = load_components_npz(tmp_path)
+
+                # Store state
+                if comp.soma is not None:
+                    mesh_state["soma"] = comp.soma
+                mesh_state["organelles"] = comp.organelles
+                mesh_state["mesh_stats"] = comp.organelles.mesh_stats
+
+                # Build annotations
+                ann = {}
+                if annotations_path.exists():
+                    ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+                ann["highlights"] = []
+
+                mesh = mesh_state.get("mesh")
+                centroid = mesh_state.get("centroid", np.zeros(3))
+
+                # Soma
+                if comp.soma is not None and mesh is not None and comp.soma.verts is not None:
+                    soma_vset = set(int(v) for v in comp.soma.verts)
+                    soma_faces = [
+                        int(fi)
+                        for fi in range(len(mesh.faces))
+                        if sum(1 for v in mesh.faces[fi] if int(v) in soma_vset) >= 2
+                    ]
+                    ann["highlights"].append(
+                        {"faces": soma_faces, "color": [0.9, 0.5, 0.9], "label": "soma"}
+                    )
+                    ann["ellipsoids"] = [
+                        {
+                            "center": (comp.soma.center - centroid).tolist(),
+                            "axes": comp.soma.axes.tolist(),
+                            "R": comp.soma.R.tolist(),
+                            "color": [0.9, 0.5, 0.9],
+                        }
+                    ]
+
+                # Organelles (non-soma)
+                org_mask = comp.organelles.mask
+                if mesh is not None and org_mask.any():
+                    ann["highlights"].append(
+                        {
+                            "faces": np.where(org_mask)[0].tolist(),
+                            "color": [1.0, 0.8, 0.0],
+                            "label": f"organelles ({int(org_mask.sum()):,}f)",
+                        }
+                    )
+
+                # Neurites
+                neurite_colors = [
+                    [0.2, 0.6, 1.0], [0.3, 1.0, 0.3], [1.0, 0.4, 0.1],
+                    [0.0, 0.9, 0.9], [1.0, 0.2, 0.6],
+                ]
+                for i, nf in enumerate(comp.neurites):
+                    c = neurite_colors[i % len(neurite_colors)]
+                    ann["highlights"].append(
+                        {"faces": nf.tolist(), "color": c, "label": f"neurite {i} ({len(nf):,}f)"}
+                    )
+
+                # Discarded
+                for i, df in enumerate(comp.discarded):
+                    ann["highlights"].append(
+                        {"faces": df.tolist(), "color": [0.5, 0.5, 0.5], "label": f"discarded {i} ({len(df):,}f)"}
+                    )
+
+                annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+                loaded = []
+                if comp.soma is not None:
+                    loaded.append("soma")
+                loaded.append(f"organelles={int(org_mask.sum()):,}")
+                loaded.append(f"{len(comp.neurites)} neurites")
+                loaded.append(f"{len(comp.discarded)} discarded")
+                print(f"Loaded components: {', '.join(loaded)}")
+                await broadcast({"type": "annotations_updated"})
+                return JSONResponse(
+                    {"ok": True, "type": "components", "name": filename, "loaded": loaded}
+                )
+
+            elif suffix == ".npz" and _is_neurites_data(tmp_path):
+                from skeliner.io import load_neurites_npz
+
+                neurites = load_neurites_npz(tmp_path)
+
+                ann = {}
+                if annotations_path.exists():
+                    ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+                if "highlights" not in ann:
+                    ann["highlights"] = []
+
+                neurite_colors = [
+                    [0.2, 0.6, 1.0], [0.3, 1.0, 0.3], [1.0, 0.4, 0.1],
+                    [0.0, 0.9, 0.9], [1.0, 0.2, 0.6],
+                ]
+                for i, nf in enumerate(neurites):
+                    c = neurite_colors[i % len(neurite_colors)]
+                    ann["highlights"].append(
+                        {"faces": nf.tolist(), "color": c, "label": f"neurite {i} ({len(nf):,}f)"}
+                    )
+
+                annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+                print(f"Loaded neurites: {len(neurites)} components")
+                await broadcast({"type": "annotations_updated"})
+                return JSONResponse(
+                    {"ok": True, "type": "neurites", "name": filename}
                 )
 
             elif suffix == ".npz" and _is_l2_graph(tmp_path):
@@ -2100,6 +2227,8 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
 
         mesh_state["soma"] = result.soma
         mesh_state["organelles"] = result.organelles
+        mesh_state["neurites"] = result.neurites
+        mesh_state["discarded"] = result.discarded
 
         # Build annotations
         centroid = mesh_state["centroid"]
@@ -2390,6 +2519,94 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             content=content,
             media_type="application/octet-stream",
             headers={"Content-Disposition": f'attachment; filename="{prefix}soma.npz"'},
+        )
+
+    async def export_components(request):
+        """Export MeshComponents (soma + organelles + neurites + discarded)."""
+        from starlette.responses import Response
+        from skeliner.io import save_components_npz
+        from skeliner.dataclass import Discarded, MeshComponents, Neurites
+        import tempfile
+
+        soma = mesh_state.get("soma")
+        org = mesh_state.get("organelles")
+        if org is None:
+            return JSONResponse(
+                {"ok": False, "error": "No organelle data"}, status_code=400
+            )
+
+        # Build MeshComponents from current state
+        # Neurites/discarded may not exist if break_up_mesh hasn't run
+        components = MeshComponents(
+            soma=soma,
+            organelles=org,
+            neurites=mesh_state.get("neurites", Neurites([])),
+            discarded=mesh_state.get("discarded", Discarded([])),
+        )
+
+        prefix = request.query_params.get("prefix", "")
+        tmp = Path(tempfile.mktemp(suffix=".npz"))
+        save_components_npz(components, tmp)
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{prefix}components.npz"'
+            },
+        )
+
+    async def export_neurites(request):
+        """Export neurite face arrays as NPZ."""
+        from starlette.responses import Response
+        from skeliner.io import save_neurites_npz
+        from skeliner.dataclass import Neurites
+        import tempfile
+
+        neurites = mesh_state.get("neurites")
+        if neurites is None or len(neurites) == 0:
+            return JSONResponse(
+                {"ok": False, "error": "No neurites (run Break first)"}, status_code=400
+            )
+
+        prefix = request.query_params.get("prefix", "")
+        tmp = Path(tempfile.mktemp(suffix=".npz"))
+        save_neurites_npz(neurites, tmp)
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{prefix}neurites.npz"'
+            },
+        )
+
+    async def export_discarded(request):
+        """Export discarded fragment face arrays as NPZ."""
+        from starlette.responses import Response
+        from skeliner.io import save_discarded_npz
+        from skeliner.dataclass import Discarded
+        import tempfile
+
+        discarded = mesh_state.get("discarded")
+        if discarded is None or len(discarded) == 0:
+            return JSONResponse(
+                {"ok": False, "error": "No discarded fragments (run Break first)"}, status_code=400
+            )
+
+        prefix = request.query_params.get("prefix", "")
+        tmp = Path(tempfile.mktemp(suffix=".npz"))
+        save_discarded_npz(discarded, tmp)
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{prefix}discarded.npz"'
+            },
         )
 
     async def export_annotations(request):
@@ -2896,6 +3113,9 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
             Route("/export_organelles", export_organelles, methods=["GET"]),
             Route("/export_soma", export_soma, methods=["GET"]),
+            Route("/export_components", export_components, methods=["GET"]),
+            Route("/export_neurites", export_neurites, methods=["GET"]),
+            Route("/export_discarded", export_discarded, methods=["GET"]),
             Route("/export_annotations", export_annotations, methods=["GET"]),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
