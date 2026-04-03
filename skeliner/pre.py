@@ -999,39 +999,8 @@ def _zipper_stitch(
     else:
         new_verts_local = new_verts
 
-    pts_a = mesh.vertices[loop_a]
-    pts_b = mesh.vertices[loop_b]
-    ca = pts_a.mean(axis=0)
-    cb = pts_b.mean(axis=0)
-
-    # Align starting points
-    tree_b = KDTree(pts_b)
-    dists_q, idxs_q = tree_b.query(pts_a)
-    start_a = int(np.argmin(dists_q))
-    start_b = int(idxs_q[start_a])
-
-    # Orient loops to run in opposite directions
-    axis = cb - ca
-    axis_len = np.linalg.norm(axis)
-    axis = axis / axis_len if axis_len > 1e-10 else np.array([0.0, 0.0, 1.0])
-
-    def _winding(pts_loop, ax):
-        c = pts_loop.mean(axis=0)
-        total = 0.0
-        for k in range(len(pts_loop)):
-            e1 = pts_loop[k] - c
-            e2 = pts_loop[(k + 1) % len(pts_loop)] - c
-            total += float(np.dot(np.cross(e1, e2), ax))
-        return total
-
     la = list(loop_a)
     lb = list(loop_b)
-    if _winding(pts_a, axis) * _winding(pts_b, axis) > 0:
-        lb = lb[::-1]
-        start_b = len(lb) - 1 - start_b
-
-    la = la[start_a:] + la[:start_a]
-    lb = lb[start_b:] + lb[:start_b]
 
     # ── Fit loops and build curved centerline ───────────────────
     ca_fit, ra, na = _fit_loop_circle(mesh.vertices[la])
@@ -1078,63 +1047,66 @@ def _zipper_stitch(
         norm = np.linalg.norm(u)
         up[i] = u / norm if norm > 1e-10 else up[i - 1]
 
-    # ── Resample both loops to n_ring_pts as local 2D offsets ─────
-    # Express each loop's vertices as offsets from its center in the
-    # local (up, right) frame at its station, so we can interpolate
-    # the actual contour shape rather than snapping to circles.
-    def _resample_loop(pts, n):
-        """Resample a closed 3D loop to *n* evenly spaced points."""
-        closed = np.vstack([pts, pts[:1]])
-        seg_lens = np.linalg.norm(np.diff(closed, axis=0), axis=1)
-        cum = np.concatenate([[0], np.cumsum(seg_lens)])
-        total = cum[-1]
-        targets = np.linspace(0, total, n, endpoint=False)
-        resampled = np.empty((n, 3))
-        for i, t in enumerate(targets):
-            idx = np.searchsorted(cum, t, side="right") - 1
-            idx = min(idx, len(pts) - 1)
-            frac = (t - cum[idx]) / max(seg_lens[idx], 1e-10)
-            nxt = (idx + 1) % len(pts)
-            resampled[i] = pts[idx] * (1 - frac) + pts[nxt] * frac
-        return resampled
-
-    def _to_local_offsets(pts_3d, center, tangent, up_vec):
-        """Project 3D points to 2D offsets in the (up, right) plane."""
+    # ── Resample both loops as polar offsets (angle, radius) ────────
+    # Express each loop vertex as (angle, radius) in its station's
+    # local frame, resample to n_ring_pts at evenly-spaced angles,
+    # then blend between the two profiles.  Angle-based resampling
+    # ensures the vertex correspondence is stable across the blend.
+    def _to_polar_offsets(pts_3d, center, tangent, up_vec):
+        """Project 3D loop to (angle, radius) in the local frame."""
         right_vec = np.cross(tangent, up_vec)
         right_vec /= np.linalg.norm(right_vec) + 1e-10
         rel = pts_3d - center
         u_coords = np.dot(rel, up_vec)
         r_coords = np.dot(rel, right_vec)
-        return np.column_stack([u_coords, r_coords])
+        angles = np.arctan2(r_coords, u_coords)
+        radii = np.sqrt(u_coords**2 + r_coords**2)
+        return angles, radii
 
-    pts_la = _resample_loop(mesh.vertices[la], n_ring_pts)
-    pts_lb = _resample_loop(mesh.vertices[lb], n_ring_pts)
+    def _resample_polar(angles, radii, n):
+        """Resample a polar profile to *n* evenly-spaced angles."""
+        order = np.argsort(angles)
+        a_sorted = angles[order]
+        r_sorted = radii[order]
+        # Close the loop
+        a_closed = np.concatenate([a_sorted - 2 * np.pi, a_sorted, a_sorted + 2 * np.pi])
+        r_closed = np.concatenate([r_sorted, r_sorted, r_sorted])
+        target_angles = np.linspace(-np.pi, np.pi, n, endpoint=False)
+        resampled_r = np.interp(target_angles, a_closed, r_closed)
+        return target_angles, resampled_r
 
-    offsets_a = _to_local_offsets(pts_la, centers[0], tangents[0], up[0])
-    offsets_b = _to_local_offsets(pts_lb, centers[-1], tangents[-1], up[-1])
+    ang_a, rad_a = _to_polar_offsets(mesh.vertices[la], centers[0], tangents[0], up[0])
+    ang_b, rad_b = _to_polar_offsets(mesh.vertices[lb], centers[-1], tangents[-1], up[-1])
+    target_angles, profile_a = _resample_polar(ang_a, rad_a, n_ring_pts)
+    _, profile_b = _resample_polar(ang_b, rad_b, n_ring_pts)
 
-    # ── Generate shape-interpolated rings at intermediate stations ─
+    # ── Generate ALL rings including at endpoint stations ─────────
+    # We generate rings at every station (including 0 and N-1) so that
+    # ALL ring-to-ring connections are between uniform vertex counts.
+    # The boundary loops (la, lb) are stitched to their co-located
+    # endpoint rings separately — this avoids the cross-opening fan
+    # that occurs when stitching an irregular boundary loop directly
+    # to a uniform ring at a different station.
     ring_ids: list[list[int]] = []
-    ring_ids.append(la)  # ring 0 = boundary loop A (existing verts)
 
-    for si in range(1, n_stations - 1):
+    for si in range(n_stations):
         t = si / (n_stations - 1)  # 0 at A, 1 at B
         c = centers[si]
         u_vec = up[si]
         right_vec = np.cross(tangents[si], u_vec)
         right_vec /= np.linalg.norm(right_vec) + 1e-10
-        # Blend between the two actual contour shapes
-        offsets = offsets_a * (1 - t) + offsets_b * t
+        profile = profile_a * (1 - t) + profile_b * t
         ids = []
         for j in range(n_ring_pts):
-            pt = c + offsets[j, 0] * u_vec + offsets[j, 1] * right_vec
+            r = profile[j]
+            angle = target_angles[j]
+            pt = c + r * (np.cos(angle) * u_vec + np.sin(angle) * right_vec)
             ids.append(n_existing + len(new_verts_local))
             new_verts_local.append(pt)
         ring_ids.append(ids)
 
-    ring_ids.append(lb)  # last ring = boundary loop B (existing verts)
-
-    # ── Stitch consecutive rings ──────────────────────────────────
+    # ── Stitch: boundary loops → endpoint rings → ring chain ─────
+    # Sequence: la → ring[0] → ring[1] → ... → ring[-1] → lb
     triangles: list[list[int]] = []
 
     def _vpos(vid):
@@ -1142,9 +1114,13 @@ def _zipper_stitch(
             return mesh.vertices[vid]
         return new_verts_local[vid - n_existing]
 
+    # Skip la→ring[0] and ring[-1]→lb bands — those create cap faces
+    # that seal the tube ends.  Only stitch ring-to-ring.
+    all_bands: list[tuple[list[int], list[int]]] = []
     for ri in range(len(ring_ids) - 1):
-        ra_ids = ring_ids[ri]
-        rb_ids = ring_ids[ri + 1]
+        all_bands.append((ring_ids[ri], ring_ids[ri + 1]))
+
+    for ra_ids, rb_ids in all_bands:
         na_r, nb_r = len(ra_ids), len(rb_ids)
 
         # Align start of rb to closest vertex in ra
@@ -1156,7 +1132,7 @@ def _zipper_stitch(
             if d < best_d:
                 best_d = d
                 best_j = j
-        rb_ids = rb_ids[best_j:] + rb_ids[:best_j]
+        rb_ids = list(rb_ids[best_j:]) + list(rb_ids[:best_j])
 
         ia, ib, sa, sb = 0, 0, 0, 0
         while sa < na_r or sb < nb_r:
