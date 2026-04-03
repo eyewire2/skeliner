@@ -2208,7 +2208,7 @@ def _create_app(mesh_path: str | Path | None = None, port: int = 8777):
         def _run():
             return compact_mesh(mesh, soma=soma, verbose=True)
 
-        clean, vert_map, remapped_soma = await _run_with_log(_run)
+        clean, vert_map, remapped_soma, _ = await _run_with_log(_run)
 
         # Build face map: old face index → new face index (or -1)
         good = ~np.all(mesh.faces == mesh.faces[:, :1], axis=1)

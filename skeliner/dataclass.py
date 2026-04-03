@@ -167,7 +167,7 @@ class MeshComponents:
     at the soma and organelle boundaries.
     """
 
-    soma: "Soma"
+    soma: "Soma | None"
     organelles: Organelles
     neurites: Neurites
     discarded: Discarded

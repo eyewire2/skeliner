@@ -7137,13 +7137,14 @@ def compact_mesh(
     mesh: trimesh.Trimesh,
     *,
     soma: Soma | None = None,
+    components: MeshComponents | None = None,
     verbose: bool = False,
-) -> tuple[trimesh.Trimesh, np.ndarray, Soma | None]:
-    """Remove unreferenced vertices and compact indices.
+) -> tuple[trimesh.Trimesh, np.ndarray, Soma | None, MeshComponents | None]:
+    """Remove degenerate faces, drop unreferenced vertices, reindex.
 
     Call once at the end of preprocessing, after all face removals.
-    Returns a ``vert_map`` for translating any remaining vertex-index
-    data, and a remapped soma if provided.
+    Remaps vertex indices in *soma* and face indices / masks in
+    *components* so they stay valid against the returned mesh.
 
     Parameters
     ----------
@@ -7151,6 +7152,8 @@ def compact_mesh(
         Mesh after face removals.
     soma : Soma or None
         If provided, ``soma.verts`` is remapped to the new indices.
+    components : MeshComponents or None
+        If provided, all face-indexed data inside is remapped.
     verbose : bool, default False
         Print summary.
 
@@ -7163,14 +7166,8 @@ def compact_mesh(
         or ``-1`` if the vertex was removed.
     soma : Soma or None
         Remapped soma, or None if not provided.
-
-    Examples
-    --------
-    org = find_organelles(mesh)
-    soma = find_soma_via_ring_cutoff(mesh, organelles=org.mask)
-    mesh = remove_organelles(mesh, organelles=org.mask)
-    # ... more removals ...
-    mesh, vert_map, soma = compact_mesh(mesh, soma=soma)
+    components : MeshComponents or None
+        Remapped components, or None if not provided.
     """
     # Strip degenerate faces (from _rebuild_mesh) and compact vertices
     good = ~np.all(mesh.faces == mesh.faces[:, :1], axis=1)
@@ -7197,6 +7194,7 @@ def compact_mesh(
             f"({n_removed_f:,} removed)"
         )
 
+    # Remap soma
     remapped_soma = None
     if soma is not None:
         remapped_soma = soma.remap(vert_map)
@@ -7208,7 +7206,37 @@ def compact_mesh(
                 f"({n_before - n_after:,} dropped)"
             )
 
-    return clean, vert_map, remapped_soma
+    # Remap MeshComponents
+    remapped_components = None
+    if components is not None:
+        # Build face index map: old_fi → new_fi (or -1 if removed)
+        face_map = np.full(len(mesh.faces), -1, dtype=np.int64)
+        face_map[good] = np.arange(int(good.sum()), dtype=np.int64)
+
+        def _remap_face_list(arrays):
+            out = []
+            for arr in arrays:
+                mapped = face_map[arr]
+                mapped = mapped[mapped >= 0]
+                if len(mapped) > 0:
+                    out.append(mapped)
+            return out
+
+        org = components.organelles
+        remapped_org = Organelles(
+            pocket=org.pocket[good],
+            isolated=org.isolated[good],
+            expanded=org.expanded[good],
+            mesh_stats=org.mesh_stats,
+        )
+        remapped_components = MeshComponents(
+            soma=remapped_soma if remapped_soma is not None else components.soma,
+            organelles=remapped_org,
+            neurites=Neurites(_remap_face_list(components.neurites)),
+            discarded=Discarded(_remap_face_list(components.discarded)),
+        )
+
+    return clean, vert_map, remapped_soma, remapped_components
 
 
 # -----------------------------------------------------------------------------
@@ -7219,15 +7247,10 @@ from dataclasses import dataclass, field
 
 @dataclass
 class PreprocessResult:
-    """Result of :func:`preprocess` — all detection artifacts + cleaned mesh."""
+    """Result of :func:`preprocess` — cleaned mesh + break_up_mesh output."""
 
     mesh: trimesh.Trimesh
-    soma: Soma | None
-    organelles: np.ndarray  # bool mask on original mesh
-    fragments: np.ndarray  # bool mask on original mesh
-    disconnected: list[list[int]]
-    gaps: list
-    mesh_stats: tuple
+    components: MeshComponents
     vert_map: np.ndarray
 
 
@@ -7238,21 +7261,17 @@ def preprocess(
 ) -> PreprocessResult:
     """Run the full preprocessing pipeline in one call.
 
-    Runs detection and removal in the correct order, sharing
-    precomputed data throughout.  Returns a :class:`PreprocessResult`
-    with the cleaned mesh and all intermediate artifacts.
-
     Pipeline order:
-      1. compute_mesh_stats
+
+      1. find_parallel_patches → remove_parallel_patches
       2. find_organelles
-      3. find_soma
-      4. find_disconnected
-      5. find_gaps
-      6. find_fragments
-      7. remove_fragments
-      8. remove_organelles
-      9. remove_gaps
-      10. compact_mesh
+      3. find_soma_via_ring_cutoff
+      4. find_disconnected → find_gaps → remove_gaps
+      5. find_fusions → remove_fusions
+      6. break_up_mesh
+      7. compact_mesh
+
+    Each ``find_*`` step is skipped if it returns nothing.
 
     Parameters
     ----------
@@ -7264,22 +7283,27 @@ def preprocess(
     Returns
     -------
     PreprocessResult
-        Cleaned mesh and all detection artifacts.
+        Cleaned mesh, mesh components, and vertex remap.
     """
-    # ── Detection (all on original mesh, sharing stats) ───────────
-    stats = compute_mesh_stats(mesh, verbose=verbose)
+    # 1. Parallel patches
+    patches = find_parallel_patches(mesh, verbose=verbose)
+    if patches:
+        mesh = remove_parallel_patches(mesh, patches=patches, verbose=verbose)
 
-    org = find_organelles(mesh, mesh_stats=stats, verbose=verbose)
+    # 2. Organelles
+    org = find_organelles(mesh, verbose=verbose)
 
+    # 3. Soma
     soma = find_soma_via_ring_cutoff(
         mesh, organelles=org.mask, mesh_stats=org.mesh_stats, verbose=verbose
     )
 
+    # 4. Disconnected → gaps
     disconnected = find_disconnected(
         mesh,
         soma=soma,
         organelles=org.mask,
-        mesh_stats=stats,
+        mesh_stats=org.mesh_stats,
         verbose=verbose,
     )
 
@@ -7287,26 +7311,36 @@ def preprocess(
         mesh,
         soma=soma,
         disconnected=disconnected,
-        mesh_stats=stats,
+        mesh_stats=org.mesh_stats,
         verbose=verbose,
     )
+    if gaps:
+        mesh = remove_gaps(mesh, gaps=gaps, verbose=verbose)
 
-    fragments_mask = find_fragments(mesh, verbose=verbose)
+    # 5. Fusions
+    fusions = find_fusions(mesh, mesh_stats=org.mesh_stats, verbose=verbose)
+    if fusions:
+        mesh = remove_fusions(mesh, fusion_clusters=fusions, verbose=verbose)
 
-    # ── Removal (order: fragments → organelles → gaps → compact) ──
-    mesh = remove_fragments(mesh, fragments=fragments_mask, verbose=verbose)
-    mesh = remove_organelles(mesh, organelles=org.mask, verbose=verbose)
-    mesh = remove_gaps(mesh, gaps=gaps, verbose=verbose)
-    mesh, vert_map, soma = compact_mesh(mesh, soma=soma, verbose=verbose)
+    # 6. Break up mesh
+    if soma is not None:
+        components = break_up_mesh(mesh, soma, org, verbose=verbose)
+    else:
+        components = MeshComponents(
+            soma=None,
+            organelles=org,
+            neurites=Neurites([]),
+            discarded=Discarded([]),
+        )
+
+    # 7. Compact (remaps everything in MeshComponents)
+    mesh, vert_map, _, components = compact_mesh(
+        mesh, soma=soma, components=components, verbose=verbose
+    )
 
     return PreprocessResult(
         mesh=mesh,
-        soma=soma,
-        organelles=org.mask,
-        fragments=fragments_mask,
-        disconnected=disconnected,
-        gaps=gaps,
-        mesh_stats=stats,
+        components=components,
         vert_map=vert_map,
     )
 
