@@ -192,12 +192,12 @@ class MeshComponents:
 
     def to_npz(self, path: str | Path) -> None:
         from . import io
-        io.save_mesh_components_npz(self, path)
+        io.save_components_npz(self, path)
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "MeshComponents":
         from . import io
-        return io.load_mesh_components_npz(path)
+        return io.load_components_npz(path)
 
 
 # -----------------------------------------------------------------------------

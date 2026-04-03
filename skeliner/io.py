@@ -659,7 +659,7 @@ def load_discarded_npz(path: str | Path) -> Discarded:
 # ----------------------------------
 
 
-def save_mesh_components_npz(
+def save_components_npz(
     components: MeshComponents,
     path: str | Path,
     *,
@@ -713,8 +713,8 @@ def save_mesh_components_npz(
     save_fn(path, **payload)
 
 
-def load_mesh_components_npz(path: str | Path) -> MeshComponents:
-    """Load a :class:`MeshComponents` written by :func:`save_mesh_components_npz`."""
+def load_components_npz(path: str | Path) -> MeshComponents:
+    """Load a :class:`MeshComponents` written by :func:`save_components_npz`."""
     path = Path(path)
     with np.load(path, allow_pickle=False) as z:
         # Soma
