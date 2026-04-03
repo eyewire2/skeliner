@@ -1,5 +1,6 @@
 """skeliner.pre – mesh preprocessing utilities."""
 
+import warnings
 from collections import defaultdict, deque
 
 import igraph as ig
@@ -2408,6 +2409,10 @@ def find_soma_via_neurite_exclusion(
 ) -> Soma | None:
     """Estimate soma by per-tip neurite exclusion.
 
+    .. deprecated::
+        Prefer :func:`find_soma_via_ring_cutoff`, which is the promoted
+        soma detection method.
+
     Approach:
       0. Organelle clustering → soma center
       1. BFS on external surface (no organelle faces) from center
@@ -2420,6 +2425,12 @@ def find_soma_via_neurite_exclusion(
          exclusion handles shared branches automatically.
       4. Fit ellipsoid to the cleaned set
     """
+    warnings.warn(
+        "find_soma_via_neurite_exclusion is deprecated, "
+        "use find_soma_via_ring_cutoff instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     if mesh_stats is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
@@ -2834,6 +2845,10 @@ def find_soma_via_geodesic(
 ) -> Soma | None:
     """Experimental soma detection — geodesic proximity + mass boundary.
 
+    .. deprecated::
+        Prefer :func:`find_soma_via_ring_cutoff`, which is the promoted
+        soma detection method.
+
     Work-in-progress.  Key differences from
     :func:`find_soma_via_neurite_exclusion`:
 
@@ -2847,6 +2862,12 @@ def find_soma_via_geodesic(
       3. Per-tip neurite exclusion (same).
       4. Fit ellipsoid (same).
     """
+    warnings.warn(
+        "find_soma_via_geodesic is deprecated, "
+        "use find_soma_via_ring_cutoff instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     if mesh_stats is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
@@ -7912,6 +7933,10 @@ def find_soma_via_z_contour(
 ) -> "Soma | None":
     """Detect the soma by first locating the nucleus void.
 
+    .. deprecated::
+        Prefer :func:`find_soma_via_ring_cutoff`, which is the promoted
+        soma detection method.
+
     Uses :func:`_z_scan` (fast) to find the nucleus, then builds
     per-Z soma hulls with neurite protrusions stripped via
     morphological opening.  Classifies faces whose centroids fall
@@ -7935,6 +7960,12 @@ def find_soma_via_z_contour(
     -------
     Soma or None
     """
+    warnings.warn(
+        "find_soma_via_z_contour is deprecated, "
+        "use find_soma_via_ring_cutoff instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from shapely.geometry import Point
 
     _p = "[find_soma_via_z_contour]"
