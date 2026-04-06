@@ -302,9 +302,7 @@
                 <button id="detectParallelBtn" style="margin-left:4px">Parallel</button>
                 <button id="detectOrganellesBtn" style="margin-left: 4px">Organelles</button>
                 <button id="detectFusionsBtn" style="margin-left: 4px">Fusions</button>
-                <button id="detectFragmentsBtn" style="margin-left: 4px">Fragments</button>
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
-                <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
 
                 <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
@@ -326,17 +324,7 @@
                     <button id="removeParallelBtn" style="margin-left: 4px">Parallel</button>
                     <button id="removeOrganellesBtn" style="margin-left: 4px">Organelles</button>
                     <button id="removeFusionsBtn" style="margin-left: 4px">Fusions</button>
-                    <button id="removeFragmentsBtn" style="margin-left: 4px">Fragments</button>
                     <button id="removeGapsBtn" style="margin-left: 4px">Gaps</button>
-                    <span style="position:relative;display:inline-block;margin-left:4px">
-                        <button id="fillHolesBtn">Holes</button>
-                        <div id="holesPopup" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:4px;background:rgba(0,0,0,0.85);border:1px solid #555;border-radius:4px;padding:6px 8px;white-space:nowrap;z-index:300">
-                            <div style="color:#888;font-size:10px;margin-bottom:4px">Fill method:</div>
-                            <button class="holes-method-btn" data-method="advancing_front" style="display:block;width:100%;text-align:left;margin-bottom:2px">Advancing Front</button>
-                            <button class="holes-method-btn" data-method="dome" style="display:block;width:100%;text-align:left;margin-bottom:2px">Dome (convex)</button>
-                            <button class="holes-method-btn" data-method="rbf" style="display:block;width:100%;text-align:left">RBF</button>
-                        </div>
-                    </span>
                     <span style="color: #888; margin-left: 12px">Path:</span>
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
@@ -713,29 +701,14 @@ let meshCentroid = [0, 0, 0];
                 renderer.domElement.addEventListener("pointerdown", onRecenter);
 
                 document.getElementById("detectOrganellesBtn").addEventListener("click", runDetectOrganelles);
-                document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
-                document.getElementById("detectFragmentsBtn").addEventListener("click", runDetectFragments);
                 document.getElementById("detectSomaBtn").addEventListener("click", () => runDetectSoma("ring_cutoff"));
                 document.getElementById("detectDisconnectedBtn").addEventListener("click", runDetectDisconnected);
                 document.getElementById("detectGapsBtn").addEventListener("click", runDetectGaps);
                 document.getElementById("removeParallelBtn").addEventListener("click", runRemoveParallel);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
                 document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
-                document.getElementById("removeFragmentsBtn").addEventListener("click", runRemoveFragments);
                 document.getElementById("removeGapsBtn").addEventListener("click", runRemoveGaps);
-                document.getElementById("fillHolesBtn").addEventListener("click", () => {
-                    const popup = document.getElementById("holesPopup");
-                    popup.style.display = popup.style.display === "none" ? "" : "none";
-                });
-                document.querySelectorAll(".holes-method-btn").forEach(btn => {
-                    btn.addEventListener("click", () => runFillHoles(btn.dataset.method));
-                });
-                document.addEventListener("click", (e) => {
-                    if (!e.target.closest("#fillHolesBtn") && !e.target.closest("#holesPopup")) {
-                        document.getElementById("holesPopup").style.display = "none";
-                    }
-                });
                 document.getElementById("undoBtn").addEventListener("click", runUndo);
                 document.getElementById("saveBtn").addEventListener("click", openSaveDialog);
                 document.getElementById("saveDialogClose").addEventListener("click", closeSaveDialog);
@@ -808,8 +781,6 @@ let meshCentroid = [0, 0, 0];
                             if (has("organelle")) setBtnState(document.getElementById("detectOrganellesBtn"), "done");
                             if (has("soma")) setBtnState(document.getElementById("detectSomaBtn"), "done");
                             if (has("fusion")) setBtnState(document.getElementById("detectFusionsBtn"), "done");
-                            if (has("fragment")) setBtnState(document.getElementById("detectFragmentsBtn"), "done");
-                            if (has("hole")) setBtnState(document.getElementById("detectHolesBtn"), "done");
                             if (has("gap")) setBtnState(document.getElementById("detectGapsBtn"), "done");
                             if (has("disconn")) setBtnState(document.getElementById("detectDisconnectedBtn"), "done");
                             if (has("patch:")) setBtnState(document.getElementById("detectParallelBtn"), "done");
@@ -1620,13 +1591,6 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            async function runDetectHoles() {
-                await _runAction(
-                    document.getElementById("detectHolesBtn"),
-                    () => fetch("/detect_holes", { method: "POST" }),
-                );
-            }
-
             async function runDetectFusions() {
                 await _runAction(
                     document.getElementById("detectFusionsBtn"),
@@ -1662,13 +1626,6 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            async function runDetectFragments() {
-                await _runAction(
-                    document.getElementById("detectFragmentsBtn"),
-                    () => fetch("/detect_fragments", { method: "POST" }),
-                );
-            }
-
             async function runDetectSoma(method = "z_contour") {
                 await _runAction(
                     document.getElementById("detectSomaBtn"),
@@ -1694,25 +1651,10 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            async function runRemoveFragments() {
-                await _runAction(
-                    document.getElementById("removeFragmentsBtn"),
-                    () => fetch("/remove_fragments", { method: "POST" }),
-                );
-            }
-
             async function runRemoveGaps() {
                 await _runAction(
                     document.getElementById("removeGapsBtn"),
                     () => fetch("/remove_gaps", { method: "POST" }),
-                );
-            }
-
-            async function runFillHoles(fillMethod) {
-                document.getElementById("holesPopup").style.display = "none";
-                await _runAction(
-                    document.getElementById("fillHolesBtn"),
-                    () => fetch(`/fill_holes?method=${fillMethod}`, { method: "POST" }),
                 );
             }
 
