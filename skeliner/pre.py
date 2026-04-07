@@ -2316,6 +2316,18 @@ def break_up_mesh(
     verts = mesh.vertices
     nF = len(faces)
 
+    # Mesh-mutating steps (e.g. remove_gaps) may have appended faces
+    # since find_organelles ran. The new faces are stitch geometry, never
+    # organelle membrane — pad with False so the masks align with `nF`.
+    n_org = len(organelles.pocket)
+    if n_org < nF:
+        pad = np.zeros(nF - n_org, dtype=bool)
+        organelles = Organelles(
+            pocket=np.concatenate([organelles.pocket, pad]),
+            isolated=np.concatenate([organelles.isolated, pad]),
+            expanded=np.concatenate([organelles.expanded, pad]),
+        )
+
     good = _non_degenerate(faces)
     v0 = verts[faces[:, 0]]
     v1 = verts[faces[:, 1]]
@@ -7402,7 +7414,9 @@ def preprocess(
     # 5. Fusions
     fusions = find_fusions(mesh, mesh_stats=mesh_stats, verbose=verbose)
     if fusions:
-        mesh = remove_fusions(mesh, fusion_clusters=fusions, verbose=verbose)
+        mesh = remove_fusions(
+            mesh, fusions=fusions, mesh_stats=mesh_stats, verbose=verbose
+        )
 
     # 6. Break up mesh
     if soma is not None:
