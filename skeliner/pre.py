@@ -1,5 +1,6 @@
 """skeliner.pre – mesh preprocessing utilities."""
 
+import warnings
 from collections import defaultdict, deque
 
 import igraph as ig
@@ -7,9 +8,10 @@ import numpy as np
 import trimesh
 from scipy.spatial import KDTree
 
-from skeliner.dataclass import Soma
+from skeliner.dataclass import Discarded, MeshComponents, Neurites, Organelles, Soma
 
 __all__ = [
+    "break_up_mesh",
     "compact_mesh",
     "compute_mesh_stats",
     "fill_holes",
@@ -941,6 +943,35 @@ def _trace_border_loops(
     return loops
 
 
+def _fit_loop_circle(pts: np.ndarray) -> tuple[np.ndarray, float, np.ndarray]:
+    """Fit a circle to a 3D point loop.  Returns (center, radius, normal)."""
+    center = pts.mean(axis=0)
+    radii = np.linalg.norm(pts - center, axis=1)
+    radius = float(np.mean(radii))
+    # Normal from PCA: smallest eigenvector of covariance
+    cov = np.cov((pts - center).T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    normal = eigvecs[:, 0]  # smallest eigenvalue = normal direction
+    return center, radius, normal
+
+
+def _hermite_spline(
+    p0: np.ndarray, t0: np.ndarray,
+    p1: np.ndarray, t1: np.ndarray,
+    n: int,
+) -> np.ndarray:
+    """Evaluate cubic Hermite spline at *n* evenly spaced stations.
+
+    Returns ``(n, 3)`` array including endpoints.
+    """
+    s = np.linspace(0, 1, n)[:, None]
+    h00 = 2 * s**3 - 3 * s**2 + 1
+    h10 = s**3 - 2 * s**2 + s
+    h01 = -2 * s**3 + 3 * s**2
+    h11 = s**3 - s**2
+    return h00 * p0 + h10 * t0 + h01 * p1 + h11 * t1
+
+
 def _zipper_stitch(
     mesh: trimesh.Trimesh,
     loop_a: list[int],
@@ -948,11 +979,12 @@ def _zipper_stitch(
     vert_to_faces: list[list[int]],
     new_verts: list[np.ndarray] | None = None,
 ) -> list[list[int]]:
-    """Zipper-stitch two boundary loops, returning new triangles.
+    """Bridge two boundary loops with a tubular surface, returning new triangles.
 
-    When the gap between loops is much larger than the mesh's median
-    edge length, intermediate vertex rings are interpolated so that
-    the resulting faces match the typical mesh resolution.
+    Generates circular cross-sections along a curved Hermite-spline
+    centerline so the result looks like a realistic neurite segment.
+    The radius interpolates smoothly between the two loop radii, and
+    parallel transport keeps the frame twist-free.
 
     Parameters
     ----------
@@ -968,147 +1000,180 @@ def _zipper_stitch(
     else:
         new_verts_local = new_verts
 
-    pts_a = mesh.vertices[loop_a]
-    pts_b = mesh.vertices[loop_b]
-    ca = pts_a.mean(axis=0)
-    cb = pts_b.mean(axis=0)
-
-    # Align starting points
-    tree_b = KDTree(pts_b)
-    dists_q, idxs_q = tree_b.query(pts_a)
-    start_a = int(np.argmin(dists_q))
-    start_b = int(idxs_q[start_a])
-
-    # Orient loops to run in opposite directions
-    axis = cb - ca
-    axis_len = np.linalg.norm(axis)
-    axis = axis / axis_len if axis_len > 1e-10 else np.array([0.0, 0.0, 1.0])
-
-    def _winding(pts_loop, ax):
-        c = pts_loop.mean(axis=0)
-        total = 0.0
-        for k in range(len(pts_loop)):
-            e1 = pts_loop[k] - c
-            e2 = pts_loop[(k + 1) % len(pts_loop)] - c
-            total += float(np.dot(np.cross(e1, e2), ax))
-        return total
-
     la = list(loop_a)
     lb = list(loop_b)
-    if _winding(pts_a, axis) * _winding(pts_b, axis) > 0:
-        lb = lb[::-1]
-        start_b = len(lb) - 1 - start_b
 
-    la = la[start_a:] + la[:start_a]
-    lb = lb[start_b:] + lb[:start_b]
+    # ── Fit loops and build curved centerline ───────────────────
+    ca_fit, ra, na = _fit_loop_circle(mesh.vertices[la])
+    cb_fit, rb, nb = _fit_loop_circle(mesh.vertices[lb])
 
-    # ── Determine if intermediate rings are needed ────────────────
-    gap_dist = float(np.linalg.norm(ca - cb))
+    direction = cb_fit - ca_fit
+    gap_dist = float(np.linalg.norm(direction))
+    if np.dot(na, direction) < 0:
+        na = -na
+    if np.dot(nb, direction) < 0:
+        nb = -nb
+
     median_edge = float(np.median(mesh.edges_unique_length))
-    n_rings = max(0, int(round(gap_dist / median_edge)) - 1)
+    n_rings = max(1, int(round(gap_dist / median_edge)) - 1)
 
-    if n_rings > 0:
-        # Build matched correspondences: resample both loops to the
-        # same vertex count, then interpolate intermediate rings.
-        n_pts = max(len(la), len(lb))
-        pts_la = mesh.vertices[la]
-        pts_lb = mesh.vertices[lb]
+    # Hermite tangents: scale by gap distance for natural curvature
+    tangent_a = na * gap_dist
+    tangent_b = nb * gap_dist
 
-        # Resample each loop to n_pts evenly spaced points
-        def _resample(pts, n):
-            """Resample closed loop to *n* evenly spaced points."""
-            closed = np.vstack([pts, pts[:1]])
-            seg_lens = np.linalg.norm(np.diff(closed, axis=0), axis=1)
-            cum = np.concatenate([[0], np.cumsum(seg_lens)])
-            total = cum[-1]
-            targets = np.linspace(0, total, n, endpoint=False)
-            resampled = np.empty((n, 3))
-            for i, t in enumerate(targets):
-                idx = np.searchsorted(cum, t, side="right") - 1
-                idx = min(idx, len(pts) - 1)
-                frac = (t - cum[idx]) / max(seg_lens[idx], 1e-10)
-                nxt = (idx + 1) % len(pts)
-                resampled[i] = pts[idx] * (1 - frac) + pts[nxt] * frac
-            return resampled
+    # n_rings intermediate + 2 endpoints = n_rings + 2 stations
+    n_stations = n_rings + 2
+    centers = _hermite_spline(ca_fit, tangent_a, cb_fit, tangent_b, n_stations)
+    n_ring_pts = max(len(la), len(lb))
+    n_existing = len(mesh.vertices)
 
-        ring_a = _resample(pts_la, n_pts)
-        ring_b = _resample(pts_lb, n_pts)
+    # Tangent at each station via finite differences
+    tangents = np.zeros_like(centers)
+    tangents[0] = centers[1] - centers[0]
+    tangents[-1] = centers[-1] - centers[-2]
+    for i in range(1, len(centers) - 1):
+        tangents[i] = centers[i + 1] - centers[i - 1]
+    tangents /= np.linalg.norm(tangents, axis=1, keepdims=True) + 1e-10
 
-        # Create intermediate rings as new vertices
-        n_existing = len(mesh.vertices)
-        rings: list[list[int]] = []  # each ring is a list of vert indices
-        rings.append(la)  # ring 0 = loop_a (existing verts)
-        for r in range(1, n_rings + 1):
-            t = r / (n_rings + 1)
-            ring_pts = ring_a * (1 - t) + ring_b * t
-            ring_ids = []
-            for pt in ring_pts:
-                ring_ids.append(n_existing + len(new_verts_local))
-                new_verts_local.append(pt)
-            rings.append(ring_ids)
-        rings.append(lb)  # last ring = loop_b (existing verts)
+    # Parallel-transport a stable "up" vector along the centerline
+    up = np.zeros_like(tangents)
+    t0 = tangents[0]
+    seed_up = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(seed_up, t0)) > 0.9:
+        seed_up = np.array([0.0, 1.0, 0.0])
+    up[0] = seed_up - np.dot(seed_up, t0) * t0
+    up[0] /= np.linalg.norm(up[0]) + 1e-10
+    for i in range(1, len(centers)):
+        u = up[i - 1] - np.dot(up[i - 1], tangents[i]) * tangents[i]
+        norm = np.linalg.norm(u)
+        up[i] = u / norm if norm > 1e-10 else up[i - 1]
 
-        # Stitch consecutive rings
-        triangles: list[list[int]] = []
+    # ── Resample both loops as polar offsets (angle, radius) ────────
+    # Express each loop vertex as (angle, radius) in its station's
+    # local frame, resample to n_ring_pts at evenly-spaced angles,
+    # then blend between the two profiles.  Angle-based resampling
+    # ensures the vertex correspondence is stable across the blend.
+    def _to_polar_offsets(pts_3d, center, tangent, up_vec):
+        """Project 3D loop to (angle, radius) in the local frame."""
+        right_vec = np.cross(tangent, up_vec)
+        right_vec /= np.linalg.norm(right_vec) + 1e-10
+        rel = pts_3d - center
+        u_coords = np.dot(rel, up_vec)
+        r_coords = np.dot(rel, right_vec)
+        angles = np.arctan2(r_coords, u_coords)
+        radii = np.sqrt(u_coords**2 + r_coords**2)
+        return angles, radii
 
-        def _vpos(vid):
-            if vid < n_existing:
-                return mesh.vertices[vid]
-            return new_verts_local[vid - n_existing]
+    def _resample_polar(angles, radii, n):
+        """Resample a polar profile to *n* evenly-spaced angles."""
+        order = np.argsort(angles)
+        a_sorted = angles[order]
+        r_sorted = radii[order]
+        # Close the loop
+        a_closed = np.concatenate([a_sorted - 2 * np.pi, a_sorted, a_sorted + 2 * np.pi])
+        r_closed = np.concatenate([r_sorted, r_sorted, r_sorted])
+        target_angles = np.linspace(-np.pi, np.pi, n, endpoint=False)
+        resampled_r = np.interp(target_angles, a_closed, r_closed)
+        return target_angles, resampled_r
 
-        for ri in range(len(rings) - 1):
-            ra_ids = rings[ri]
-            rb_ids = rings[ri + 1]
-            na_r, nb_r = len(ra_ids), len(rb_ids)
-            ia, ib, sa, sb = 0, 0, 0, 0
-            while sa < na_r or sb < nb_r:
-                ia_n = (ia + 1) % na_r
-                ib_n = (ib + 1) % nb_r
-                can_a, can_b = sa < na_r, sb < nb_r
-                if can_a and can_b:
-                    da = float(np.linalg.norm(_vpos(ra_ids[ia_n]) - _vpos(rb_ids[ib])))
-                    db = float(np.linalg.norm(_vpos(ra_ids[ia]) - _vpos(rb_ids[ib_n])))
-                    adv_a = da <= db
-                else:
-                    adv_a = can_a
-                if adv_a:
-                    triangles.append([ra_ids[ia], ra_ids[ia_n], rb_ids[ib]])
-                    ia = ia_n
-                    sa += 1
-                else:
-                    triangles.append([ra_ids[ia], rb_ids[ib_n], rb_ids[ib]])
-                    ib = ib_n
-                    sb += 1
-    else:
-        # Direct zipper (gap is small enough)
-        na, nb = len(la), len(lb)
-        triangles: list[list[int]] = []
-        ia, ib, steps_a, steps_b = 0, 0, 0, 0
+    ang_a, rad_a = _to_polar_offsets(mesh.vertices[la], centers[0], tangents[0], up[0])
+    ang_b, rad_b = _to_polar_offsets(mesh.vertices[lb], centers[-1], tangents[-1], up[-1])
+    target_angles, profile_a = _resample_polar(ang_a, rad_a, n_ring_pts)
+    _, profile_b = _resample_polar(ang_b, rad_b, n_ring_pts)
 
-        while steps_a < na or steps_b < nb:
-            ia_next = (ia + 1) % na
-            ib_next = (ib + 1) % nb
-            can_a, can_b = steps_a < na, steps_b < nb
+    # ── Generate ALL rings including at endpoint stations ─────────
+    # We generate rings at every station (including 0 and N-1) so that
+    # ALL ring-to-ring connections are between uniform vertex counts.
+    # The boundary loops (la, lb) are stitched to their co-located
+    # endpoint rings separately — this avoids the cross-opening fan
+    # that occurs when stitching an irregular boundary loop directly
+    # to a uniform ring at a different station.
+    ring_ids: list[list[int]] = []
 
+    for si in range(n_stations):
+        t = si / (n_stations - 1)  # 0 at A, 1 at B
+        c = centers[si]
+        u_vec = up[si]
+        right_vec = np.cross(tangents[si], u_vec)
+        right_vec /= np.linalg.norm(right_vec) + 1e-10
+        profile = profile_a * (1 - t) + profile_b * t
+        ids = []
+        for j in range(n_ring_pts):
+            r = profile[j]
+            angle = target_angles[j]
+            pt = c + r * (np.cos(angle) * u_vec + np.sin(angle) * right_vec)
+            ids.append(n_existing + len(new_verts_local))
+            new_verts_local.append(pt)
+        ring_ids.append(ids)
+
+    # ── Stitch: boundary loops → endpoint rings → ring chain ─────
+    # Sequence: la → ring[0] → ring[1] → ... → ring[-1] → lb
+    triangles: list[list[int]] = []
+
+    def _vpos(vid):
+        if vid < n_existing:
+            return mesh.vertices[vid]
+        return new_verts_local[vid - n_existing]
+
+    # Only stitch ring-to-ring (no boundary→ring bands that seal ends).
+    all_bands: list[tuple[list[int], list[int]]] = []
+    for ri in range(len(ring_ids) - 1):
+        all_bands.append((ring_ids[ri], ring_ids[ri + 1]))
+
+    for ra_ids, rb_ids in all_bands:
+        na_r, nb_r = len(ra_ids), len(rb_ids)
+
+        # Align start of rb to closest vertex in ra
+        best_j = 0
+        best_d = float("inf")
+        p0 = _vpos(ra_ids[0])
+        for j in range(nb_r):
+            d = float(np.linalg.norm(_vpos(rb_ids[j]) - p0))
+            if d < best_d:
+                best_d = d
+                best_j = j
+        rb_ids = list(rb_ids[best_j:]) + list(rb_ids[:best_j])
+
+        ia, ib, sa, sb = 0, 0, 0, 0
+        while sa < na_r or sb < nb_r:
+            ia_n = (ia + 1) % na_r
+            ib_n = (ib + 1) % nb_r
+            can_a, can_b = sa < na_r, sb < nb_r
             if can_a and can_b:
-                da = float(
-                    np.linalg.norm(mesh.vertices[la[ia_next]] - mesh.vertices[lb[ib]])
-                )
-                db = float(
-                    np.linalg.norm(mesh.vertices[la[ia]] - mesh.vertices[lb[ib_next]])
-                )
-                advance_a = da <= db
+                da = float(np.linalg.norm(_vpos(ra_ids[ia_n]) - _vpos(rb_ids[ib])))
+                db = float(np.linalg.norm(_vpos(ra_ids[ia]) - _vpos(rb_ids[ib_n])))
+                adv_a = da <= db
             else:
-                advance_a = can_a
+                adv_a = can_a
+            if adv_a:
+                triangles.append([ra_ids[ia], ra_ids[ia_n], rb_ids[ib]])
+                ia = ia_n
+                sa += 1
+            else:
+                triangles.append([ra_ids[ia], rb_ids[ib_n], rb_ids[ib]])
+                ib = ib_n
+                sb += 1
 
-            if advance_a:
-                triangles.append([la[ia], la[ia_next], lb[ib]])
-                ia = ia_next
-                steps_a += 1
-            else:
-                triangles.append([la[ia], lb[ib_next], lb[ib]])
-                ib = ib_next
-                steps_b += 1
+    # ── Weld endpoint ring verts to boundary loop verts ──────────
+    # Replace each ring[0] / ring[-1] vertex ID in the triangles with
+    # the nearest boundary loop vertex.  This connects the tube to the
+    # existing mesh without creating cap faces across the opening.
+    def _build_weld_map(ring, loop):
+        """Map each ring vert to its nearest loop vert."""
+        ring_pts = np.array([_vpos(v) for v in ring])
+        loop_pts = np.array([_vpos(v) for v in loop])
+        tree = KDTree(loop_pts)
+        _, idxs = tree.query(ring_pts)
+        return {ring[i]: loop[int(idxs[i])] for i in range(len(ring))}
+
+    weld = {}
+    weld.update(_build_weld_map(ring_ids[0], la))
+    weld.update(_build_weld_map(ring_ids[-1], lb))
+
+    if weld:
+        triangles = [
+            [weld.get(v, v) for v in tri] for tri in triangles
+        ]
 
     # Orient consistently with surrounding mesh
     ref_fis: list[int] = []
@@ -1116,12 +1181,6 @@ def _zipper_stitch(
         ref_fis.extend(vert_to_faces[vi][:5])
     if ref_fis:
         ref_n = mesh.face_normals[ref_fis].mean(axis=0)
-
-        def _vpos(vid):
-            if vid < len(mesh.vertices):
-                return mesh.vertices[vid]
-            return new_verts_local[vid - len(mesh.vertices)]
-
         tri_normals = [
             np.cross(
                 _vpos(t[1]) - _vpos(t[0]),
@@ -2198,13 +2257,42 @@ def _face_components(faces, edge_to_faces, face_indices):
     return components
 
 
+def _build_org_output(
+    org_dc: Organelles | None,
+    orig_mask: np.ndarray,
+    expanded_mask: np.ndarray,
+) -> Organelles:
+    """Build an Organelles dataclass from break_up_mesh results."""
+    if org_dc is not None:
+        return Organelles(
+            pocket=org_dc.pocket,
+            isolated=org_dc.isolated,
+            expanded=expanded_mask & ~(org_dc.pocket | org_dc.isolated),
+            mesh_stats=org_dc.mesh_stats,
+        )
+    # Raw mask input — put everything in expanded, no pocket/isolated split
+    nF = len(orig_mask)
+    from skeliner.dataclass import MeshStats
+
+    return Organelles(
+        pocket=np.zeros(nF, dtype=bool),
+        isolated=np.zeros(nF, dtype=bool),
+        expanded=expanded_mask,
+        mesh_stats=MeshStats(
+            outward_dots=np.zeros(nF, dtype=np.float32),
+            face_comp=np.zeros(nF, dtype=np.intp),
+            main_ci=0,
+        ),
+    )
+
+
 def break_up_mesh(
     mesh: trimesh.Trimesh,
     soma: Soma,
-    organelle: np.ndarray,
+    organelle: np.ndarray | Organelles,
     *,
     verbose: bool = False,
-) -> tuple[Soma, np.ndarray, list[np.ndarray], list[np.ndarray]]:
+) -> MeshComponents:
     """Break the mesh using soma and organelles, classify the pieces.
 
     Removes soma + organelle faces, finds connected components of
@@ -2225,23 +2313,21 @@ def break_up_mesh(
     mesh : trimesh.Trimesh
     soma : Soma
         From ``find_soma_via_ring_cutoff`` (must have ``.verts``).
-    organelle : np.ndarray
-        (nFaces,) bool — union of pocket + isolated masks.
+    organelle : np.ndarray or Organelles
+        ``(nFaces,)`` bool mask, or an :class:`Organelles` instance
+        (the combined ``.mask`` is used).
     verbose : bool
 
     Returns
     -------
-    soma : Soma
-        Refitted ellipsoid with expanded vertex set.
-    organelle : np.ndarray
-        (nFaces,) bool — expanded organelle mask.
-    neurites : list[np.ndarray]
-        Face index arrays for each neurite component, sorted by
-        descending face count.
-    discarded : list[np.ndarray]
-        Face index arrays for small fragments below the auto
-        threshold, sorted by descending face count.
+    MeshComponents
     """
+    # Accept either raw mask or Organelles dataclass
+    if isinstance(organelle, Organelles):
+        org_dc = organelle
+        organelle = org_dc.mask
+    else:
+        org_dc = None
     faces = np.asarray(mesh.faces)
     verts = mesh.vertices
     nF = len(faces)
@@ -2308,8 +2394,14 @@ def break_up_mesh(
 
     if len(remain_fi) == 0:
         if verbose:
-            print("break_at_soma: no remaining faces after exclusion")
-        return soma, organelle, []
+            print("break_up_mesh: no remaining faces after exclusion")
+        org_out = _build_org_output(org_dc, organelle, organelle)
+        return MeshComponents(
+            soma=soma,
+            organelles=org_out,
+            neurites=Neurites([]),
+            discarded=Discarded([]),
+        )
 
     ef_all = _build_edge_to_faces(faces, usable)
     components = _face_components(faces, ef_all, remain_fi)
@@ -2392,7 +2484,13 @@ def break_up_mesh(
             f"organelle {organelle_expanded.sum():,} faces"
         )
 
-    return soma, organelle_expanded, neurites, discarded
+    org_out = _build_org_output(org_dc, organelle, organelle_expanded)
+    return MeshComponents(
+        soma=soma,
+        organelles=org_out,
+        neurites=Neurites(neurites),
+        discarded=Discarded(discarded),
+    )
 
 
 # Keep old name as alias
@@ -2408,6 +2506,10 @@ def find_soma_via_neurite_exclusion(
 ) -> Soma | None:
     """Estimate soma by per-tip neurite exclusion.
 
+    .. deprecated::
+        Prefer :func:`find_soma_via_ring_cutoff`, which is the promoted
+        soma detection method.
+
     Approach:
       0. Organelle clustering → soma center
       1. BFS on external surface (no organelle faces) from center
@@ -2420,6 +2522,12 @@ def find_soma_via_neurite_exclusion(
          exclusion handles shared branches automatically.
       4. Fit ellipsoid to the cleaned set
     """
+    warnings.warn(
+        "find_soma_via_neurite_exclusion is deprecated, "
+        "use find_soma_via_ring_cutoff instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
@@ -2834,6 +2942,10 @@ def find_soma_via_geodesic(
 ) -> Soma | None:
     """Experimental soma detection — geodesic proximity + mass boundary.
 
+    .. deprecated::
+        Prefer :func:`find_soma_via_ring_cutoff`, which is the promoted
+        soma detection method.
+
     Work-in-progress.  Key differences from
     :func:`find_soma_via_neurite_exclusion`:
 
@@ -2847,6 +2959,12 @@ def find_soma_via_geodesic(
       3. Per-tip neurite exclusion (same).
       4. Fit ellipsoid (same).
     """
+    warnings.warn(
+        "find_soma_via_geodesic is deprecated, "
+        "use find_soma_via_ring_cutoff instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
@@ -6474,6 +6592,10 @@ def remove_parallel_patches(
 def _detect_tile_size(vertices: np.ndarray) -> int:
     """Auto-detect XY tile size from vertex coordinate clustering.
 
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
+
     EM volume tiles create vertex clusters at tile boundaries.
     Tests powers of 2 and picks the size with the strongest
     boundary clustering (highest ratio of observed to expected
@@ -6515,7 +6637,12 @@ def _detect_tile_size(vertices: np.ndarray) -> int:
 
 
 def _detect_z_resolution(vertices: np.ndarray) -> float:
-    """Auto-detect Z section spacing from vertex coordinates."""
+    """Auto-detect Z section spacing from vertex coordinates.
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
+    """
     z_unique = np.unique(np.round(vertices[:, 2], 1))
     if len(z_unique) < 2:
         return 1.0
@@ -6524,7 +6651,12 @@ def _detect_z_resolution(vertices: np.ndarray) -> float:
 
 
 def _cluster_xy(points: np.ndarray, radius: float) -> list[np.ndarray]:
-    """Cluster 2-D points by proximity (connected components)."""
+    """Cluster 2-D points by proximity (connected components).
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
+    """
     if len(points) < 2:
         return [points] if len(points) else []
     tree = KDTree(points)
@@ -6554,6 +6686,10 @@ def _match_contour_offset(
     search_radius: int = 10,
 ) -> tuple[np.ndarray, float]:
     """Find the XY translation that best aligns *source* onto *target*.
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
 
     Searches a grid of ``±search_radius`` voxels around multiple
     starting points (centroid difference and zero) to avoid missing
@@ -6586,6 +6722,10 @@ def find_offsets(
     verbose: bool = False,
 ) -> list[dict]:
     """Detect Z-plane alignment offsets from EM volume registration errors.
+
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
 
     Scans the mesh for flat Z-facing cap faces that close off the tube
     at broken Z-boundaries.  Pairs FLOOR (cap pointing up) and CEIL
@@ -6877,6 +7017,10 @@ def remove_offsets(
 ) -> trimesh.Trimesh:
     """Correct vertex positions for detected Z-plane alignment offsets.
 
+    .. deprecated::
+        This function is part of the offset-alignment pipeline which
+        has been removed from the viewer.
+
     Translates vertices on the shifted side of each gap by the inverse
     offset vector, then removes the flat cap faces at the gap boundaries.
 
@@ -7045,22 +7189,25 @@ def remove_offsets(
 
 def compact_mesh(
     mesh: trimesh.Trimesh,
+    components: MeshComponents,
     *,
-    soma: Soma | None = None,
+    return_maps: bool = False,
     verbose: bool = False,
-) -> tuple[trimesh.Trimesh, np.ndarray, Soma | None]:
-    """Remove unreferenced vertices and compact indices.
+) -> tuple[trimesh.Trimesh, MeshComponents] | tuple[trimesh.Trimesh, MeshComponents, np.ndarray, np.ndarray]:
+    """Remove degenerate faces, drop unreferenced vertices, reindex.
 
     Call once at the end of preprocessing, after all face removals.
-    Returns a ``vert_map`` for translating any remaining vertex-index
-    data, and a remapped soma if provided.
+    Remaps all face/vertex-indexed data inside *components*.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Mesh after face removals.
-    soma : Soma or None
-        If provided, ``soma.verts`` is remapped to the new indices.
+    components : MeshComponents
+        All face-indexed data is remapped to match the compacted mesh.
+    return_maps : bool, default False
+        If True, also return ``vert_map`` and ``face_map`` arrays for
+        remapping external data (e.g. viewer annotations).
     verbose : bool, default False
         Print summary.
 
@@ -7068,19 +7215,12 @@ def compact_mesh(
     -------
     clean : trimesh.Trimesh
         Compacted mesh with no unreferenced vertices.
-    vert_map : np.ndarray
-        ``(nOldVerts,)`` int64 — ``vert_map[old]`` is the new index,
-        or ``-1`` if the vertex was removed.
-    soma : Soma or None
-        Remapped soma, or None if not provided.
-
-    Examples
-    --------
-    org = find_organelles(mesh)
-    soma = find_soma_via_ring_cutoff(mesh, organelles=org.mask)
-    mesh = remove_organelles(mesh, organelles=org.mask)
-    # ... more removals ...
-    mesh, vert_map, soma = compact_mesh(mesh, soma=soma)
+    components : MeshComponents
+        Remapped components.
+    vert_map : np.ndarray *(only when return_maps=True)*
+        ``(nOldVerts,)`` int64 — ``vert_map[old]`` → new index, or -1.
+    face_map : np.ndarray *(only when return_maps=True)*
+        ``(nOldFaces,)`` int64 — ``face_map[old]`` → new index, or -1.
     """
     # Strip degenerate faces (from _rebuild_mesh) and compact vertices
     good = ~np.all(mesh.faces == mesh.faces[:, :1], axis=1)
@@ -7107,18 +7247,49 @@ def compact_mesh(
             f"({n_removed_f:,} removed)"
         )
 
+    # Remap soma
     remapped_soma = None
-    if soma is not None:
-        remapped_soma = soma.remap(vert_map)
+    if components.soma is not None:
+        remapped_soma = components.soma.remap(vert_map)
         if verbose:
-            n_before = len(soma.verts) if soma.verts is not None else 0
+            n_before = len(components.soma.verts) if components.soma.verts is not None else 0
             n_after = len(remapped_soma.verts) if remapped_soma.verts is not None else 0
             print(
                 f"[skeliner.pre] Soma remap: {n_before:,} → {n_after:,} verts "
                 f"({n_before - n_after:,} dropped)"
             )
 
-    return clean, vert_map, remapped_soma
+    # Build face index map: old_fi → new_fi (or -1 if removed)
+    face_map = np.full(len(mesh.faces), -1, dtype=np.int64)
+    face_map[good] = np.arange(int(good.sum()), dtype=np.int64)
+
+    def _remap_face_list(arrays):
+        out = []
+        for arr in arrays:
+            mapped = face_map[arr]
+            mapped = mapped[mapped >= 0]
+            if len(mapped) > 0:
+                out.append(mapped)
+        return out
+
+    organelles = components.organelles
+    remapped_org = Organelles(
+        pocket=organelles.pocket[good],
+        isolated=organelles.isolated[good],
+        expanded=organelles.expanded[good],
+        mesh_stats=organelles.mesh_stats,
+    )
+
+    remapped = MeshComponents(
+        soma=remapped_soma,
+        organelles=remapped_org,
+        neurites=Neurites(_remap_face_list(components.neurites)),
+        discarded=Discarded(_remap_face_list(components.discarded)),
+    )
+
+    if return_maps:
+        return clean, remapped, vert_map, face_map
+    return clean, remapped
 
 
 # -----------------------------------------------------------------------------
@@ -7129,16 +7300,10 @@ from dataclasses import dataclass, field
 
 @dataclass
 class PreprocessResult:
-    """Result of :func:`preprocess` — all detection artifacts + cleaned mesh."""
+    """Result of :func:`preprocess` — cleaned mesh + break_up_mesh output."""
 
     mesh: trimesh.Trimesh
-    soma: Soma | None
-    organelles: np.ndarray  # bool mask on original mesh
-    fragments: np.ndarray  # bool mask on original mesh
-    disconnected: list[list[int]]
-    gaps: list
-    mesh_stats: tuple
-    vert_map: np.ndarray
+    components: MeshComponents
 
 
 def preprocess(
@@ -7148,21 +7313,17 @@ def preprocess(
 ) -> PreprocessResult:
     """Run the full preprocessing pipeline in one call.
 
-    Runs detection and removal in the correct order, sharing
-    precomputed data throughout.  Returns a :class:`PreprocessResult`
-    with the cleaned mesh and all intermediate artifacts.
-
     Pipeline order:
-      1. compute_mesh_stats
+
+      1. find_parallel_patches → remove_parallel_patches
       2. find_organelles
-      3. find_soma
-      4. find_disconnected
-      5. find_gaps
-      6. find_fragments
-      7. remove_fragments
-      8. remove_organelles
-      9. remove_gaps
-      10. compact_mesh
+      3. find_soma_via_ring_cutoff
+      4. find_disconnected → find_gaps → remove_gaps
+      5. find_fusions → remove_fusions
+      6. break_up_mesh
+      7. compact_mesh
+
+    Each ``find_*`` step is skipped if it returns nothing.
 
     Parameters
     ----------
@@ -7174,22 +7335,27 @@ def preprocess(
     Returns
     -------
     PreprocessResult
-        Cleaned mesh and all detection artifacts.
+        Cleaned mesh, mesh components, and vertex remap.
     """
-    # ── Detection (all on original mesh, sharing stats) ───────────
-    stats = compute_mesh_stats(mesh, verbose=verbose)
+    # 1. Parallel patches
+    patches = find_parallel_patches(mesh, verbose=verbose)
+    if patches:
+        mesh = remove_parallel_patches(mesh, patches=patches, verbose=verbose)
 
-    org = find_organelles(mesh, mesh_stats=stats, verbose=verbose)
+    # 2. Organelles
+    org = find_organelles(mesh, verbose=verbose)
 
+    # 3. Soma
     soma = find_soma_via_ring_cutoff(
         mesh, organelles=org.mask, mesh_stats=org.mesh_stats, verbose=verbose
     )
 
+    # 4. Disconnected → gaps
     disconnected = find_disconnected(
         mesh,
         soma=soma,
         organelles=org.mask,
-        mesh_stats=stats,
+        mesh_stats=org.mesh_stats,
         verbose=verbose,
     )
 
@@ -7197,27 +7363,36 @@ def preprocess(
         mesh,
         soma=soma,
         disconnected=disconnected,
-        mesh_stats=stats,
+        mesh_stats=org.mesh_stats,
         verbose=verbose,
     )
+    if gaps:
+        mesh = remove_gaps(mesh, gaps=gaps, verbose=verbose)
 
-    fragments_mask = find_fragments(mesh, verbose=verbose)
+    # 5. Fusions
+    fusions = find_fusions(mesh, mesh_stats=org.mesh_stats, verbose=verbose)
+    if fusions:
+        mesh = remove_fusions(mesh, fusion_clusters=fusions, verbose=verbose)
 
-    # ── Removal (order: fragments → organelles → gaps → compact) ──
-    mesh = remove_fragments(mesh, fragments=fragments_mask, verbose=verbose)
-    mesh = remove_organelles(mesh, organelles=org.mask, verbose=verbose)
-    mesh = remove_gaps(mesh, gaps=gaps, verbose=verbose)
-    mesh, vert_map, soma = compact_mesh(mesh, soma=soma, verbose=verbose)
+    # 6. Break up mesh
+    if soma is not None:
+        components = break_up_mesh(mesh, soma, org, verbose=verbose)
+    else:
+        components = MeshComponents(
+            soma=None,
+            organelles=org,
+            neurites=Neurites([]),
+            discarded=Discarded([]),
+        )
+
+    # 7. Compact (remaps everything in MeshComponents)
+    mesh, components = compact_mesh(
+        mesh, components=components, verbose=verbose
+    )
 
     return PreprocessResult(
         mesh=mesh,
-        soma=soma,
-        organelles=org.mask,
-        fragments=fragments_mask,
-        disconnected=disconnected,
-        gaps=gaps,
-        mesh_stats=stats,
-        vert_map=vert_map,
+        components=components,
     )
 
 
@@ -7940,6 +8115,10 @@ def find_soma_via_z_contour(
 ) -> "Soma | None":
     """Detect the soma by first locating the nucleus void.
 
+    .. deprecated::
+        Prefer :func:`find_soma_via_ring_cutoff`, which is the promoted
+        soma detection method.
+
     Uses :func:`_z_scan` (fast) to find the nucleus, then builds
     per-Z soma hulls with neurite protrusions stripped via
     morphological opening.  Classifies faces whose centroids fall
@@ -7963,6 +8142,12 @@ def find_soma_via_z_contour(
     -------
     Soma or None
     """
+    warnings.warn(
+        "find_soma_via_z_contour is deprecated, "
+        "use find_soma_via_ring_cutoff instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from shapely.geometry import Point
 
     _p = "[find_soma_via_z_contour]"

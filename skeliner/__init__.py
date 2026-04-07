@@ -4,7 +4,7 @@ from . import batch, dx, io, pair, plot, post, pre
 from .dataclass import Skeleton, Soma, register_skeleton_methods
 from .plot.vis2d import projection as plot2d
 from .plot.vis2d import threeviews as plot3v
-from .plot.vis3d import view3d
+from .plot import view3d
 from .skeletonize import skeletonize
 
 try:

@@ -9,7 +9,15 @@ import trimesh
 
 from ._core import _bfs_parents
 from ._state import rebuild_vert2node
-from .dataclass import MeshStats, Organelles, Skeleton, Soma
+from .dataclass import (
+    Discarded,
+    MeshComponents,
+    MeshStats,
+    Neurites,
+    Organelles,
+    Skeleton,
+    Soma,
+)
 
 __all__ = [
     "load_mesh",
@@ -541,7 +549,7 @@ def load_soma_npz(path: str | Path) -> Soma:
 
 
 def save_organelles_npz(
-    org: Organelles,
+    organelles: Organelles,
     path: str | Path,
     *,
     compress: bool = True,
@@ -551,11 +559,11 @@ def save_organelles_npz(
     if not path.suffix:
         path = path.with_suffix(".npz")
 
-    s = org.mesh_stats
+    s = organelles.mesh_stats
     payload: dict[str, np.ndarray] = {
-        "pocket": np.asarray(org.pocket, dtype=bool),
-        "isolated": np.asarray(org.isolated, dtype=bool),
-        "expanded": np.asarray(org.expanded, dtype=bool),
+        "pocket": np.asarray(organelles.pocket, dtype=bool),
+        "isolated": np.asarray(organelles.isolated, dtype=bool),
+        "expanded": np.asarray(organelles.expanded, dtype=bool),
         "outward_dots": s.outward_dots,
         "face_comp": s.face_comp,
         "main_ci": np.array(s.main_ci),
@@ -583,6 +591,173 @@ def load_organelles_npz(path: str | Path) -> Organelles:
             else np.zeros_like(pocket),
             mesh_stats=stats,
         )
+
+
+# --------------------------------
+# --- Neurites / Discarded NPZ ---
+# --------------------------------
+
+
+def save_neurites_npz(
+    neurites: Neurites,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write a :class:`Neurites` to a compressed ``.npz`` archive."""
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+    payload: dict[str, np.ndarray] = {
+        "n": np.array(len(neurites.components)),
+    }
+    for i, comp in enumerate(neurites.components):
+        payload[f"c{i}"] = np.asarray(comp, dtype=np.int64)
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_neurites_npz(path: str | Path) -> Neurites:
+    """Load a :class:`Neurites` written by :func:`save_neurites_npz`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        n = int(z["n"])
+        components = [z[f"c{i}"].astype(np.int64) for i in range(n)]
+    return Neurites(components)
+
+
+def save_discarded_npz(
+    discarded: Discarded,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write a :class:`Discarded` to a compressed ``.npz`` archive."""
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+    payload: dict[str, np.ndarray] = {
+        "n": np.array(len(discarded.components)),
+    }
+    for i, comp in enumerate(discarded.components):
+        payload[f"c{i}"] = np.asarray(comp, dtype=np.int64)
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_discarded_npz(path: str | Path) -> Discarded:
+    """Load a :class:`Discarded` written by :func:`save_discarded_npz`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        n = int(z["n"])
+        components = [z[f"c{i}"].astype(np.int64) for i in range(n)]
+    return Discarded(components)
+
+
+# ----------------------------------
+# --- MeshComponents NPZ I/O ---
+# ----------------------------------
+
+
+def save_components_npz(
+    components: MeshComponents,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write a :class:`MeshComponents` to a single ``.npz`` archive.
+
+    Packs soma, organelles, neurites, and discarded into one file.
+    """
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+
+    payload: dict[str, np.ndarray] = {}
+
+    # Soma
+    if components.soma is not None:
+        s = components.soma
+        payload["soma_center"] = s.center
+        payload["soma_axes"] = s.axes
+        payload["soma_R"] = s.R
+        if s.verts is not None:
+            payload["soma_verts"] = s.verts.astype(np.int64, copy=False)
+        if s.nucleus is not None:
+            nuc = s.nucleus
+            payload["soma_nucleus_center"] = np.asarray(nuc["center"], dtype=np.float64)
+            payload["soma_nucleus_peak_r"] = np.array(nuc["peak_r"], dtype=np.float64)
+            payload["soma_nucleus_z_range"] = np.array(nuc["z_range"], dtype=np.float64)
+            payload["soma_nucleus_slices"] = np.asarray(nuc["slices"], dtype=np.float64)
+
+    # Organelles
+    organelles = components.organelles
+    payload["organelles_pocket"] = np.asarray(organelles.pocket, dtype=bool)
+    payload["organelles_isolated"] = np.asarray(organelles.isolated, dtype=bool)
+    payload["organelles_expanded"] = np.asarray(organelles.expanded, dtype=bool)
+    payload["organelles_outward_dots"] = organelles.mesh_stats.outward_dots
+    payload["organelles_face_comp"] = organelles.mesh_stats.face_comp
+    payload["organelles_main_ci"] = np.array(organelles.mesh_stats.main_ci)
+
+    # Neurites
+    payload["n_neurites"] = np.array(len(components.neurites.components))
+    for i, comp in enumerate(components.neurites.components):
+        payload[f"neurite_{i}"] = np.asarray(comp, dtype=np.int64)
+
+    # Discarded
+    payload["n_discarded"] = np.array(len(components.discarded.components))
+    for i, comp in enumerate(components.discarded.components):
+        payload[f"discarded_{i}"] = np.asarray(comp, dtype=np.int64)
+
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_components_npz(path: str | Path) -> MeshComponents:
+    """Load a :class:`MeshComponents` written by :func:`save_components_npz`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        # Soma
+        if "soma_center" in z:
+            nucleus = None
+            if "soma_nucleus_center" in z:
+                nucleus = {
+                    "center": z["soma_nucleus_center"].astype(np.float64),
+                    "peak_r": float(z["soma_nucleus_peak_r"]),
+                    "z_range": tuple(z["soma_nucleus_z_range"].astype(np.float64)),
+                    "slices": z["soma_nucleus_slices"].astype(np.float64),
+                }
+            soma = Soma(
+                center=z["soma_center"].astype(np.float64),
+                axes=z["soma_axes"].astype(np.float64),
+                R=z["soma_R"].astype(np.float64),
+                verts=z["soma_verts"].astype(np.int64) if "soma_verts" in z else None,
+                nucleus=nucleus,
+            )
+        else:
+            soma = None
+
+        # Organelles
+        organelles = Organelles(
+            pocket=z["organelles_pocket"].astype(bool),
+            isolated=z["organelles_isolated"].astype(bool),
+            expanded=z["organelles_expanded"].astype(bool),
+            mesh_stats=MeshStats(
+                outward_dots=z["organelles_outward_dots"],
+                face_comp=z["organelles_face_comp"],
+                main_ci=int(z["organelles_main_ci"]),
+            ),
+        )
+
+        # Neurites
+        n_n = int(z["n_neurites"])
+        neurites = Neurites([z[f"neurite_{i}"].astype(np.int64) for i in range(n_n)])
+
+        # Discarded
+        n_d = int(z["n_discarded"])
+        discarded = Discarded([z[f"discarded_{i}"].astype(np.int64) for i in range(n_d)])
+
+    return MeshComponents(soma=soma, organelles=organelles, neurites=neurites, discarded=discarded)
 
 
 # --------------------------

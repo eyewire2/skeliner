@@ -31,6 +31,9 @@
                 pointer-events: none;
                 max-width: 400px;
             }
+            #info details { pointer-events: auto; }
+            #info details summary { cursor: pointer; list-style: none; color: #666; }
+            #info details summary::-webkit-details-marker { display: none; }
             #info .label {
                 color: #888;
             }
@@ -246,22 +249,37 @@
         <div id="lasso-rect"></div>
         <div id="lockIndicator" style="display:none;position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(200,50,50,0.7);color:#fff;padding:4px 12px;border-radius:4px;font-size:12px;font-family:monospace;z-index:100;cursor:pointer;" onclick="this.style.display='none'">Camera Locked (L to unlock) x</div>
 
+        <div id="contact-info" style="display:none;position:absolute;top:10px;left:10px;color:#ccc;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.6);padding:8px 12px;border-radius:4px;pointer-events:none;z-index:10">
+            <div style="color:#adf;font-weight:bold;margin-bottom:4px">Contact Sites</div>
+            <div><span class="label">Sites: </span><span id="contactNSites">-</span></div>
+            <div><span class="label">Side: </span><span id="contactSide">-</span></div>
+            <div style="margin-top:6px;color:#888;font-size:11px">
+              <div>A &mdash; toggle mesh A</div>
+              <div>B &mdash; toggle mesh B</div>
+              <div>H &mdash; toggle this panel</div>
+              <div>R &mdash; reset camera</div>
+            </div>
+        </div>
+
         <div id="info">
             <div><span class="label">Vertices: </span><span class="value" id="nVerts">-</span></div>
             <div><span class="label">Faces: </span><span class="value" id="nFaces">-</span></div>
             <div><span class="label">Skel nodes: </span><span class="value" id="nNodes">-</span></div>
             <div><span class="label">Camera: </span><span class="value" id="camPos">-</span></div>
             <div><span class="label">Visible faces: </span><span class="value" id="visCount">-</span></div>
-            <div style="margin-top:4px;color:#666;font-size:11px;">
+            <details id="shortcutsPanel" style="margin-top:4px;color:#666;font-size:11px;">
+              <summary>Shortcuts (S)</summary>
               <div>Click: select</div>
+              <div>Dbl-click: select annotation</div>
               <div>Shift+click: highlight</div>
               <div>Shift+drag: lasso</div>
               <div>G: grab (drag to move)</div>
               <div>T: rotate (drag to rotate)</div>
+              <div>S: toggle shortcuts</div>
               <div>H: toggle UI</div>
               <div>L: lock camera</div>
               <div>R: reset camera</div>
-            </div>
+            </details>
         </div>
 
         <div id="controls">
@@ -284,9 +302,7 @@
                 <button id="detectParallelBtn" style="margin-left:4px">Parallel</button>
                 <button id="detectOrganellesBtn" style="margin-left: 4px">Organelles</button>
                 <button id="detectFusionsBtn" style="margin-left: 4px">Fusions</button>
-                <button id="detectFragmentsBtn" style="margin-left: 4px">Fragments</button>
                 <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
-                <button id="detectHolesBtn" style="margin-left: 4px">Holes</button>
 
                 <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                 <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
@@ -308,23 +324,13 @@
                     <button id="removeParallelBtn" style="margin-left: 4px">Parallel</button>
                     <button id="removeOrganellesBtn" style="margin-left: 4px">Organelles</button>
                     <button id="removeFusionsBtn" style="margin-left: 4px">Fusions</button>
-                    <button id="removeFragmentsBtn" style="margin-left: 4px">Fragments</button>
                     <button id="removeGapsBtn" style="margin-left: 4px">Gaps</button>
-                    <span style="position:relative;display:inline-block;margin-left:4px">
-                        <button id="fillHolesBtn">Holes</button>
-                        <div id="holesPopup" style="display:none;position:absolute;bottom:100%;left:0;margin-bottom:4px;background:rgba(0,0,0,0.85);border:1px solid #555;border-radius:4px;padding:6px 8px;white-space:nowrap;z-index:300">
-                            <div style="color:#888;font-size:10px;margin-bottom:4px">Fill method:</div>
-                            <button class="holes-method-btn" data-method="advancing_front" style="display:block;width:100%;text-align:left;margin-bottom:2px">Advancing Front</button>
-                            <button class="holes-method-btn" data-method="dome" style="display:block;width:100%;text-align:left;margin-bottom:2px">Dome (convex)</button>
-                            <button class="holes-method-btn" data-method="rbf" style="display:block;width:100%;text-align:left">RBF</button>
-                        </div>
-                    </span>
                     <span style="color: #888; margin-left: 12px">Path:</span>
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
                     <span style="color: #888; margin-left: 12px">Mesh:</span>
-                    <button id="alignOffsetsBtn" style="margin-left: 4px">Align</button>
-                    <button id="breakAtSomaBtn" style="margin-left: 4px">Break</button>
+                    <button id="hlMerge" style="margin-left: 4px">Merge</button>
+                    <button id="breakUpMeshBtn" style="margin-left: 4px">Break</button>
                     <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
                 </span>
                 <span style="margin-left: 12px">
@@ -420,24 +426,29 @@
                     background: #111; color: #eee; border: 1px solid #555; border-radius: 3px;
                 " />
             </div>
-            <div style="display:flex;gap:12px;margin-bottom:12px">
+            <div style="display:flex;gap:16px;margin-bottom:12px">
                 <div>
-                    <div style="color:#888;margin-bottom:4px">OBJ</div>
-                    <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Mesh</button>
+                    <div id="saveMeshGroup">
+                        <div style="color:#888;margin-bottom:4px;font-size:11px">OBJ</div>
+                        <button id="saveMeshObj" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Mesh</button>
+                    </div>
+                    <div id="saveSkelSwcGroup" style="margin-top:10px">
+                        <div style="color:#888;margin-bottom:4px;font-size:11px">SWC</div>
+                        <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Skeleton</button>
+                    </div>
+                    <div id="saveAnnotationsGroup" style="margin-top:10px">
+                        <div style="color:#888;margin-bottom:4px;font-size:11px">JSON</div>
+                        <button id="saveAnnotations" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Annotations</button>
+                    </div>
                 </div>
                 <div>
-                    <div style="color:#888;margin-bottom:4px">NPZ</div>
-                    <button id="saveSkelNpz" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Skeleton</button>
-                    <button id="saveSomaNpz" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Soma</button>
-                    <button id="saveOrgMasks" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Organelles</button>
-                </div>
-                <div>
-                    <div style="color:#888;margin-bottom:4px">SWC</div>
-                    <button id="saveSkelSwc" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Skeleton</button>
-                </div>
-                <div>
-                    <div style="color:#888;margin-bottom:4px">JSON</div>
-                    <button id="saveAnnotations" style="font-size:12px;cursor:pointer;padding:6px 20px;display:block;margin-bottom:4px">Annotations</button>
+                    <div style="color:#888;margin-bottom:4px;font-size:11px">NPZ</div>
+                    <button id="saveSkelNpz" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Skeleton</button>
+                    <button id="saveSomaNpz" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Soma</button>
+                    <button id="saveOrgMasks" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Organelles</button>
+                    <button id="saveNeurites" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Neurites</button>
+                    <button id="saveDiscarded" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Discarded</button>
+                    <button id="saveComponents" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Components</button>
                 </div>
             </div>
             <hr style="border:none;border-top:1px solid #444;margin:12px 0" />
@@ -484,14 +495,7 @@
                 <button id="hlSaveBtn" style="font-size: 11px; cursor: pointer; margin-left: 4px">
                     Save
                 </button>
-                <button id="hlCheckFusion" style="font-size: 11px; cursor: pointer; margin-left: 4px">
-                    Check Fusion
-                </button>
-                <button id="hlMerge" style="font-size: 11px; cursor: pointer; margin-left: 4px">
-                    Merge
-                </button>
             </div>
-            <div id="fusionResult" style="margin-top: 4px; font-size: 11px; color: #adf; display: none"></div>
             <div id="hlList" style="margin-top: 4px; max-height: 200px; overflow-y: auto"></div>
             <div style="margin-top: 2px; display: flex; justify-content: space-between; align-items: center">
                 <div id="hlClearAllRow" style="display: none">
@@ -549,6 +553,9 @@ let meshCentroid = [0, 0, 0];
             let edgeGroupMeshes = [];
             let manualHighlightFaces = new Set();
             let manualHighlightMesh = null;
+
+            // ── Extra meshes ────────────────────────────────────────────────
+            let extraMeshObjs = {};   // name → {mesh, wireframe, geometry}
 
             // ── Transform (edit mesh) state ─────────────────────────────────
             let transformMode = null;         // 'translate' | 'rotate' | null
@@ -635,6 +642,40 @@ let meshCentroid = [0, 0, 0];
                     }
                 }
 
+                // Try loading extra meshes (multi-mesh / contact mode)
+                const extraResp = await fetch("/extra_meshes");
+                const extraData = await extraResp.json();
+                if (extraData) {
+                    for (const [name, data] of Object.entries(extraData)) {
+                        buildExtraMesh(name, data);
+                    }
+                    fitCamera();
+                }
+
+                // Try loading contact mode
+                const contactResp = await fetch("/contact_sites");
+                const contactData = await contactResp.json();
+                if (contactData) {
+                    contactMode = true;
+                    // Switch to contact mode UI: hide single-mesh panels
+                    for (const id of ['info', 'controls', 'detect-panel', 'loaded-panel']) {
+                        const el = document.getElementById(id);
+                        if (el) el.style.display = 'none';
+                    }
+                    const cp = document.getElementById('contact-info');
+                    if (cp) {
+                        cp.style.display = '';
+                        document.getElementById('contactNSites').textContent = contactData.nSites || '?';
+                        document.getElementById('contactSide').textContent = contactData.sides || '?';
+                    }
+                    // Load contact annotations immediately (don't wait for file watcher)
+                    const annResp = await fetch("/annotations");
+                    const annData = await annResp.json();
+                    if (annData && (annData.highlights || annData.edge_groups)) {
+                        applyAnnotations(annData);
+                    }
+                }
+
                 // Update loaded panel
                 updateLoadedPanel();
 
@@ -642,6 +683,7 @@ let meshCentroid = [0, 0, 0];
                 setupDragDrop();
 
                 renderer.domElement.addEventListener("click", onClickSelect);
+                renderer.domElement.addEventListener("dblclick", onDblClickAnnotation);
                 setupLassoSelection();
                 document.getElementById("hlClear").addEventListener("click", () => {
                     manualHighlightFaces.clear();
@@ -652,8 +694,6 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("hlSaveName").addEventListener("keydown", (e) => {
                     if (e.key === "Enter") saveHighlightAsAnnotation();
                 });
-                document.getElementById("hlCheckFusion").addEventListener("click", checkFusion);
-                document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
                 document.getElementById("showGridBtn").addEventListener("click", toggleChunkGrid);
                 document.getElementById("detectParallelBtn").addEventListener("click", detectParallelPatches);
 
@@ -661,29 +701,14 @@ let meshCentroid = [0, 0, 0];
                 renderer.domElement.addEventListener("pointerdown", onRecenter);
 
                 document.getElementById("detectOrganellesBtn").addEventListener("click", runDetectOrganelles);
-                document.getElementById("detectHolesBtn").addEventListener("click", runDetectHoles);
                 document.getElementById("detectFusionsBtn").addEventListener("click", runDetectFusions);
-                document.getElementById("detectFragmentsBtn").addEventListener("click", runDetectFragments);
                 document.getElementById("detectSomaBtn").addEventListener("click", () => runDetectSoma("ring_cutoff"));
                 document.getElementById("detectDisconnectedBtn").addEventListener("click", runDetectDisconnected);
                 document.getElementById("detectGapsBtn").addEventListener("click", runDetectGaps);
                 document.getElementById("removeParallelBtn").addEventListener("click", runRemoveParallel);
                 document.getElementById("removeOrganellesBtn").addEventListener("click", runRemoveOrganelles);
                 document.getElementById("removeFusionsBtn").addEventListener("click", runRemoveFusions);
-                document.getElementById("removeFragmentsBtn").addEventListener("click", runRemoveFragments);
                 document.getElementById("removeGapsBtn").addEventListener("click", runRemoveGaps);
-                document.getElementById("fillHolesBtn").addEventListener("click", () => {
-                    const popup = document.getElementById("holesPopup");
-                    popup.style.display = popup.style.display === "none" ? "" : "none";
-                });
-                document.querySelectorAll(".holes-method-btn").forEach(btn => {
-                    btn.addEventListener("click", () => runFillHoles(btn.dataset.method));
-                });
-                document.addEventListener("click", (e) => {
-                    if (!e.target.closest("#fillHolesBtn") && !e.target.closest("#holesPopup")) {
-                        document.getElementById("holesPopup").style.display = "none";
-                    }
-                });
                 document.getElementById("undoBtn").addEventListener("click", runUndo);
                 document.getElementById("saveBtn").addEventListener("click", openSaveDialog);
                 document.getElementById("saveDialogClose").addEventListener("click", closeSaveDialog);
@@ -693,13 +718,13 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveSkelNpz").addEventListener("click", () => doSave("npz_skel"));
                 document.getElementById("saveSomaNpz").addEventListener("click", () => doSave("soma"));
                 document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
+                document.getElementById("saveComponents").addEventListener("click", () => doSave("components"));
+                document.getElementById("saveNeurites").addEventListener("click", () => doSave("neurites"));
+                document.getElementById("saveDiscarded").addEventListener("click", () => doSave("discarded"));
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
-                document.getElementById("alignOffsetsBtn").addEventListener("click", (e) => {
-                    if (e.shiftKey) _alignDismissed = true;
-                    runAlignOffsets();
-                });
-                document.getElementById("breakAtSomaBtn").addEventListener("click", runBreakAtSoma);
+                document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
+                document.getElementById("breakUpMeshBtn").addEventListener("click", runBreakUpMesh);
                 document.getElementById("compactMeshBtn").addEventListener("click", runCompactMesh);
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
                 document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
@@ -756,8 +781,6 @@ let meshCentroid = [0, 0, 0];
                             if (has("organelle")) setBtnState(document.getElementById("detectOrganellesBtn"), "done");
                             if (has("soma")) setBtnState(document.getElementById("detectSomaBtn"), "done");
                             if (has("fusion")) setBtnState(document.getElementById("detectFusionsBtn"), "done");
-                            if (has("fragment")) setBtnState(document.getElementById("detectFragmentsBtn"), "done");
-                            if (has("hole")) setBtnState(document.getElementById("detectHolesBtn"), "done");
                             if (has("gap")) setBtnState(document.getElementById("detectGapsBtn"), "done");
                             if (has("disconn")) setBtnState(document.getElementById("detectDisconnectedBtn"), "done");
                             if (has("patch:")) setBtnState(document.getElementById("detectParallelBtn"), "done");
@@ -992,7 +1015,7 @@ let meshCentroid = [0, 0, 0];
                         positions[i * 9 + 6 + k] = verts[c * 3 + k];
                     }
                     const savedMeshColor = localStorage.getItem('skeliner_meshColor');
-                    const mc = savedMeshColor ? hexToRgb01(savedMeshColor) : [0.55, 0.55, 0.6];
+                    const mc = data.color || (savedMeshColor ? hexToRgb01(savedMeshColor) : [0.55, 0.55, 0.6]);
                     const r = mc[0], g = mc[1], bl = mc[2];
                     for (let v = 0; v < 3; v++) {
                         colors[i * 9 + v * 3] = r;
@@ -1036,6 +1059,58 @@ let meshCentroid = [0, 0, 0];
                 if (!data.keepCamera) fitCamera();
                 // Rebuild highlights (e.g. after edit_vertices broadcast)
                 if (manualHighlightFaces.size > 0) rebuildManualHighlight();
+            }
+
+            // ── Build extra mesh (multi-mesh / contact mode) ────────────────────
+            function buildExtraMesh(name, data) {
+                // Remove old version
+                if (extraMeshObjs[name]) {
+                    scene.remove(extraMeshObjs[name].mesh);
+                    extraMeshObjs[name].mesh.geometry.dispose();
+                    extraMeshObjs[name].mesh.material.dispose();
+                    delete extraMeshObjs[name];
+                }
+
+                const { vertices, faces, nVertices, nFaces } = data;
+                const color = data.color || [0.55, 0.55, 0.6];
+                const opacity = data.opacity != null ? data.opacity : 1.0;
+
+                const geo = new THREE.BufferGeometry();
+                const positions = new Float32Array(nFaces * 9);
+                const colors = new Float32Array(nFaces * 9);
+                const verts = new Float32Array(vertices);
+
+                for (let i = 0; i < nFaces; i++) {
+                    const a = faces[i * 3], b = faces[i * 3 + 1], c = faces[i * 3 + 2];
+                    for (let k = 0; k < 3; k++) {
+                        positions[i * 9 + k] = verts[a * 3 + k];
+                        positions[i * 9 + 3 + k] = verts[b * 3 + k];
+                        positions[i * 9 + 6 + k] = verts[c * 3 + k];
+                    }
+                    for (let v = 0; v < 3; v++) {
+                        colors[i * 9 + v * 3] = color[0];
+                        colors[i * 9 + v * 3 + 1] = color[1];
+                        colors[i * 9 + v * 3 + 2] = color[2];
+                    }
+                }
+
+                geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+                geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+                geo.computeVertexNormals();
+
+                const meshMat = new THREE.MeshPhongMaterial({
+                    vertexColors: true,
+                    side: THREE.DoubleSide,
+                    clippingPlanes: [clipPlane],
+                    shininess: 30,
+                    transparent: opacity < 1.0,
+                    opacity: opacity,
+                    depthWrite: opacity >= 1.0,
+                });
+                const obj = new THREE.Mesh(geo, meshMat);
+                scene.add(obj);
+
+                extraMeshObjs[name] = { mesh: obj, geometry: geo };
             }
 
             // ── Build skeleton ───────────────────────────────────────────────────
@@ -1196,6 +1271,12 @@ let meshCentroid = [0, 0, 0];
                     if (sg && sg.group) {
                         const skelBox = new THREE.Box3().setFromObject(sg.group);
                         box.union(skelBox);
+                    }
+                }
+                for (const em of Object.values(extraMeshObjs)) {
+                    if (em && em.geometry) {
+                        em.geometry.computeBoundingBox();
+                        box.union(em.geometry.boundingBox);
                     }
                 }
                 if (box.isEmpty()) return;
@@ -1359,6 +1440,40 @@ let meshCentroid = [0, 0, 0];
                     }).catch(() => {});
             }
 
+            // ── Double-click: select annotation ──────────────────────────────────
+            function onDblClickAnnotation(event) {
+                if (transformMode || !meshObj) return;
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+                const hits = raycaster.intersectObject(meshObj);
+                if (hits.length === 0) return;
+                const faceIndex = hits[0].faceIndex;
+
+                if (!currentAnnotations || !currentAnnotations.highlights) return;
+                const faceSets = currentAnnotations.highlights.map(
+                    (g) => new Set(g.faces || [])
+                );
+                for (let i = 0; i < faceSets.length; i++) {
+                    if (!faceSets[i].has(faceIndex)) continue;
+                    const annFaces = currentAnnotations.highlights[i].faces || [];
+                    // Toggle: if all faces of this annotation are already selected, remove them
+                    const allSelected = annFaces.every((fi) => manualHighlightFaces.has(fi));
+                    if (allSelected) {
+                        for (const fi of annFaces) manualHighlightFaces.delete(fi);
+                    } else {
+                        for (const fi of annFaces) manualHighlightFaces.add(fi);
+                    }
+                    rebuildManualHighlight();
+                    syncManualHighlight();
+                    const label = currentAnnotations.highlights[i].label || `highlight ${i}`;
+                    const verb = allSelected ? "Deselected" : "Selected";
+                    document.getElementById("selDetail").innerHTML =
+                        `<div>${verb}: <b>${label}</b> (${manualHighlightFaces.size} faces total)</div>`;
+                    return;
+                }
+            }
+
             // ── Node selection display & sync ─────────────────────────────────────
             function updateNodeSelectionDisplay() {
                 const keys = Object.keys(selectedNodes);
@@ -1476,13 +1591,6 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            async function runDetectHoles() {
-                await _runAction(
-                    document.getElementById("detectHolesBtn"),
-                    () => fetch("/detect_holes", { method: "POST" }),
-                );
-            }
-
             async function runDetectFusions() {
                 await _runAction(
                     document.getElementById("detectFusionsBtn"),
@@ -1518,13 +1626,6 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            async function runDetectFragments() {
-                await _runAction(
-                    document.getElementById("detectFragmentsBtn"),
-                    () => fetch("/detect_fragments", { method: "POST" }),
-                );
-            }
-
             async function runDetectSoma(method = "z_contour") {
                 await _runAction(
                     document.getElementById("detectSomaBtn"),
@@ -1550,25 +1651,10 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            async function runRemoveFragments() {
-                await _runAction(
-                    document.getElementById("removeFragmentsBtn"),
-                    () => fetch("/remove_fragments", { method: "POST" }),
-                );
-            }
-
             async function runRemoveGaps() {
                 await _runAction(
                     document.getElementById("removeGapsBtn"),
                     () => fetch("/remove_gaps", { method: "POST" }),
-                );
-            }
-
-            async function runFillHoles(fillMethod) {
-                document.getElementById("holesPopup").style.display = "none";
-                await _runAction(
-                    document.getElementById("fillHolesBtn"),
-                    () => fetch(`/fill_holes?method=${fillMethod}`, { method: "POST" }),
                 );
             }
 
@@ -1579,26 +1665,10 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            let _alignDismissed = false;
-            async function runAlignOffsets() {
-                if (!_alignDismissed) {
-                    const proceed = confirm(
-                        "This feature is not finished and will likely not be able to yield any meaningful results.\n\n" +
-                        "Press OK to proceed anyway, or Cancel to abort.\n\n" +
-                        "(Hold Shift while clicking Align to skip this warning in the future.)"
-                    );
-                    if (!proceed) return;
-                }
-                await _runAction(
-                    document.getElementById("alignOffsetsBtn"),
-                    () => fetch("/align_offsets", { method: "POST" }),
-                );
-            }
-
-            async function runBreakAtSoma() {
+            async function runBreakUpMesh() {
                 const data = await _runAction(
-                    document.getElementById("breakAtSomaBtn"),
-                    () => fetch("/break_at_soma", { method: "POST" }),
+                    document.getElementById("breakUpMeshBtn"),
+                    () => fetch("/break_up_mesh", { method: "POST" }),
                 );
                 if (data && data.ok) fetchAnnotations();
             }
@@ -1627,10 +1697,38 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
-            function openSaveDialog() {
+            async function openSaveDialog() {
                 document.getElementById("saveDialogStatus").textContent = "";
                 document.getElementById("save-dialog").style.display = "block";
                 document.getElementById("save-dialog-backdrop").style.display = "block";
+
+                // Show/hide buttons based on available data
+                const btnMap = {
+                    saveSkelNpz: "skeleton",
+                    saveSomaNpz: "soma",
+                    saveOrgMasks: "organelles",
+                    saveNeurites: "neurites",
+                    saveDiscarded: "discarded",
+                    saveComponents: "components",
+                };
+                const groupMap = {
+                    saveMeshGroup: "mesh",
+                    saveSkelSwcGroup: "skeleton",
+                    saveAnnotationsGroup: "annotations",
+                };
+                try {
+                    const resp = await fetch("/save_availability");
+                    const avail = await resp.json();
+                    for (const [btnId, key] of Object.entries(btnMap)) {
+                        const btn = document.getElementById(btnId);
+                        if (btn) btn.style.display = avail[key] ? "block" : "none";
+                    }
+                    for (const [grpId, key] of Object.entries(groupMap)) {
+                        const grp = document.getElementById(grpId);
+                        if (grp) grp.style.display = avail[key] ? "" : "none";
+                    }
+                    document.getElementById("saveAll").style.display = avail.mesh ? "" : "none";
+                } catch (e) {}
             }
 
             function closeSaveDialog() {
@@ -1714,6 +1812,19 @@ let meshCentroid = [0, 0, 0];
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }
+                    }
+                    if (mode === "components" || mode === "all") {
+                        try {
+                            saved.push(await downloadFile(`/export_components?prefix=${pfx}`));
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
+                    }
+                    if (mode === "neurites") {
+                        saved.push(await downloadFile(`/export_neurites?prefix=${pfx}`));
+                    }
+                    if (mode === "discarded") {
+                        saved.push(await downloadFile(`/export_discarded?prefix=${pfx}`));
                     }
                     if (mode === "annotations" || mode === "all") {
                         try {
@@ -2228,41 +2339,6 @@ let meshCentroid = [0, 0, 0];
                 nameInput.value = "";
             }
 
-            async function checkFusion() {
-                if (manualHighlightFaces.size === 0) return;
-                const resultDiv = document.getElementById("fusionResult");
-                resultDiv.style.display = "block";
-                resultDiv.textContent = "Analyzing...";
-                try {
-                    const resp = await fetch("/check_fusion", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
-                    });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        const lines = [];
-                        if (data.nm_edges > 0) lines.push(`${data.nm_edges} non-manifold edges`);
-                        if (data.duplicate_faces > 0) lines.push(`${data.duplicate_faces} duplicate faces`);
-                        if (data.high_neighbor_faces > 0)
-                            lines.push(`${data.high_neighbor_faces} faces with >3 neighbors`);
-                        if (data.fusion_faces && data.fusion_faces.length > 0) {
-                            lines.push(`${data.fusion_faces.length} fusion face(s) found`);
-                            // Add fusion faces to highlight
-                            for (const fi of data.fusion_faces) manualHighlightFaces.add(fi);
-                            rebuildManualHighlight();
-                            syncManualHighlight();
-                        }
-                        resultDiv.textContent =
-                            lines.length > 0 ? lines.join(" | ") : "No fusion signals found";
-                    } else {
-                        resultDiv.textContent = data.error || "Error";
-                    }
-                } catch (e) {
-                    resultDiv.textContent = "Error: " + e.message;
-                }
-            }
-
             // ── Chunk grid toggle ─────────────────────────────────────────────
             let chunkGridLoaded = false;
             async function toggleChunkGrid() {
@@ -2435,10 +2511,19 @@ let meshCentroid = [0, 0, 0];
                     mouse.x = (upEvent.clientX / window.innerWidth) * 2 - 1;
                     mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
                     raycaster.setFromCamera(mouse, camera);
-                    if (!meshObj) return;
-                    const hits = raycaster.intersectObject(meshObj);
-                    if (hits.length === 0) return;
-                    const pickPoint = hits[0].point;
+                    const targets = [];
+                    if (meshObj) targets.push(meshObj);
+                    for (const em of Object.values(extraMeshObjs)) {
+                        if (em && em.mesh) targets.push(em.mesh);
+                    }
+                    if (targets.length === 0) return;
+                    let best = null;
+                    for (const t of targets) {
+                        const h = raycaster.intersectObject(t);
+                        if (h.length > 0 && (!best || h[0].distance < best.distance)) best = h[0];
+                    }
+                    if (!best) return;
+                    const pickPoint = best.point;
                     const offset = camera.position.clone().sub(controls.target);
                     controls.target.copy(pickPoint);
                     camera.position.copy(pickPoint).add(offset);
@@ -2558,12 +2643,20 @@ let meshCentroid = [0, 0, 0];
                 updateHighlightsPanel();
                 if (!annotations) return;
                 // Face highlights
-                if (annotations.highlights && meshGeometry) {
-                    const posAttr = meshGeometry.getAttribute("position");
+                if (annotations.highlights) {
                     for (const group of annotations.highlights) {
                         const fi = group.faces || [];
                         if (fi.length === 0) continue;
                         const color = group.color || [1, 0, 0];
+
+                        // Resolve source geometry (support meshKey for multi-mesh)
+                        let srcGeo = meshGeometry;
+                        if (group.meshKey && group.meshKey !== "primary" && extraMeshObjs[group.meshKey]) {
+                            srcGeo = extraMeshObjs[group.meshKey].geometry;
+                        }
+                        if (!srcGeo) continue;
+                        const posAttr = srcGeo.getAttribute("position");
+
                         const pos = new Float32Array(fi.length * 9);
                         for (let j = 0; j < fi.length; j++) {
                             const base = fi[j] * 9;
@@ -3201,7 +3294,13 @@ let meshCentroid = [0, 0, 0];
 
             const UI_PANELS = ['info', 'controls', 'detect-panel', 'selection-info', 'loaded-panel'];
             let panelsVisible = true;
+            let contactMode = false;
             function togglePanels() {
+              if (contactMode) {
+                const cp = document.getElementById('contact-info');
+                if (cp) cp.style.display = cp.style.display === 'none' ? '' : 'none';
+                return;
+              }
               panelsVisible = !panelsVisible;
               const display = panelsVisible ? '' : 'none';
               for (const id of UI_PANELS) {
@@ -3251,6 +3350,22 @@ let meshCentroid = [0, 0, 0];
 
               if (transformMode) return; // block other keys during transform
 
+              // [a]/[b] toggle mesh A (primary) / B (first extra mesh)
+              if (e.key === 'a' || e.key === 'A') {
+                  if (meshObj) meshObj.visible = !meshObj.visible;
+                  if (wireframeObj) wireframeObj.visible = meshObj && meshObj.visible && document.getElementById("wireToggle").checked;
+                  return;
+              }
+              if (e.key === 'b' || e.key === 'B') {
+                  const names = Object.keys(extraMeshObjs);
+                  if (names.length > 0) {
+                      const obj = extraMeshObjs[names[0]].mesh;
+                      obj.visible = !obj.visible;
+                  }
+                  return;
+              }
+
+              if (e.key === 's' || e.key === 'S') { const d = document.getElementById('shortcutsPanel'); d.open = !d.open; }
               if (e.key === 'h' || e.key === 'H') togglePanels();
               if (e.key === 'l' || e.key === 'L') toggleCameraLock();
               if (e.key === 'r' || e.key === 'R') { localStorage.removeItem('skeliner_camera'); fitCamera(); }
