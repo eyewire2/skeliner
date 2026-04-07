@@ -6522,72 +6522,71 @@ def remove_parallel_patches(
         if not degen[fi] and labels_after[fi] != main_after:
             newly_disconnected.add(fi)
 
-    if not newly_disconnected:
-        if verbose:
-            print("[skeliner.pre] No orphan components after removal")
-        if mesh_stats is not None:
-            mesh_stats.invalidate_topology()
-        return result
-
     # ── Step 4: classify new orphan components ────────────────────
-    # Build edge→type map for removed faces
-    removed_edge_type: dict[tuple, str] = {}
-    for fi in all_removed:
-        f = faces[fi]
-        typ = "a" if fi in mode_a_faces else "b"
-        for i in range(3):
-            e = (
-                min(int(f[i]), int(f[(i + 1) % 3])),
-                max(int(f[i]), int(f[(i + 1) % 3])),
-            )
-            # If any bordering removed face is Mode B, mark as "b"
-            if removed_edge_type.get(e) != "b":
-                removed_edge_type[e] = typ
-
-    # Group newly disconnected faces by component
-    new_comp_ids = set(int(labels_after[fi]) for fi in newly_disconnected)
-    orphan_remove: set[int] = set()
-
-    for comp_id in new_comp_ids:
-        comp_face_idxs = [
-            fi
-            for fi in np.where(labels_after == comp_id)[0]
-            if fi in newly_disconnected or not degen[fi]
-        ]
-        borders_mode_b = False
-
-        for fi in comp_face_idxs:
-            if borders_mode_b:
-                break
+    # Only applies to *newly* disconnected pieces (those that were in
+    # main_before but are non-main_after).  Mode B pre-existing
+    # disconnects are handled by the stitch step unconditionally.
+    if newly_disconnected:
+        # Build edge→type map for removed faces
+        removed_edge_type: dict[tuple, str] = {}
+        for fi in all_removed:
             f = faces[fi]
+            typ = "a" if fi in mode_a_faces else "b"
             for i in range(3):
                 e = (
                     min(int(f[i]), int(f[(i + 1) % 3])),
                     max(int(f[i]), int(f[(i + 1) % 3])),
                 )
-                if removed_edge_type.get(e) == "b":
-                    borders_mode_b = True
+                # If any bordering removed face is Mode B, mark as "b"
+                if removed_edge_type.get(e) != "b":
+                    removed_edge_type[e] = typ
+
+        # Group newly disconnected faces by component
+        new_comp_ids = set(int(labels_after[fi]) for fi in newly_disconnected)
+        orphan_remove: set[int] = set()
+
+        for comp_id in new_comp_ids:
+            comp_face_idxs = [
+                fi
+                for fi in np.where(labels_after == comp_id)[0]
+                if fi in newly_disconnected or not degen[fi]
+            ]
+            borders_mode_b = False
+
+            for fi in comp_face_idxs:
+                if borders_mode_b:
                     break
+                f = faces[fi]
+                for i in range(3):
+                    e = (
+                        min(int(f[i]), int(f[(i + 1) % 3])),
+                        max(int(f[i]), int(f[(i + 1) % 3])),
+                    )
+                    if removed_edge_type.get(e) == "b":
+                        borders_mode_b = True
+                        break
 
-        if not borders_mode_b:
-            orphan_remove.update(int(fi) for fi in comp_face_idxs)
+            if not borders_mode_b:
+                orphan_remove.update(int(fi) for fi in comp_face_idxs)
 
-    if orphan_remove:
-        if verbose:
-            n_comps = len({int(labels_after[fi]) for fi in orphan_remove})
+        if orphan_remove:
+            if verbose:
+                n_comps = len({int(labels_after[fi]) for fi in orphan_remove})
+                print(
+                    f"[skeliner.pre] Removing {len(orphan_remove)} orphan faces "
+                    f"({n_comps} components from Mode A removal)"
+                )
+            keep_mask2 = np.ones(len(faces), dtype=bool)
+            keep_mask2[list(all_removed)] = False
+            keep_mask2[list(orphan_remove)] = False
+            result = _rebuild_mesh(mesh, keep_mask2)
+        elif verbose:
             print(
-                f"[skeliner.pre] Removing {len(orphan_remove)} orphan faces "
-                f"({n_comps} components from Mode A removal)"
+                f"[skeliner.pre] Keeping {len(new_comp_ids)} new disconnected "
+                f"components (border Mode B, need stitching)"
             )
-        keep_mask2 = np.ones(len(faces), dtype=bool)
-        keep_mask2[list(all_removed)] = False
-        keep_mask2[list(orphan_remove)] = False
-        result = _rebuild_mesh(mesh, keep_mask2)
     elif verbose:
-        print(
-            f"[skeliner.pre] Keeping {len(new_comp_ids)} new disconnected "
-            f"components (border Mode B, need stitching)"
-        )
+        print("[skeliner.pre] No newly orphaned components from removal")
 
     # ── Step 5: stitch Mode B gaps ───────────────────────────────
     n_before = len(result.faces)
