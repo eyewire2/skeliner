@@ -7309,6 +7309,7 @@ class PreprocessResult:
 def preprocess(
     mesh: trimesh.Trimesh,
     *,
+    compact: bool = False,
     verbose: bool = False,
 ) -> PreprocessResult:
     """Run the full preprocessing pipeline in one call.
@@ -7321,7 +7322,7 @@ def preprocess(
       4. find_disconnected → find_gaps → remove_gaps
       5. find_fusions → remove_fusions
       6. break_up_mesh
-      7. compact_mesh
+      7. compact_mesh (optional)
 
     Each ``find_*`` step is skipped if it returns nothing.
 
@@ -7329,13 +7330,19 @@ def preprocess(
     ----------
     mesh : trimesh.Trimesh
         Input mesh.
+    compact : bool, default False
+        If True, run :func:`compact_mesh` as a final step to drop
+        unreferenced vertices and degenerate faces.  This invalidates
+        original mesh indices, so external data tied to them (e.g.
+        viewer annotations) will need to be remapped.  Skeletonization
+        works correctly on uncompacted meshes.
     verbose : bool, default False
         Print progress.
 
     Returns
     -------
     PreprocessResult
-        Cleaned mesh, mesh components, and vertex remap.
+        Cleaned mesh and mesh components.
     """
     # 1. Parallel patches
     patches = find_parallel_patches(mesh, verbose=verbose)
@@ -7385,10 +7392,11 @@ def preprocess(
             discarded=Discarded([]),
         )
 
-    # 7. Compact (remaps everything in MeshComponents)
-    mesh, components = compact_mesh(
-        mesh, components=components, verbose=verbose
-    )
+    # 7. Compact (optional — remaps everything in MeshComponents)
+    if compact:
+        mesh, components = compact_mesh(
+            mesh, components=components, verbose=verbose
+        )
 
     return PreprocessResult(
         mesh=mesh,
