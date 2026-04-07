@@ -29,6 +29,7 @@ venv/
 *.swo
 
 data/*
+notebooks/data/*
 notebooks/data/*.npz
 notebooks/data/*.obj
 # !data/20156.obj

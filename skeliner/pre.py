@@ -7398,7 +7398,7 @@ def preprocess(
         verbose=verbose,
     )
     if gaps:
-        mesh = remove_gaps(mesh, gaps=gaps, verbose=verbose)
+        mesh = remove_gaps(mesh, gaps=gaps, mesh_stats=mesh_stats, verbose=verbose)
 
     # 5. Fusions
     fusions = find_fusions(mesh, mesh_stats=mesh_stats, verbose=verbose)
