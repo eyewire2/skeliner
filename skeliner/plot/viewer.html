@@ -446,6 +446,7 @@
                     <button id="saveSkelNpz" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Skeleton</button>
                     <button id="saveSomaNpz" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Soma</button>
                     <button id="saveOrgMasks" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Organelles</button>
+                    <button id="saveMeshStats" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Mesh stats</button>
                     <button id="saveNeurites" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Neurites</button>
                     <button id="saveDiscarded" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Discarded</button>
                     <button id="saveComponents" style="font-size:12px;cursor:pointer;padding:4px 16px;display:block;margin-bottom:3px;width:100%">Components</button>
@@ -718,6 +719,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveSkelNpz").addEventListener("click", () => doSave("npz_skel"));
                 document.getElementById("saveSomaNpz").addEventListener("click", () => doSave("soma"));
                 document.getElementById("saveOrgMasks").addEventListener("click", () => doSave("org_masks"));
+                document.getElementById("saveMeshStats").addEventListener("click", () => doSave("mesh_stats"));
                 document.getElementById("saveComponents").addEventListener("click", () => doSave("components"));
                 document.getElementById("saveNeurites").addEventListener("click", () => doSave("neurites"));
                 document.getElementById("saveDiscarded").addEventListener("click", () => doSave("discarded"));
@@ -1707,6 +1709,7 @@ let meshCentroid = [0, 0, 0];
                     saveSkelNpz: "skeleton",
                     saveSomaNpz: "soma",
                     saveOrgMasks: "organelles",
+                    saveMeshStats: "mesh_stats",
                     saveNeurites: "neurites",
                     saveDiscarded: "discarded",
                     saveComponents: "components",
@@ -1809,6 +1812,13 @@ let meshCentroid = [0, 0, 0];
                     if (mode === "org_masks" || mode === "all") {
                         try {
                             saved.push(await downloadFile(`/export_organelles?prefix=${pfx}`));
+                        } catch (e) {
+                            if (mode !== "all") throw e;
+                        }
+                    }
+                    if (mode === "mesh_stats" || mode === "all") {
+                        try {
+                            saved.push(await downloadFile(`/export_mesh_stats?prefix=${pfx}`));
                         } catch (e) {
                             if (mode !== "all") throw e;
                         }

@@ -58,8 +58,11 @@ class _SkeletonModuleView:
 class MeshStats:
     """Precomputed per-face mesh statistics.
 
-    Returned by :func:`~skeliner.pre.compute_mesh_stats`.
-    Stored inside :class:`Organelles` and persisted in ``organelles.npz``.
+    Returned by :func:`~skeliner.pre.compute_mesh_stats`.  Lifecycle is
+    tied to the mesh, not to organelles — mesh-mutating operations call
+    :meth:`invalidate_topology` / :meth:`invalidate_geometry` to mark the
+    cached arrays as stale.  Persist standalone via
+    :func:`~skeliner.io.save_mesh_stats_npz`.
 
     Parameters
     ----------
@@ -104,9 +107,10 @@ class MeshStats:
 # -----------------------------------------------------------------------------
 @dataclass(slots=True)
 class Organelles:
-    """Organelle masks and mesh precomputed stats.
+    """Organelle masks.
 
-    Returned by :func:`~skeliner.pre.find_organelles` and
+    Returned by :func:`~skeliner.pre.find_organelles` (alongside the
+    associated :class:`MeshStats`) and by
     :func:`~skeliner.io.load_organelles_npz`.
 
     Parameters
@@ -117,15 +121,11 @@ class Organelles:
         Isolated (disconnected) organelle faces.
     expanded : (nFaces,) bool
         Faces added by :func:`~skeliner.pre.break_up_mesh`.
-    mesh_stats : MeshStats
-        Precomputed mesh statistics from
-        :func:`~skeliner.pre.compute_mesh_stats`.
     """
 
     pocket: np.ndarray
     isolated: np.ndarray
     expanded: np.ndarray
-    mesh_stats: MeshStats
 
     @property
     def mask(self) -> np.ndarray:

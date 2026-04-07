@@ -16,6 +16,7 @@ from skeliner.dataclass import MeshStats, Organelles
 from skeliner.io import (
     load_mesh, load_skeleton_npz, load_soma_npz, load_skeleton_swc,
     save_soma_npz, save_organelles_npz, load_organelles_npz,
+    save_mesh_stats_npz, load_mesh_stats_npz,
 )
 
 SAMPLES_DIR = Path(__file__).parent / "data" 
@@ -260,7 +261,7 @@ def test_skeleton_from_npz(tmp_path, reference_mesh):
 #  Organelles NPZ round-trips
 # ------------------------------------------------------------------------
 def test_organelles_npz_full_roundtrip(tmp_path):
-    """All masks + mesh stats survive round-trip."""
+    """All masks survive round-trip."""
     nF = 1000
     pocket = np.zeros(nF, dtype=bool)
     pocket[:100] = True
@@ -269,15 +270,7 @@ def test_organelles_npz_full_roundtrip(tmp_path):
     expanded = np.zeros(nF, dtype=bool)
     expanded[500:520] = True
 
-    rng = np.random.default_rng(42)
-    stats = MeshStats(
-        outward_dots=rng.uniform(-1, 1, nF),
-        face_comp=rng.integers(0, 5, nF).astype(np.int64),
-        main_ci=0,
-    )
-    org = Organelles(
-        pocket=pocket, isolated=isolated, expanded=expanded, mesh_stats=stats,
-    )
+    org = Organelles(pocket=pocket, isolated=isolated, expanded=expanded)
 
     path = tmp_path / "org_full.npz"
     save_organelles_npz(org, path)
@@ -286,22 +279,16 @@ def test_organelles_npz_full_roundtrip(tmp_path):
     assert np.array_equal(loaded.pocket, org.pocket)
     assert np.array_equal(loaded.isolated, org.isolated)
     assert np.array_equal(loaded.expanded, org.expanded)
-    assert np.allclose(loaded.mesh_stats.outward_dots, stats.outward_dots)
-    assert np.array_equal(loaded.mesh_stats.face_comp, stats.face_comp)
-    assert loaded.mesh_stats.main_ci == stats.main_ci
     # .mask property
     assert np.array_equal(loaded.mask, pocket | isolated | expanded)
-    # .as_tuple backward compat
-    od, fc, mc, mm = loaded.mesh_stats.as_tuple()
-    assert np.array_equal(mm, loaded.mesh_stats.face_comp == loaded.mesh_stats.main_ci)
 
 
 def test_organelles_npz_backward_compat(tmp_path):
-    """Old files without 'expanded' key load with zeros fallback."""
+    """Old files with 'expanded' missing or with embedded mesh_stats still load."""
     nF = 100
     pocket = np.ones(nF, dtype=bool)
     isolated = np.zeros(nF, dtype=bool)
-    # Simulate old format: no expanded key, but has mesh stats
+    # Simulate old format: no expanded key, with leftover mesh_stats fields
     path = tmp_path / "org_old.npz"
     face_comp = np.zeros(nF, dtype=np.int64)
     np.savez_compressed(path, pocket=pocket, isolated=isolated,
@@ -311,4 +298,55 @@ def test_organelles_npz_backward_compat(tmp_path):
     loaded = load_organelles_npz(path)
     assert np.array_equal(loaded.pocket, pocket)
     assert np.array_equal(loaded.expanded, np.zeros(nF, dtype=bool))
-    assert loaded.mesh_stats.main_ci == 0
+
+
+# ------------------------------------------------------------------------
+#  MeshStats NPZ round-trip
+# ------------------------------------------------------------------------
+def test_mesh_stats_npz_roundtrip(tmp_path):
+    """outward_dots / face_comp / main_ci survive a round-trip."""
+    nF = 500
+    rng = np.random.default_rng(42)
+    stats = MeshStats(
+        outward_dots=rng.uniform(-1, 1, nF).astype(np.float32),
+        face_comp=rng.integers(0, 5, nF).astype(np.int64),
+        main_ci=2,
+    )
+
+    path = tmp_path / "mesh_stats.npz"
+    save_mesh_stats_npz(stats, path)
+
+    loaded = load_mesh_stats_npz(path)
+    assert np.allclose(loaded.outward_dots, stats.outward_dots)
+    assert np.array_equal(loaded.face_comp, stats.face_comp)
+    assert loaded.main_ci == stats.main_ci
+
+
+def test_mesh_stats_npz_face_count_validation(tmp_path):
+    """load_mesh_stats_npz raises when face count disagrees with mesh."""
+    import trimesh
+
+    nF = 50
+    stats = MeshStats(
+        outward_dots=np.zeros(nF, dtype=np.float32),
+        face_comp=np.zeros(nF, dtype=np.int64),
+        main_ci=0,
+    )
+    path = tmp_path / "mesh_stats.npz"
+    save_mesh_stats_npz(stats, path)
+
+    # Build a tetrahedron mesh (4 faces) — does not match nF=50
+    verts = np.array(
+        [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64
+    )
+    faces = np.array(
+        [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], dtype=np.int64
+    )
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+
+    with pytest.raises(ValueError, match="stale"):
+        load_mesh_stats_npz(path, mesh=mesh)
+
+    # Without the mesh argument it should still load
+    loaded = load_mesh_stats_npz(path)
+    assert loaded.main_ci == 0

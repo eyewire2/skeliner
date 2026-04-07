@@ -124,11 +124,27 @@ def _load_skeleton_as_nm(path: Path) -> Any:
 
 
 def _is_organelle_data(path: Path) -> bool:
-    """Check if an npz file contains organelle-related data."""
+    """Check if an npz file contains organelle masks."""
     try:
         with np.load(path, allow_pickle=False) as data:
-            known_keys = {"pocket", "isolated", "outward_dots", "face_comp", "main_ci"}
-            return bool(known_keys & set(data.files))
+            files = set(data.files)
+            return "pocket" in files or "isolated" in files
+    except Exception:
+        return False
+
+
+def _is_mesh_stats_data(path: Path) -> bool:
+    """Check if an npz file contains standalone MeshStats data."""
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            files = set(data.files)
+            return (
+                "outward_dots" in files
+                and "face_comp" in files
+                and "main_ci" in files
+                and "pocket" not in files
+                and "isolated" not in files
+            )
     except Exception:
         return False
 
@@ -454,6 +470,7 @@ def _create_app(
             "skeleton": len(skeleton_states) > 0,
             "soma": mesh_state.get("soma") is not None,
             "organelles": mesh_state.get("organelles") is not None,
+            "mesh_stats": mesh_state.get("mesh_stats") is not None,
             "neurites": mesh_state.get("neurites") is not None and len(mesh_state["neurites"]) > 0,
             "discarded": mesh_state.get("discarded") is not None and len(mesh_state["discarded"]) > 0,
             "components": mesh_state.get("neurites") is not None,
@@ -564,14 +581,12 @@ def _create_app(
 
                 org = load_organelles_npz(tmp_path)
                 mesh_state["organelles"] = org
-                mesh_state["mesh_stats"] = org.mesh_stats
                 loaded = []
 
                 loaded.append(f"pocket={int(org.pocket.sum()):,}")
                 loaded.append(f"isolated={int(org.isolated.sum()):,}")
                 if org.expanded.any():
                     loaded.append(f"expanded={int(org.expanded.sum()):,}")
-                loaded.append("mesh_stats")
 
                 # Visualize
                 ann = {}
@@ -613,6 +628,28 @@ def _create_app(
                         "type": "organelles",
                         "name": filename,
                         "loaded": loaded,
+                    }
+                )
+
+            elif suffix == ".npz" and _is_mesh_stats_data(tmp_path):
+                from skeliner.io import load_mesh_stats_npz
+
+                cur_mesh = mesh_state.get("mesh")
+                try:
+                    ms = load_mesh_stats_npz(tmp_path, mesh=cur_mesh)
+                except ValueError as exc:
+                    return JSONResponse(
+                        {"ok": False, "error": str(exc)}, status_code=400
+                    )
+                mesh_state["mesh_stats"] = ms
+                n_faces = len(ms.outward_dots) if ms.outward_dots is not None else 0
+                print(f"Loaded mesh_stats: {n_faces:,} faces")
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "type": "mesh_stats",
+                        "name": filename,
+                        "nFaces": n_faces,
                     }
                 )
 
@@ -681,7 +718,6 @@ def _create_app(
                 if comp.soma is not None:
                     mesh_state["soma"] = comp.soma
                 mesh_state["organelles"] = comp.organelles
-                mesh_state["mesh_stats"] = comp.organelles.mesh_stats
 
                 # Build annotations
                 ann = {}
@@ -1248,7 +1284,6 @@ def _create_app(
             pocket=pocket,
             isolated=isolated,
             expanded=expanded,
-            mesh_stats=ms,
         )
 
         ann = {}
@@ -1309,7 +1344,7 @@ def _create_app(
             soma = await _run_with_log(
                 find_soma_via_ring_cutoff,
                 mesh,
-                organelles=_organelle_mask(mesh_state.get("organelles")),
+                organelles=mesh_state.get("organelles"),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
             )
@@ -1320,7 +1355,7 @@ def _create_app(
             mesh,
             verbose=True,
             soma=soma,
-            organelles=_organelle_mask(mesh_state.get("organelles")),
+            organelles=mesh_state.get("organelles"),
             mesh_stats=mesh_state.get("mesh_stats"),
         )
         mesh_state["disconnected"] = components
@@ -1395,7 +1430,7 @@ def _create_app(
             soma = await _run_with_log(
                 _find,
                 mesh,
-                organelles=_organelle_mask(mesh_state.get("organelles")),
+                organelles=mesh_state.get("organelles"),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
             )
@@ -1468,7 +1503,7 @@ def _create_app(
             soma = await _run_with_log(
                 find_soma_via_ring_cutoff,
                 mesh,
-                organelles=_organelle_mask(mesh_state.get("organelles")),
+                organelles=mesh_state.get("organelles"),
                 mesh_stats=mesh_state.get("mesh_stats"),
                 verbose=True,
             )
@@ -1538,8 +1573,6 @@ def _create_app(
         # Pass mesh_stats so remove_gaps can invalidate/pad it
         ms = mesh_state.get("mesh_stats")
         org = mesh_state.get("organelles")
-        if ms is None and org is not None:
-            ms = org.mesh_stats
 
         new_mesh = await _run_with_log(
             remove_gaps,
@@ -1561,7 +1594,6 @@ def _create_app(
                 pocket=np.concatenate([org.pocket, pad]),
                 isolated=np.concatenate([org.isolated, pad]),
                 expanded=np.concatenate([org.expanded, pad]),
-                mesh_stats=ms,
             )
 
         # ms was mutated in-place by remove_gaps (topology invalidated,
@@ -2399,7 +2431,7 @@ def _create_app(
 
         from skeliner.pre import compact_mesh
         from skeliner.dataclass import (
-            Discarded, MeshComponents, MeshStats, Neurites, Organelles,
+            Discarded, MeshComponents, Neurites, Organelles,
         )
 
         mesh = mesh_state["mesh"]
@@ -2415,7 +2447,6 @@ def _create_app(
                 pocket=np.zeros(nF, dtype=bool),
                 isolated=np.zeros(nF, dtype=bool),
                 expanded=np.zeros(nF, dtype=bool),
-                mesh_stats=MeshStats(np.zeros(nF), np.zeros(nF, dtype=np.intp), 0),
             )
         components = MeshComponents(
             soma=soma, organelles=org,
@@ -2542,7 +2573,7 @@ def _create_app(
         )
 
     async def export_organelles(request):
-        """Save organelle masks (pocket, isolated, expanded) + mesh stats."""
+        """Save organelle masks (pocket, isolated, expanded)."""
         from starlette.responses import Response
         from skeliner.io import save_organelles_npz
         import tempfile
@@ -2563,6 +2594,31 @@ def _create_app(
             media_type="application/octet-stream",
             headers={
                 "Content-Disposition": f'attachment; filename="{prefix}organelles.npz"'
+            },
+        )
+
+    async def export_mesh_stats(request):
+        """Save the cached MeshStats as a standalone NPZ."""
+        from starlette.responses import Response
+        from skeliner.io import save_mesh_stats_npz
+        import tempfile
+
+        ms = mesh_state.get("mesh_stats")
+        if ms is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh_stats cached"}, status_code=400
+            )
+
+        prefix = request.query_params.get("prefix", "")
+        tmp = Path(tempfile.mktemp(suffix=".npz"))
+        save_mesh_stats_npz(ms, tmp)
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{prefix}mesh_stats.npz"'
             },
         )
 
@@ -3190,6 +3246,7 @@ def _create_app(
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),
             Route("/export_organelles", export_organelles, methods=["GET"]),
+            Route("/export_mesh_stats", export_mesh_stats, methods=["GET"]),
             Route("/export_soma", export_soma, methods=["GET"]),
             Route("/export_components", export_components, methods=["GET"]),
             Route("/export_neurites", export_neurites, methods=["GET"]),

@@ -30,6 +30,8 @@ __all__ = [
     "load_soma_npz",
     "save_organelles_npz",
     "load_organelles_npz",
+    "save_mesh_stats_npz",
+    "load_mesh_stats_npz",
 ]
 
 _META_KV = re.compile(r"#\s*([^:]+)\s*:\s*(.+)")  #  key: value
@@ -554,19 +556,19 @@ def save_organelles_npz(
     *,
     compress: bool = True,
 ) -> None:
-    """Write an :class:`Organelles` to a compressed ``.npz`` archive."""
+    """Write an :class:`Organelles` to a compressed ``.npz`` archive.
+
+    Only stores the organelle masks.  See :func:`save_mesh_stats_npz`
+    for persisting the associated :class:`MeshStats` separately.
+    """
     path = Path(path)
     if not path.suffix:
         path = path.with_suffix(".npz")
 
-    s = organelles.mesh_stats
     payload: dict[str, np.ndarray] = {
         "pocket": np.asarray(organelles.pocket, dtype=bool),
         "isolated": np.asarray(organelles.isolated, dtype=bool),
         "expanded": np.asarray(organelles.expanded, dtype=bool),
-        "outward_dots": s.outward_dots,
-        "face_comp": s.face_comp,
-        "main_ci": np.array(s.main_ci),
     }
 
     save_fn = np.savez_compressed if compress else np.savez
@@ -574,23 +576,92 @@ def save_organelles_npz(
 
 
 def load_organelles_npz(path: str | Path) -> Organelles:
-    """Load an :class:`Organelles` written by :func:`save_organelles_npz`."""
+    """Load an :class:`Organelles` written by :func:`save_organelles_npz`.
+
+    Older files that bundled ``outward_dots``/``face_comp``/``main_ci``
+    are still readable — those fields are silently ignored.  Use
+    :func:`load_mesh_stats_npz` if you need the cached mesh statistics.
+    """
     path = Path(path)
     with np.load(path, allow_pickle=False) as z:
         pocket = z["pocket"].astype(bool)
-        stats = MeshStats(
-            outward_dots=z["outward_dots"],
-            face_comp=z["face_comp"],
-            main_ci=int(z["main_ci"]),
-        )
         return Organelles(
             pocket=pocket,
             isolated=z["isolated"].astype(bool),
             expanded=z["expanded"].astype(bool)
             if "expanded" in z
             else np.zeros_like(pocket),
-            mesh_stats=stats,
         )
+
+
+def save_mesh_stats_npz(
+    mesh_stats: MeshStats,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write a :class:`MeshStats` to a compressed ``.npz`` archive.
+
+    Persists ``outward_dots``, ``face_comp``, and ``main_ci`` so that
+    expensive recomputation can be skipped on reload.  The lifecycle
+    is tied to the mesh — if you mutate the mesh after saving, the
+    stored stats become stale.
+    """
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+
+    payload: dict[str, np.ndarray] = {
+        "outward_dots": np.asarray(mesh_stats.outward_dots),
+        "face_comp": np.asarray(mesh_stats.face_comp),
+        "main_ci": np.array(mesh_stats.main_ci),
+    }
+
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_mesh_stats_npz(
+    path: str | Path,
+    mesh: trimesh.Trimesh | None = None,
+) -> MeshStats:
+    """Load a :class:`MeshStats` written by :func:`save_mesh_stats_npz`.
+
+    Parameters
+    ----------
+    path : str or Path
+        Source archive.
+    mesh : trimesh.Trimesh or None, optional
+        If provided, the loaded face count is validated against
+        ``len(mesh.faces)``.  A mismatch raises :class:`ValueError`
+        because the cached stats no longer match the mesh.
+
+    Notes
+    -----
+    Face count is necessary but not sufficient — same face count can
+    still mean different topology after edits.  Treat the validation
+    as a sanity check, not a guarantee.
+    """
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        outward_dots = z["outward_dots"]
+        face_comp = z["face_comp"]
+        main_ci = int(z["main_ci"])
+
+    if mesh is not None:
+        n_faces = len(mesh.faces)
+        if len(outward_dots) != n_faces or len(face_comp) != n_faces:
+            raise ValueError(
+                f"Loaded mesh_stats face count "
+                f"({len(outward_dots)}) does not match mesh "
+                f"({n_faces}); the cached stats are stale."
+            )
+
+    return MeshStats(
+        outward_dots=outward_dots,
+        face_comp=face_comp,
+        main_ci=main_ci,
+    )
 
 
 # --------------------------------
@@ -695,9 +766,6 @@ def save_components_npz(
     payload["organelles_pocket"] = np.asarray(organelles.pocket, dtype=bool)
     payload["organelles_isolated"] = np.asarray(organelles.isolated, dtype=bool)
     payload["organelles_expanded"] = np.asarray(organelles.expanded, dtype=bool)
-    payload["organelles_outward_dots"] = organelles.mesh_stats.outward_dots
-    payload["organelles_face_comp"] = organelles.mesh_stats.face_comp
-    payload["organelles_main_ci"] = np.array(organelles.mesh_stats.main_ci)
 
     # Neurites
     payload["n_neurites"] = np.array(len(components.neurites.components))
@@ -742,11 +810,6 @@ def load_components_npz(path: str | Path) -> MeshComponents:
             pocket=z["organelles_pocket"].astype(bool),
             isolated=z["organelles_isolated"].astype(bool),
             expanded=z["organelles_expanded"].astype(bool),
-            mesh_stats=MeshStats(
-                outward_dots=z["organelles_outward_dots"],
-                face_comp=z["organelles_face_comp"],
-                main_ci=int(z["organelles_main_ci"]),
-            ),
         )
 
         # Neurites
