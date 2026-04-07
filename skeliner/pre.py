@@ -8,7 +8,14 @@ import numpy as np
 import trimesh
 from scipy.spatial import KDTree
 
-from skeliner.dataclass import Discarded, MeshComponents, MeshStats, Neurites, Organelles, Soma
+from skeliner.dataclass import (
+    Discarded,
+    MeshComponents,
+    MeshStats,
+    Neurites,
+    Organelles,
+    Soma,
+)
 
 __all__ = [
     "break_up_mesh",
@@ -956,8 +963,10 @@ def _fit_loop_circle(pts: np.ndarray) -> tuple[np.ndarray, float, np.ndarray]:
 
 
 def _hermite_spline(
-    p0: np.ndarray, t0: np.ndarray,
-    p1: np.ndarray, t1: np.ndarray,
+    p0: np.ndarray,
+    t0: np.ndarray,
+    p1: np.ndarray,
+    t1: np.ndarray,
     n: int,
 ) -> np.ndarray:
     """Evaluate cubic Hermite spline at *n* evenly spaced stations.
@@ -1070,14 +1079,18 @@ def _zipper_stitch(
         a_sorted = angles[order]
         r_sorted = radii[order]
         # Close the loop
-        a_closed = np.concatenate([a_sorted - 2 * np.pi, a_sorted, a_sorted + 2 * np.pi])
+        a_closed = np.concatenate(
+            [a_sorted - 2 * np.pi, a_sorted, a_sorted + 2 * np.pi]
+        )
         r_closed = np.concatenate([r_sorted, r_sorted, r_sorted])
         target_angles = np.linspace(-np.pi, np.pi, n, endpoint=False)
         resampled_r = np.interp(target_angles, a_closed, r_closed)
         return target_angles, resampled_r
 
     ang_a, rad_a = _to_polar_offsets(mesh.vertices[la], centers[0], tangents[0], up[0])
-    ang_b, rad_b = _to_polar_offsets(mesh.vertices[lb], centers[-1], tangents[-1], up[-1])
+    ang_b, rad_b = _to_polar_offsets(
+        mesh.vertices[lb], centers[-1], tangents[-1], up[-1]
+    )
     target_angles, profile_a = _resample_polar(ang_a, rad_a, n_ring_pts)
     _, profile_b = _resample_polar(ang_b, rad_b, n_ring_pts)
 
@@ -1171,9 +1184,7 @@ def _zipper_stitch(
     weld.update(_build_weld_map(ring_ids[-1], lb))
 
     if weld:
-        triangles = [
-            [weld.get(v, v) for v in tri] for tri in triangles
-        ]
+        triangles = [[weld.get(v, v) for v in tri] for tri in triangles]
 
     # Orient consistently with surrounding mesh
     ref_fis: list[int] = []
@@ -1727,12 +1738,12 @@ def find_soma_via_ring_cutoff(
     nuc = find_nucleus_center(mesh, verbose=verbose)
     if nuc is None:
         if verbose:
-            print("[skeliner.pre] Soma (ring): no nucleus found")
+            print("[skeliner.pre] Soma: no nucleus found")
         return None
     center = nuc["center"]
     if verbose:
         print(
-            f"[skeliner.pre] Soma (ring): nucleus center="
+            f"[skeliner.pre] Soma: nucleus center="
             f"({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})"
         )
 
@@ -1742,7 +1753,7 @@ def find_soma_via_ring_cutoff(
 
     # ── 2. Build main-component vertex adjacency ─────────────────────
     if verbose:
-        print("[skeliner.pre] Soma (ring): building vertex adjacency...")
+        print("[skeliner.pre] Soma: building vertex adjacency...")
     main_fi = np.where(labels == main)[0]
     adj: dict[int, list[int]] = defaultdict(list)
     for fi in main_fi:
@@ -1758,7 +1769,7 @@ def find_soma_via_ring_cutoff(
     #       outer-surface vertices, tilt-invariant, and form a
     #       symmetric band around the soma cross-section.
     if verbose:
-        print("[skeliner.pre] Soma (ring): BFS ring analysis...")
+        print("[skeliner.pre] Soma: BFS ring analysis...")
     all_main_verts = np.fromiter(adj.keys(), dtype=np.intp)
     main_set = set(adj.keys())
     seed_vi = nuc.get("soma_seed_vi", np.array([], dtype=np.intp))
@@ -1780,7 +1791,7 @@ def find_soma_via_ring_cutoff(
         ring_verts[0].append(vi)
     if verbose:
         print(
-            f"[skeliner.pre] Soma (ring): seed ring 0: "
+            f"[skeliner.pre] Soma: seed ring 0: "
             f"{len(seed_verts)} verts (soma surface at mid-Z)"
         )
 
@@ -1856,14 +1867,14 @@ def find_soma_via_ring_cutoff(
     if cutoff < min_cutoff:
         if verbose:
             print(
-                f"[skeliner.pre] Soma (ring): cutoff {cutoff} < "
+                f"[skeliner.pre] Soma: cutoff {cutoff} < "
                 f"min_cutoff {min_cutoff} (z_span/avg_edge), extending"
             )
         cutoff = min_cutoff
 
     if verbose:
         print(
-            f"[skeliner.pre] Soma (ring): peak ring {peak_ring}, "
+            f"[skeliner.pre] Soma: peak ring {peak_ring}, "
             f"cutoff ring {cutoff}/{max_ring} "
             f"(peak search limit {search_end})"
         )
@@ -2182,14 +2193,14 @@ def find_soma_via_ring_cutoff(
                 soma.verts = sv
             if verbose:
                 print(
-                    f"[skeliner.pre] Soma (ring): excluded "
+                    f"[skeliner.pre] Soma: excluded "
                     f"{n_removed:,} organelle verts → "
                     f"{len(soma.verts):,}"
                 )
 
     if verbose:
         print(
-            f"[skeliner.pre] Soma (ring): center=["
+            f"[skeliner.pre] Soma: center=["
             f"{soma.center[0]:.0f}, {soma.center[1]:.0f}, "
             f"{soma.center[2]:.0f}], "
             f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
@@ -2933,8 +2944,7 @@ def find_soma_via_geodesic(
       4. Fit ellipsoid (same).
     """
     warnings.warn(
-        "find_soma_via_geodesic is deprecated, "
-        "use find_soma_via_ring_cutoff instead.",
+        "find_soma_via_geodesic is deprecated, use find_soma_via_ring_cutoff instead.",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -3822,10 +3832,12 @@ def remove_gaps(
     if mesh_stats is not None:
         n_added = len(result.faces) - len(mesh.faces)
         if n_added > 0 and mesh_stats.outward_dots is not None:
-            mesh_stats.outward_dots = np.concatenate([
-                mesh_stats.outward_dots,
-                np.ones(n_added, dtype=mesh_stats.outward_dots.dtype),
-            ])
+            mesh_stats.outward_dots = np.concatenate(
+                [
+                    mesh_stats.outward_dots,
+                    np.ones(n_added, dtype=mesh_stats.outward_dots.dtype),
+                ]
+            )
         mesh_stats.invalidate_topology()
 
     return result
@@ -4201,7 +4213,10 @@ def compute_mesh_stats(
     if verbose:
         n_comps = int(face_comp.max()) + 1 if len(face_comp) else 0
         from collections import Counter
-        comp_sizes = Counter(int(face_comp[fi]) for fi in range(len(face_comp)) if face_comp[fi] >= 0)
+
+        comp_sizes = Counter(
+            int(face_comp[fi]) for fi in range(len(face_comp)) if face_comp[fi] >= 0
+        )
         n_structural = sum(1 for n in comp_sizes.values() if n >= 100)
         print(
             f"[skeliner.pre] Components: {n_comps} total, "
@@ -4949,9 +4964,7 @@ def find_organelles(
     # by mapping main_ci to a synthetic value that matches structural_mask.
     # We achieve this by setting face_comp to 0 for structural faces and
     # main_ci=0, so main_face_mask == structural_mask.
-    structural_face_comp = np.where(structural_mask, 0, -1).astype(
-        face_comp.dtype
-    )
+    structural_face_comp = np.where(structural_mask, 0, -1).astype(face_comp.dtype)
     precomputed_structural = MeshStats(
         outward_dots=mesh_stats.outward_dots,
         face_comp=structural_face_comp,
@@ -5868,7 +5881,9 @@ def find_chunk_boundaries(
                         if this_ratio < left_ratio:
                             keep[i] = False
                     if right < median_sp * 0.25 and i < len(spacings):
-                        right_ratio = spike_ratio[np.where(unique == bvals[i + 1])[0][0]]
+                        right_ratio = spike_ratio[
+                            np.where(unique == bvals[i + 1])[0][0]
+                        ]
                         this_ratio = spike_ratio[np.where(unique == bvals[i])[0][0]]
                         if this_ratio < right_ratio:
                             keep[i] = False
@@ -5878,13 +5893,12 @@ def find_chunk_boundaries(
 
         if verbose:
             name = "XYZ"[axis]
-            print(
-                f"[skeliner.pre] Chunk boundaries {name}: "
-                f"{len(bvals)} planes"
-            )
+            print(f"[skeliner.pre] Chunk boundaries {name}: {len(bvals)} planes")
             for val in bvals:
                 idx = np.where(unique == val)[0][0]
-                print(f"  {name}={val}: {counts[idx]} verts (spike {spike_ratio[idx]:.1f}x)")
+                print(
+                    f"  {name}={val}: {counts[idx]} verts (spike {spike_ratio[idx]:.1f}x)"
+                )
 
     return boundaries
 
@@ -5925,6 +5939,7 @@ def find_parallel_patches(
         "up_faces": list[int], "down_faces": list[int]}``.
     """
     from collections import defaultdict, deque
+
     from scipy.spatial import cKDTree
 
     if boundaries is None:
@@ -5967,7 +5982,6 @@ def find_parallel_patches(
                 e = (min(a, b), max(a, b))
                 edge_to_faces[e].append(int(fi))
 
-
         # Connected components — same boundary only
         visited: set[int] = set()
         patches: list[tuple[list[int], int]] = []
@@ -5987,7 +6001,11 @@ def find_parallel_patches(
                     a, b = int(f[i]), int(f[(i + 1) % 3])
                     e = (min(a, b), max(a, b))
                     for nb in edge_to_faces[e]:
-                        if nb not in visited and nb in target_set and face_bval[nb] == seed_bv:
+                        if (
+                            nb not in visited
+                            and nb in target_set
+                            and face_bval[nb] == seed_bv
+                        ):
                             visited.add(nb)
                             queue.append(nb)
             patches.append((comp, int(seed_bv)))
@@ -6043,7 +6061,9 @@ def find_parallel_patches(
             pts_a_filtered = pts_a[mask_a]
             if len(pts_a_filtered) > 0:
                 for tri in verts_b:
-                    if np.any(_point_in_tri(pts_a_filtered[:, 0], pts_a_filtered[:, 1], tri)):
+                    if np.any(
+                        _point_in_tri(pts_a_filtered[:, 0], pts_a_filtered[:, 1], tri)
+                    ):
                         return True
 
             # Vice versa
@@ -6056,7 +6076,9 @@ def find_parallel_patches(
             pts_b_filtered = pts_b[mask_b]
             if len(pts_b_filtered) > 0:
                 for tri in verts_a:
-                    if np.any(_point_in_tri(pts_b_filtered[:, 0], pts_b_filtered[:, 1], tri)):
+                    if np.any(
+                        _point_in_tri(pts_b_filtered[:, 0], pts_b_filtered[:, 1], tri)
+                    ):
                         return True
 
             return False
@@ -6086,21 +6108,31 @@ def find_parallel_patches(
                     other_nax = n_ax[others]
                     mean_dir = n_ax_comp.mean()
                     if mean_dir > 0:
-                        opp = [others[j] for j in range(len(others)) if other_nax[j] < -normal_thresh]
+                        opp = [
+                            others[j]
+                            for j in range(len(others))
+                            if other_nax[j] < -normal_thresh
+                        ]
                     else:
-                        opp = [others[j] for j in range(len(others)) if other_nax[j] > normal_thresh]
+                        opp = [
+                            others[j]
+                            for j in range(len(others))
+                            if other_nax[j] > normal_thresh
+                        ]
                     if opp:
                         if _any_face_overlaps(fi_arr, np.array(opp)):
                             has_overlap = True
 
             if has_overlap:
-                results.append({
-                    "axis": axis,
-                    "bval": bv,
-                    "faces": [int(f) for f in fi_arr],
-                    "up_faces": [int(f) for f in pos_fi],
-                    "down_faces": [int(f) for f in neg_fi],
-                })
+                results.append(
+                    {
+                        "axis": axis,
+                        "bval": bv,
+                        "faces": [int(f) for f in fi_arr],
+                        "up_faces": [int(f) for f in pos_fi],
+                        "down_faces": [int(f) for f in neg_fi],
+                    }
+                )
 
     # ── Neighbor expansion across all patches ──────────────────────
     # Include non-target faces adjacent to 2+ faces from ANY flagged
@@ -6191,21 +6223,22 @@ def find_parallel_patches(
         n_ax_comp = normals[fi_arr, best_axis]
         pos_fi = fi_arr[n_ax_comp > 0.5]
         neg_fi = fi_arr[n_ax_comp < -0.5]
-        results.append({
-            "axis": best_axis,
-            "bval": bv,
-            "faces": [int(f) for f in fi_arr],
-            "up_faces": [int(f) for f in pos_fi],
-            "down_faces": [int(f) for f in neg_fi],
-        })
+        results.append(
+            {
+                "axis": best_axis,
+                "bval": bv,
+                "faces": [int(f) for f in fi_arr],
+                "up_faces": [int(f) for f in pos_fi],
+                "down_faces": [int(f) for f in neg_fi],
+            }
+        )
 
     results.sort(key=lambda r: (r["axis"], r["bval"], -len(r["faces"])))
 
     if verbose:
         n_faces = sum(len(r["faces"]) for r in results)
         print(
-            f"[skeliner.pre] Parallel patches: {len(results)} patches, "
-            f"{n_faces} faces"
+            f"[skeliner.pre] Parallel patches: {len(results)} patches, {n_faces} faces"
         )
         for r in results:
             name = "XYZ"[r["axis"]]
@@ -6234,8 +6267,10 @@ def _find_fold_faces(mesh, patch):
     for fi in patch["faces"]:
         f = faces[fi]
         for i in range(3):
-            e = (min(int(f[i]), int(f[(i + 1) % 3])),
-                 max(int(f[i]), int(f[(i + 1) % 3])))
+            e = (
+                min(int(f[i]), int(f[(i + 1) % 3])),
+                max(int(f[i]), int(f[(i + 1) % 3])),
+            )
             edge_faces[e].append(fi)
 
     fold: set[int] = set()
@@ -6262,6 +6297,7 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
     skipped to avoid creating faces parallel to the boundary.
     """
     from collections import defaultdict
+
     from scipy.spatial import cKDTree
 
     verts = mesh.vertices
@@ -6352,8 +6388,9 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
             a0, a1 = de
             b0, b1 = te
             # Orient: b0 closer to a0
-            if np.linalg.norm(verts[b1] - verts[a0]) < \
-               np.linalg.norm(verts[b0] - verts[a0]):
+            if np.linalg.norm(verts[b1] - verts[a0]) < np.linalg.norm(
+                verts[b0] - verts[a0]
+            ):
                 b0, b1 = b1, b0
             # Skip if edges share vertices (already connected)
             if {a0, a1} & {b0, b1}:
@@ -6379,9 +6416,7 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
             f" ({n_skipped} non-overlapping skipped)"
         )
 
-    return trimesh.Trimesh(
-        vertices=verts, faces=combined, process=False
-    )
+    return trimesh.Trimesh(vertices=verts, faces=combined, process=False)
 
 
 def remove_parallel_patches(
@@ -6421,9 +6456,7 @@ def remove_parallel_patches(
     from collections import defaultdict
 
     if patches is None:
-        patches = find_parallel_patches(
-            mesh, boundaries=boundaries, verbose=verbose
-        )
+        patches = find_parallel_patches(mesh, boundaries=boundaries, verbose=verbose)
 
     if not patches:
         if verbose:
@@ -6492,8 +6525,10 @@ def remove_parallel_patches(
         f = faces[fi]
         typ = "a" if fi in mode_a_faces else "b"
         for i in range(3):
-            e = (min(int(f[i]), int(f[(i + 1) % 3])),
-                 max(int(f[i]), int(f[(i + 1) % 3])))
+            e = (
+                min(int(f[i]), int(f[(i + 1) % 3])),
+                max(int(f[i]), int(f[(i + 1) % 3])),
+            )
             # If any bordering removed face is Mode B, mark as "b"
             if removed_edge_type.get(e) != "b":
                 removed_edge_type[e] = typ
@@ -6503,8 +6538,11 @@ def remove_parallel_patches(
     orphan_remove: set[int] = set()
 
     for comp_id in new_comp_ids:
-        comp_face_idxs = [fi for fi in np.where(labels_after == comp_id)[0]
-                          if fi in newly_disconnected or not degen[fi]]
+        comp_face_idxs = [
+            fi
+            for fi in np.where(labels_after == comp_id)[0]
+            if fi in newly_disconnected or not degen[fi]
+        ]
         borders_mode_b = False
 
         for fi in comp_face_idxs:
@@ -6512,8 +6550,10 @@ def remove_parallel_patches(
                 break
             f = faces[fi]
             for i in range(3):
-                e = (min(int(f[i]), int(f[(i + 1) % 3])),
-                     max(int(f[i]), int(f[(i + 1) % 3])))
+                e = (
+                    min(int(f[i]), int(f[(i + 1) % 3])),
+                    max(int(f[i]), int(f[(i + 1) % 3])),
+                )
                 if removed_edge_type.get(e) == "b":
                     borders_mode_b = True
                     break
@@ -6542,7 +6582,10 @@ def remove_parallel_patches(
     n_before = len(result.faces)
     if mode_b_faces:
         result = _stitch_mode_b(
-            result, faces, mode_b_faces, patches,
+            result,
+            faces,
+            mode_b_faces,
+            patches,
             verbose=verbose,
         )
 
@@ -6550,10 +6593,12 @@ def remove_parallel_patches(
     if mesh_stats is not None:
         n_added = len(result.faces) - n_before
         if n_added > 0 and mesh_stats.outward_dots is not None:
-            mesh_stats.outward_dots = np.concatenate([
-                mesh_stats.outward_dots,
-                np.ones(n_added, dtype=mesh_stats.outward_dots.dtype),
-            ])
+            mesh_stats.outward_dots = np.concatenate(
+                [
+                    mesh_stats.outward_dots,
+                    np.ones(n_added, dtype=mesh_stats.outward_dots.dtype),
+                ]
+            )
         mesh_stats.invalidate_topology()
 
     return result
@@ -7166,7 +7211,10 @@ def compact_mesh(
     *,
     return_maps: bool = False,
     verbose: bool = False,
-) -> tuple[trimesh.Trimesh, MeshComponents] | tuple[trimesh.Trimesh, MeshComponents, np.ndarray, np.ndarray]:
+) -> (
+    tuple[trimesh.Trimesh, MeshComponents]
+    | tuple[trimesh.Trimesh, MeshComponents, np.ndarray, np.ndarray]
+):
     """Remove degenerate faces, drop unreferenced vertices, reindex.
 
     Call once at the end of preprocessing, after all face removals.
@@ -7225,7 +7273,9 @@ def compact_mesh(
     if components.soma is not None:
         remapped_soma = components.soma.remap(vert_map)
         if verbose:
-            n_before = len(components.soma.verts) if components.soma.verts is not None else 0
+            n_before = (
+                len(components.soma.verts) if components.soma.verts is not None else 0
+            )
             n_after = len(remapped_soma.verts) if remapped_soma.verts is not None else 0
             print(
                 f"[skeliner.pre] Soma remap: {n_before:,} → {n_after:,} verts "
@@ -7324,9 +7374,7 @@ def preprocess(
         mesh = remove_parallel_patches(mesh, patches=patches, verbose=verbose)
 
     # 2. Organelles (also yields mesh_stats for downstream stages)
-    org, mesh_stats = find_organelles(
-        mesh, verbose=verbose, return_mesh_stats=True
-    )
+    org, mesh_stats = find_organelles(mesh, verbose=verbose, return_mesh_stats=True)
 
     # 3. Soma
     soma = find_soma_via_ring_cutoff(
@@ -7370,9 +7418,7 @@ def preprocess(
 
     # 7. Compact (optional — remaps everything in MeshComponents)
     if compact:
-        mesh, components = compact_mesh(
-            mesh, components=components, verbose=verbose
-        )
+        mesh, components = compact_mesh(mesh, components=components, verbose=verbose)
         # Compaction invalidates mesh_stats; drop the stale reference
         # so callers don't accidentally reuse it against the new mesh.
         mesh_stats = None
@@ -8131,8 +8177,7 @@ def find_soma_via_z_contour(
     Soma or None
     """
     warnings.warn(
-        "find_soma_via_z_contour is deprecated, "
-        "use find_soma_via_ring_cutoff instead.",
+        "find_soma_via_z_contour is deprecated, use find_soma_via_ring_cutoff instead.",
         DeprecationWarning,
         stacklevel=2,
     )

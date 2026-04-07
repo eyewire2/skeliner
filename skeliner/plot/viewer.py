@@ -89,7 +89,7 @@ def _skeleton_to_buffers(skel, centroid: np.ndarray) -> dict[str, Any]:
 
 def _load_skeleton_as_nm(path: Path) -> Any:
     """Load a skeleton file and convert to nm."""
-    from skeliner.io import load_skeleton_swc, load_skeleton_npz
+    from skeliner.io import load_skeleton_npz, load_skeleton_swc
 
     suffix = path.suffix.lower()
     if suffix == ".swc":
@@ -465,17 +465,21 @@ def _create_app(
 
     async def get_save_availability(request):
         """Return which data is available for saving."""
-        return JSONResponse({
-            "mesh": mesh_state["mesh"] is not None,
-            "skeleton": len(skeleton_states) > 0,
-            "soma": mesh_state.get("soma") is not None,
-            "organelles": mesh_state.get("organelles") is not None,
-            "mesh_stats": mesh_state.get("mesh_stats") is not None,
-            "neurites": mesh_state.get("neurites") is not None and len(mesh_state["neurites"]) > 0,
-            "discarded": mesh_state.get("discarded") is not None and len(mesh_state["discarded"]) > 0,
-            "components": mesh_state.get("neurites") is not None,
-            "annotations": annotations_path.exists(),
-        })
+        return JSONResponse(
+            {
+                "mesh": mesh_state["mesh"] is not None,
+                "skeleton": len(skeleton_states) > 0,
+                "soma": mesh_state.get("soma") is not None,
+                "organelles": mesh_state.get("organelles") is not None,
+                "mesh_stats": mesh_state.get("mesh_stats") is not None,
+                "neurites": mesh_state.get("neurites") is not None
+                and len(mesh_state["neurites"]) > 0,
+                "discarded": mesh_state.get("discarded") is not None
+                and len(mesh_state["discarded"]) > 0,
+                "components": mesh_state.get("neurites") is not None,
+                "annotations": annotations_path.exists(),
+            }
+        )
 
     async def get_loaded(request):
         """Return what's currently loaded."""
@@ -729,7 +733,11 @@ def _create_app(
                 centroid = mesh_state.get("centroid", np.zeros(3))
 
                 # Soma
-                if comp.soma is not None and mesh is not None and comp.soma.verts is not None:
+                if (
+                    comp.soma is not None
+                    and mesh is not None
+                    and comp.soma.verts is not None
+                ):
                     soma_vset = set(int(v) for v in comp.soma.verts)
                     soma_faces = [
                         int(fi)
@@ -761,19 +769,30 @@ def _create_app(
 
                 # Neurites
                 neurite_colors = [
-                    [0.2, 0.6, 1.0], [0.3, 1.0, 0.3], [1.0, 0.4, 0.1],
-                    [0.0, 0.9, 0.9], [1.0, 0.2, 0.6],
+                    [0.2, 0.6, 1.0],
+                    [0.3, 1.0, 0.3],
+                    [1.0, 0.4, 0.1],
+                    [0.0, 0.9, 0.9],
+                    [1.0, 0.2, 0.6],
                 ]
                 for i, nf in enumerate(comp.neurites):
                     c = neurite_colors[i % len(neurite_colors)]
                     ann["highlights"].append(
-                        {"faces": nf.tolist(), "color": c, "label": f"neurite {i} ({len(nf):,}f)"}
+                        {
+                            "faces": nf.tolist(),
+                            "color": c,
+                            "label": f"neurite {i} ({len(nf):,}f)",
+                        }
                     )
 
                 # Discarded
                 for i, df in enumerate(comp.discarded):
                     ann["highlights"].append(
-                        {"faces": df.tolist(), "color": [0.5, 0.5, 0.5], "label": f"discarded {i} ({len(df):,}f)"}
+                        {
+                            "faces": df.tolist(),
+                            "color": [0.5, 0.5, 0.5],
+                            "label": f"discarded {i} ({len(df):,}f)",
+                        }
                     )
 
                 annotations_path.write_text(json.dumps(ann), encoding="utf-8")
@@ -786,7 +805,12 @@ def _create_app(
                 print(f"Loaded components: {', '.join(loaded)}")
                 await broadcast({"type": "annotations_updated"})
                 return JSONResponse(
-                    {"ok": True, "type": "components", "name": filename, "loaded": loaded}
+                    {
+                        "ok": True,
+                        "type": "components",
+                        "name": filename,
+                        "loaded": loaded,
+                    }
                 )
 
             elif suffix == ".npz" and _is_neurites_data(tmp_path):
@@ -801,21 +825,26 @@ def _create_app(
                     ann["highlights"] = []
 
                 neurite_colors = [
-                    [0.2, 0.6, 1.0], [0.3, 1.0, 0.3], [1.0, 0.4, 0.1],
-                    [0.0, 0.9, 0.9], [1.0, 0.2, 0.6],
+                    [0.2, 0.6, 1.0],
+                    [0.3, 1.0, 0.3],
+                    [1.0, 0.4, 0.1],
+                    [0.0, 0.9, 0.9],
+                    [1.0, 0.2, 0.6],
                 ]
                 for i, nf in enumerate(neurites):
                     c = neurite_colors[i % len(neurite_colors)]
                     ann["highlights"].append(
-                        {"faces": nf.tolist(), "color": c, "label": f"neurite {i} ({len(nf):,}f)"}
+                        {
+                            "faces": nf.tolist(),
+                            "color": c,
+                            "label": f"neurite {i} ({len(nf):,}f)",
+                        }
                     )
 
                 annotations_path.write_text(json.dumps(ann), encoding="utf-8")
                 print(f"Loaded neurites: {len(neurites)} components")
                 await broadcast({"type": "annotations_updated"})
-                return JSONResponse(
-                    {"ok": True, "type": "neurites", "name": filename}
-                )
+                return JSONResponse({"ok": True, "type": "neurites", "name": filename})
 
             elif suffix == ".npz" and _is_l2_graph(tmp_path):
                 buffers = _l2_graph_to_buffers(tmp_path, mesh_state["centroid"])
@@ -1197,13 +1226,13 @@ def _create_app(
         highlights = []
         nF = len(mesh.faces)
 
+        from skeliner.dataclass import MeshStats, Organelles
         from skeliner.pre import (
             compute_mesh_stats,
-            find_pocket_organelles,
             find_isolated_organelles,
             find_organelles,
+            find_pocket_organelles,
         )
-        from skeliner.dataclass import MeshStats, Organelles
 
         cached = mesh_state.get("organelles")
 
@@ -1412,7 +1441,7 @@ def _create_app(
         if method == "ring_cutoff":
             from skeliner.pre import find_soma_via_ring_cutoff as _find
 
-            label_prefix = "soma (ring_cutoff)"
+            label_prefix = "soma"
         else:
             from skeliner.pre import find_soma_via_z_contour as _find
 
@@ -1662,36 +1691,49 @@ def _create_app(
                     bvals = np.concatenate([bvals, [bvals[-1] + spacing]])
                 return bvals
 
-            x_vals = _extend_grid(bx, verts[:, 0].min(), verts[:, 0].max(), _get_spacing(0)) - centroid[0]
-            y_vals = _extend_grid(by, verts[:, 1].min(), verts[:, 1].max(), _get_spacing(1)) - centroid[1]
-            z_vals = _extend_grid(bz, verts[:, 2].min(), verts[:, 2].max(), _get_spacing(2)) - centroid[2]
+            x_vals = (
+                _extend_grid(bx, verts[:, 0].min(), verts[:, 0].max(), _get_spacing(0))
+                - centroid[0]
+            )
+            y_vals = (
+                _extend_grid(by, verts[:, 1].min(), verts[:, 1].max(), _get_spacing(1))
+                - centroid[1]
+            )
+            z_vals = (
+                _extend_grid(bz, verts[:, 2].min(), verts[:, 2].max(), _get_spacing(2))
+                - centroid[2]
+            )
 
             segs = []
             for y in y_vals:
                 for z in z_vals:
                     segs.append(
-                        [[float(x_vals[0]), float(y), float(z)],
-                         [float(x_vals[-1]), float(y), float(z)]]
+                        [
+                            [float(x_vals[0]), float(y), float(z)],
+                            [float(x_vals[-1]), float(y), float(z)],
+                        ]
                     )
             for x in x_vals:
                 for z in z_vals:
                     segs.append(
-                        [[float(x), float(y_vals[0]), float(z)],
-                         [float(x), float(y_vals[-1]), float(z)]]
+                        [
+                            [float(x), float(y_vals[0]), float(z)],
+                            [float(x), float(y_vals[-1]), float(z)],
+                        ]
                     )
             for x in x_vals:
                 for y in y_vals:
                     segs.append(
-                        [[float(x), float(y), float(z_vals[0])],
-                         [float(x), float(y), float(z_vals[-1])]]
+                        [
+                            [float(x), float(y), float(z_vals[0])],
+                            [float(x), float(y), float(z_vals[-1])],
+                        ]
                     )
 
             n_boundaries = len(bx) + len(by) + len(bz)
             return segs, n_boundaries
 
-        segs, n_boundaries = await asyncio.get_event_loop().run_in_executor(
-            None, _run
-        )
+        segs, n_boundaries = await asyncio.get_event_loop().run_in_executor(None, _run)
         return JSONResponse(
             {"ok": True, "segments": segs, "n_boundaries": n_boundaries}
         )
@@ -1708,9 +1750,7 @@ def _create_app(
         await _log("[skeliner.pre] Detecting parallel patches...")
         from skeliner.pre import find_parallel_patches
 
-        results = await _run_with_log(
-            find_parallel_patches, mesh, verbose=True
-        )
+        results = await _run_with_log(find_parallel_patches, mesh, verbose=True)
 
         if not results:
             await _log("[skeliner.pre] No parallel patches found")
@@ -1724,8 +1764,7 @@ def _create_app(
 
         # Remove previous patch highlights
         ann["highlights"] = [
-            h for h in ann["highlights"]
-            if not h.get("label", "").startswith("patch:")
+            h for h in ann["highlights"] if not h.get("label", "").startswith("patch:")
         ]
 
         axis_colors = {
@@ -1742,30 +1781,35 @@ def _create_app(
             name = axis_names[ax]
             bval = r["bval"]
             if r["up_faces"]:
-                ann["highlights"].append({
-                    "faces": r["up_faces"],
-                    "color": colors["up"],
-                    "label": f"patch: {name}={bval} + ({len(r['up_faces'])}f)",
-                })
+                ann["highlights"].append(
+                    {
+                        "faces": r["up_faces"],
+                        "color": colors["up"],
+                        "label": f"patch: {name}={bval} + ({len(r['up_faces'])}f)",
+                    }
+                )
             if r["down_faces"]:
-                ann["highlights"].append({
-                    "faces": r["down_faces"],
-                    "color": colors["down"],
-                    "label": f"patch: {name}={bval} - ({len(r['down_faces'])}f)",
-                })
+                ann["highlights"].append(
+                    {
+                        "faces": r["down_faces"],
+                        "color": colors["down"],
+                        "label": f"patch: {name}={bval} - ({len(r['down_faces'])}f)",
+                    }
+                )
             total_faces += len(r["faces"])
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         await broadcast({"type": "annotations_updated"})
         await _log(
-            f"[skeliner.pre] {len(results)} parallel patches, "
-            f"{total_faces} faces"
+            f"[skeliner.pre] {len(results)} parallel patches, {total_faces} faces"
         )
-        return JSONResponse({
-            "ok": True,
-            "nPatches": len(results),
-            "totalFaces": total_faces,
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "nPatches": len(results),
+                "totalFaces": total_faces,
+            }
+        )
 
     async def do_remove_parallel(request):
         """Remove parallel-patch artifacts (Mode A only)."""
@@ -1789,7 +1833,8 @@ def _create_app(
                 ann = json.loads(annotations_path.read_text(encoding="utf-8"))
                 if "highlights" in ann:
                     ann["highlights"] = [
-                        h for h in ann["highlights"]
+                        h
+                        for h in ann["highlights"]
                         if not (
                             h.get("label", "").startswith("patch:")
                             and all(f in removed for f in h.get("faces", []))
@@ -1804,11 +1849,13 @@ def _create_app(
         await _apply_new_mesh(new_mesh)
         n_degen = len(removed)
         await _log(f"Remove parallel: {n_degen:,} faces degenerated")
-        return JSONResponse({
-            "ok": True,
-            "facesBefore": n_before,
-            "facesRemoved": n_degen,
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "facesBefore": n_before,
+                "facesRemoved": n_degen,
+            }
+        )
 
     async def detect_fusions(request):
         """Run fusion detection and write results to annotations."""
@@ -1866,7 +1913,7 @@ def _create_app(
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import find_rims, compute_mesh_stats
+        from skeliner.pre import compute_mesh_stats, find_rims
 
         mesh = mesh_state["mesh"]
         centroid = mesh_state["centroid"]
@@ -2429,10 +2476,13 @@ def _create_app(
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
 
-        from skeliner.pre import compact_mesh
         from skeliner.dataclass import (
-            Discarded, MeshComponents, Neurites, Organelles,
+            Discarded,
+            MeshComponents,
+            Neurites,
+            Organelles,
         )
+        from skeliner.pre import compact_mesh
 
         mesh = mesh_state["mesh"]
         soma = mesh_state.get("soma")
@@ -2449,8 +2499,10 @@ def _create_app(
                 expanded=np.zeros(nF, dtype=bool),
             )
         components = MeshComponents(
-            soma=soma, organelles=org,
-            neurites=Neurites([]), discarded=Discarded([]),
+            soma=soma,
+            organelles=org,
+            neurites=Neurites([]),
+            discarded=Discarded([]),
         )
 
         def _run():
@@ -2547,9 +2599,11 @@ def _create_app(
 
     async def export_mesh(request):
         """Export the current mesh as a downloadable file."""
-        from starlette.responses import Response
-        from skeliner.io import save_mesh
         import tempfile
+
+        from starlette.responses import Response
+
+        from skeliner.io import save_mesh
 
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2574,9 +2628,11 @@ def _create_app(
 
     async def export_organelles(request):
         """Save organelle masks (pocket, isolated, expanded)."""
-        from starlette.responses import Response
-        from skeliner.io import save_organelles_npz
         import tempfile
+
+        from starlette.responses import Response
+
+        from skeliner.io import save_organelles_npz
 
         org = mesh_state.get("organelles")
         if org is None:
@@ -2599,9 +2655,11 @@ def _create_app(
 
     async def export_mesh_stats(request):
         """Save the cached MeshStats as a standalone NPZ."""
-        from starlette.responses import Response
-        from skeliner.io import save_mesh_stats_npz
         import tempfile
+
+        from starlette.responses import Response
+
+        from skeliner.io import save_mesh_stats_npz
 
         ms = mesh_state.get("mesh_stats")
         if ms is None:
@@ -2624,8 +2682,9 @@ def _create_app(
 
     async def export_soma(request):
         """Export the cached soma as a downloadable NPZ file."""
-        from starlette.responses import Response
         import tempfile
+
+        from starlette.responses import Response
 
         soma = mesh_state.get("soma")
         if soma is None:
@@ -2649,10 +2708,12 @@ def _create_app(
 
     async def export_components(request):
         """Export MeshComponents (soma + organelles + neurites + discarded)."""
-        from starlette.responses import Response
-        from skeliner.io import save_components_npz
-        from skeliner.dataclass import Discarded, MeshComponents, Neurites
         import tempfile
+
+        from starlette.responses import Response
+
+        from skeliner.dataclass import Discarded, MeshComponents, Neurites
+        from skeliner.io import save_components_npz
 
         soma = mesh_state.get("soma")
         org = mesh_state.get("organelles")
@@ -2685,10 +2746,12 @@ def _create_app(
 
     async def export_neurites(request):
         """Export neurite face arrays as NPZ."""
-        from starlette.responses import Response
-        from skeliner.io import save_neurites_npz
-        from skeliner.dataclass import Neurites
         import tempfile
+
+        from starlette.responses import Response
+
+        from skeliner.dataclass import Neurites
+        from skeliner.io import save_neurites_npz
 
         neurites = mesh_state.get("neurites")
         if neurites is None or len(neurites) == 0:
@@ -2711,15 +2774,18 @@ def _create_app(
 
     async def export_discarded(request):
         """Export discarded fragment face arrays as NPZ."""
-        from starlette.responses import Response
-        from skeliner.io import save_discarded_npz
-        from skeliner.dataclass import Discarded
         import tempfile
+
+        from starlette.responses import Response
+
+        from skeliner.dataclass import Discarded
+        from skeliner.io import save_discarded_npz
 
         discarded = mesh_state.get("discarded")
         if discarded is None or len(discarded) == 0:
             return JSONResponse(
-                {"ok": False, "error": "No discarded fragments (run Break first)"}, status_code=400
+                {"ok": False, "error": "No discarded fragments (run Break first)"},
+                status_code=400,
             )
 
         prefix = request.query_params.get("prefix", "")
@@ -2755,8 +2821,9 @@ def _create_app(
 
     async def export_skeleton(request):
         """Export a skeleton as a downloadable SWC or NPZ file."""
-        from starlette.responses import Response
         import tempfile
+
+        from starlette.responses import Response
 
         name = request.query_params.get("name")
         fmt = request.query_params.get("format", "swc")
@@ -2772,7 +2839,7 @@ def _create_app(
                 status_code=400,
             )
 
-        from skeliner.io import save_skeleton_swc, save_skeleton_npz
+        from skeliner.io import save_skeleton_npz, save_skeleton_swc
 
         loop = asyncio.get_event_loop()
         tmp = Path(tempfile.mktemp(suffix=f".{fmt}"))
@@ -3224,7 +3291,9 @@ def _create_app(
             Route("/remove_offsets", do_remove_offsets, methods=["POST"]),
             Route("/detect_organelles", detect_organelles, methods=["POST"]),
             Route("/chunk_grid", chunk_grid, methods=["POST"]),
-            Route("/detect_parallel_patches", detect_parallel_patches, methods=["POST"]),
+            Route(
+                "/detect_parallel_patches", detect_parallel_patches, methods=["POST"]
+            ),
             Route("/remove_parallel_patches", do_remove_parallel, methods=["POST"]),
             Route("/detect_fusions", detect_fusions, methods=["POST"]),
             Route("/detect_rims", detect_rims, methods=["POST"]),
@@ -3377,14 +3446,28 @@ def _bbox_segments(box: list[list[float]]) -> list[list[list[float]]]:
     """Convert [[lo_x,lo_y,lo_z],[hi_x,hi_y,hi_z]] to 12 line segments."""
     lo, hi = box
     c = [
-        [lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]],
-        [lo[0], hi[1], lo[2]], [lo[0], lo[1], hi[2]],
-        [hi[0], hi[1], lo[2]], [hi[0], lo[1], hi[2]],
-        [lo[0], hi[1], hi[2]], [hi[0], hi[1], hi[2]],
+        [lo[0], lo[1], lo[2]],
+        [hi[0], lo[1], lo[2]],
+        [lo[0], hi[1], lo[2]],
+        [lo[0], lo[1], hi[2]],
+        [hi[0], hi[1], lo[2]],
+        [hi[0], lo[1], hi[2]],
+        [lo[0], hi[1], hi[2]],
+        [hi[0], hi[1], hi[2]],
     ]
     edges = [
-        (0,1),(0,2),(0,3),(7,6),(7,5),(7,4),
-        (6,2),(6,3),(3,5),(5,1),(2,4),(4,1),
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (7, 6),
+        (7, 5),
+        (7, 4),
+        (6, 2),
+        (6, 3),
+        (3, 5),
+        (5, 1),
+        (2, 4),
+        (4, 1),
     ]
     return [[c[a], c[b]] for a, b in edges]
 
@@ -3428,9 +3511,7 @@ def view3d(
     port: int = 8777,
     no_browser: bool = False,
 ):
-    """Launch viewer with pre-loaded skeletons and/or meshes.
-
-    """
+    """Launch viewer with pre-loaded skeletons and/or meshes."""
     skels = _as_iter(skels)
     meshes = _as_iter(meshes)
 
@@ -3455,6 +3536,7 @@ def view3d(
     for s in skels:
         if skel_scale != 1.0:
             import copy
+
             sc = copy.copy(s)
             sc.nodes = s.nodes * skel_scale
             sc.radii = {k: v * skel_scale for k, v in s.radii.items()}
@@ -3545,14 +3627,14 @@ def view_contacts(
 
     # Build contact sites as annotations (highlights + edge_groups)
     SITE_COLORS = [
-        [1.0, 0.4, 0.1],   # orange
-        [0.2, 0.6, 1.0],   # blue
-        [0.1, 0.9, 0.4],   # green
-        [0.9, 0.2, 0.8],   # magenta
-        [1.0, 0.9, 0.1],   # yellow
+        [1.0, 0.4, 0.1],  # orange
+        [0.2, 0.6, 1.0],  # blue
+        [0.1, 0.9, 0.4],  # green
+        [0.9, 0.2, 0.8],  # magenta
+        [1.0, 0.9, 0.1],  # yellow
         [0.0, 0.85, 0.7],  # teal
         [0.95, 0.5, 0.5],  # salmon
-        [0.6, 0.4, 1.0],   # violet
+        [0.6, 0.4, 1.0],  # violet
     ]
 
     s = sides.lower()
@@ -3575,24 +3657,28 @@ def view_contacts(
             if fa.size > 0:
                 bbox_a = _bbox_from_faces(A_scaled, fa, centroid)
                 side_label = "A" if (doA and doB) else ""
-                highlights.append({
-                    "faces": fa.tolist(),
-                    "color": col,
-                    "label": f"Site {i}{side_label} ({fa.size} faces)",
-                    "meshKey": "primary",
-                })
+                highlights.append(
+                    {
+                        "faces": fa.tolist(),
+                        "color": col,
+                        "label": f"Site {i}{side_label} ({fa.size} faces)",
+                        "meshKey": "primary",
+                    }
+                )
 
         if doB and i < len(contacts.faces_B):
             fb = np.asarray(contacts.faces_B[i], np.int64)
             if fb.size > 0:
                 bbox_b = _bbox_from_faces(B_scaled, fb, centroid)
                 side_label = "B" if (doA and doB) else ""
-                highlights.append({
-                    "faces": fb.tolist(),
-                    "color": col,
-                    "label": f"Site {i}{side_label} ({fb.size} faces)",
-                    "meshKey": "mesh_B",
-                })
+                highlights.append(
+                    {
+                        "faces": fb.tolist(),
+                        "color": col,
+                        "label": f"Site {i}{side_label} ({fb.size} faces)",
+                        "meshKey": "mesh_B",
+                    }
+                )
 
         # AABB wireframe as edge_group
         if show_aabb:
@@ -3602,18 +3688,22 @@ def view_contacts(
             elif aabb_mode == "split":
                 for bb in (bbox_a, bbox_b):
                     if bb is not None:
-                        edge_groups.append({
-                            "segments": _bbox_segments(bb),
-                            "color": col,
-                            "label": f"AABB {i}",
-                        })
+                        edge_groups.append(
+                            {
+                                "segments": _bbox_segments(bb),
+                                "color": col,
+                                "label": f"AABB {i}",
+                            }
+                        )
                 continue  # skip union path
             if box is not None:
-                edge_groups.append({
-                    "segments": _bbox_segments(box),
-                    "color": col,
-                    "label": f"AABB {i}",
-                })
+                edge_groups.append(
+                    {
+                        "segments": _bbox_segments(box),
+                        "color": col,
+                        "label": f"AABB {i}",
+                    }
+                )
 
     annotations = {}
     if highlights:
