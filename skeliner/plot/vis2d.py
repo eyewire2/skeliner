@@ -11,7 +11,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Ellipse
 from scipy.stats import binned_statistic_2d
 
-from ..dataclass import Skeleton
+from ..dataclass import Organelles, Skeleton
 
 __all__ = [
     "projection",
@@ -1252,7 +1252,7 @@ def z_section(
     z: float | None = None,
     *,
     z_tol: float = 150.0,
-    organelles: np.ndarray | None = None,
+    organelles: Organelles | None = None,
     nucleus: dict | None = None,
     soma_hull: bool = False,
     ax: Axes | None = None,
@@ -1272,9 +1272,9 @@ def z_section(
         Z-level to slice at.
     z_tol : float
         Half-width of the Z slab for collecting vertices.
-    organelles : np.ndarray or None
-        ``(nFaces,)`` boolean mask of organelle faces.  If provided,
-        organelle face centroids are drawn in red.
+    organelles : Organelles or None
+        Pre-computed organelles from :func:`find_organelles`.  If
+        provided, organelle face centroids are drawn in red.
     nucleus : dict or None
         Result dict from :func:`find_nucleus_center`.  If provided,
         the per-Z void circle is drawn at the nearest matching slice.
@@ -1330,7 +1330,7 @@ def z_section(
     if organelles is not None:
         centroids = verts[faces].mean(axis=1)
         face_near = np.abs(centroids[:, 2] - z) < z_tol
-        org_near = face_near & organelles
+        org_near = face_near & organelles.mask
         if org_near.sum() > 0:
             oc = centroids[org_near]
             ax.scatter(
@@ -1528,7 +1528,7 @@ def z_section_grid(
     z_step: float = 210.0,
     z_span: float | None = None,
     z_tol: float = 150.0,
-    organelles: np.ndarray | None = None,
+    organelles: Organelles | None = None,
     soma_hull: bool = False,
     figsize: tuple[float, float] | None = None,
 ) -> tuple[Figure, np.ndarray]:
@@ -1550,7 +1550,7 @@ def z_section_grid(
         Z-range so the void appears and disappears within the grid.
     z_tol : float
         Half-width of the Z slab at each level.
-    organelles : np.ndarray or None
+    organelles : Organelles or None
         Forwarded to :func:`z_section`.
     figsize : tuple or None
         Figure size.  If None, auto-scaled from the grid dimensions.
@@ -1600,7 +1600,7 @@ def soma_diagnostics(
     *,
     nucleus: dict | None = None,
     soma: object = None,
-    organelles: np.ndarray | None = None,
+    organelles: Organelles | None = None,
     planes: tuple[str, str, str] = ("xy", "xz", "zy"),
     figsize: tuple[float, float] = (12, 12),
 ) -> tuple[Figure, list[Axes]]:
@@ -1610,6 +1610,10 @@ def soma_diagnostics(
     center marked, nucleus Z-range indicated, and soma ellipsoid
     outline.
 
+    Colors match the web viewer: soma is light magenta, pocket
+    organelles are red, isolated organelles are green, and expanded
+    organelles are orange.
+
     Parameters
     ----------
     mesh : trimesh.Trimesh
@@ -1618,8 +1622,8 @@ def soma_diagnostics(
         Result from :func:`find_nucleus_center`.
     soma : Soma or None
         Result from any soma detection method.
-    organelles : np.ndarray or None
-        Boolean face mask of organelle faces.
+    organelles : Organelles or None
+        Pre-computed organelles from :func:`find_organelles`.
     planes : tuple of str
         Three plane codes for the panels.
     figsize : tuple
@@ -1629,6 +1633,12 @@ def soma_diagnostics(
     -------
     fig, axes : Figure, list[Axes]
     """
+    # Color scheme — matches skeliner.plot.viewer
+    SOMA_COLOR = (0.9, 0.5, 0.9)
+    POCKET_COLOR = (1.0, 0.15, 0.15)
+    ISOLATED_COLOR = (0.15, 0.8, 0.15)
+    EXPANDED_COLOR = (1.0, 0.6, 0.15)
+
     verts = np.asarray(mesh.vertices)
     faces = np.asarray(mesh.faces)
 
@@ -1664,30 +1674,41 @@ def soma_diagnostics(
             ax.scatter(
                 sv[:, ix],
                 sv[:, iy],
-                c="#d4a843",
+                color=SOMA_COLOR,
                 s=0.8,
-                alpha=0.5,
+                alpha=0.6,
                 rasterized=True,
                 zorder=3,
                 label="soma",
             )
 
-        # Organelle face centroids (drawn after soma, lower alpha)
-        if organelles is not None and organelles.any():
-            org_centroids = verts[faces[organelles]].mean(axis=1)
-            ax.scatter(
-                org_centroids[:, ix],
-                org_centroids[:, iy],
-                c="red",
-                s=0.3,
-                alpha=0.15,
-                rasterized=True,
-                zorder=2,
-                label="organelles",
+        # Organelle face centroids — split by category, viewer colors
+        if organelles is not None:
+            face_centroids = verts[faces].mean(axis=1)
+            org_layers = (
+                ("pocket", organelles.pocket, POCKET_COLOR),
+                ("isolated", organelles.isolated, ISOLATED_COLOR),
+                ("expanded", organelles.expanded, EXPANDED_COLOR),
             )
-            # Soma ellipsoid outline
+            for label, mask, color in org_layers:
+                if not mask.any():
+                    continue
+                fc = face_centroids[mask]
+                ax.scatter(
+                    fc[:, ix],
+                    fc[:, iy],
+                    color=color,
+                    s=0.3,
+                    alpha=0.25,
+                    rasterized=True,
+                    zorder=2,
+                    label=f"organelle:{label}",
+                )
+
+        # Soma ellipsoid outline (drawn even when organelles is None)
+        if soma is not None:
             ell = _soma_ellipse2d(soma, plane)
-            ell.set_edgecolor("#d4a843")
+            ell.set_edgecolor(SOMA_COLOR)
             ell.set_linewidth(1.5)
             ax.add_patch(ell)
 
