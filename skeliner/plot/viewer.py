@@ -2114,7 +2114,7 @@ def _create_app(
         new_mesh = await _run_with_log(
             _remove_fusions,
             mesh,
-            fusion_clusters=cached,
+            fusions=cached,
             verbose=True,
             mesh_stats=ms,
         )

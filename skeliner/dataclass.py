@@ -249,7 +249,7 @@ class Soma:
 
         Compatible with the ``nucleus`` parameter of
         :func:`~skeliner.plot.vis2d.z_section` and
-        :func:`~skeliner.plot.vis2d.soma_diagnostics`.
+        :func:`~skeliner.plot.vis2d.diagnose_soma`.
     """
 
     center: np.ndarray  # (3,)

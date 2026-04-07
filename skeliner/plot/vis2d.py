@@ -11,7 +11,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Ellipse
 from scipy.stats import binned_statistic_2d
 
-from ..dataclass import Organelles, Skeleton
+from ..dataclass import MeshComponents, Organelles, Skeleton
 
 __all__ = [
     "projection",
@@ -20,7 +20,8 @@ __all__ = [
     "node_details",
     "z_section",
     "z_section_grid",
-    "soma_diagnostics",
+    "diagnose_soma",
+    "diagnose_components",
 ]
 
 
@@ -1595,7 +1596,7 @@ def z_section_grid(
     return fig, axes
 
 
-def soma_diagnostics(
+def diagnose_soma(
     mesh: trimesh.Trimesh,
     *,
     nucleus: dict | None = None,
@@ -1737,6 +1738,201 @@ def soma_diagnostics(
                     else:
                         ax.axhline(
                             zv, color="cyan", linewidth=0.8, alpha=0.6, linestyle="--"
+                        )
+
+        # Zoom to soma region with generous padding
+        if soma is not None and len(soma.verts) > 0:
+            pad = max(soma.axes) * 1.5
+            cx, cy = soma.center[ix], soma.center[iy]
+        elif nucleus is not None:
+            pad = nucleus["peak_r"] * 8
+            cx, cy = nucleus["center"][ix], nucleus["center"][iy]
+        else:
+            pad = None
+
+        if pad is not None:
+            ax.set_xlim(cx - pad, cx + pad)
+            ax.set_ylim(cy - pad, cy + pad)
+
+        ax.set_aspect("equal")
+        ax.set_xlabel(xlab)
+        ax.set_ylabel(ylab)
+        ax.set_title(plane.upper())
+        ax.grid(True, alpha=0.15)
+
+    axes[0].legend(fontsize=7, loc="upper right", markerscale=5)
+    fig.tight_layout()
+    return fig, axes
+
+
+def diagnose_components(
+    mesh: trimesh.Trimesh,
+    components: MeshComponents,
+    *,
+    planes: tuple[str, str, str] = ("xy", "xz", "zy"),
+    figsize: tuple[float, float] = (12, 12),
+) -> tuple[Figure, list[Axes]]:
+    """Three orthogonal projections of break_up_mesh component results.
+
+    Same layout as :func:`diagnose_soma`, but colors faces by
+    component (soma, organelles, neurites) using the same palette as
+    the web viewer after running break_up_mesh. Discarded fragments
+    are not plotted.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    components : MeshComponents
+        Result of :func:`~skeliner.pre.break_up_mesh`.
+    planes : tuple of str
+        Three plane codes for the panels.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    fig, axes : Figure, list[Axes]
+    """
+    # Color scheme — matches skeliner.plot.viewer post break_up_mesh
+    SOMA_COLOR = (0.9, 0.5, 0.9)
+    ORG_COLOR = (1.0, 0.8, 0.0)
+    NEURITE_COLORS = [
+        (0.2, 0.6, 1.0),
+        (0.3, 1.0, 0.3),
+        (1.0, 0.4, 0.1),
+        (0.0, 0.9, 0.9),
+        (1.0, 0.2, 0.6),
+    ]
+
+    soma = components.soma
+    organelles = components.organelles
+    neurites = components.neurites
+    nucleus = soma.nucleus if soma is not None else None
+
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+    face_centroids = verts[faces].mean(axis=1)
+
+    # Mirror the viewer: organelle faces that are also soma faces are
+    # painted as soma, so subtract them from the org layer to avoid
+    # double-coloring. A face is a soma face if >= 2 of its 3 verts
+    # are in soma.verts.
+    if soma is not None and len(soma.verts) > 0:
+        soma_vmask = np.zeros(len(verts), dtype=bool)
+        soma_vmask[np.asarray(soma.verts, dtype=np.int64)] = True
+        soma_face_mask = soma_vmask[faces].sum(axis=1) >= 2
+        org_only = organelles.mask & ~soma_face_mask
+    else:
+        org_only = organelles.mask
+
+    # 2×2 grid: top-left=XZ, bottom-left=XY, bottom-right=ZY, top-right=empty
+    fig, ax_grid = plt.subplots(2, 2, figsize=figsize)
+    panel_pos = {"xy": (1, 0), "xz": (0, 0), "zy": (1, 1)}
+    axes = []
+    for plane in planes:
+        r, c = panel_pos[plane]
+        axes.append(ax_grid[r, c])
+    ax_grid[0, 1].set_visible(False)
+
+    for ax, plane in zip(axes, planes):
+        ix, iy = _PLANE_AXES[plane]
+        xlab, ylab = _plane_axes(plane)
+
+        # All mesh vertices — light gray background
+        ax.scatter(
+            verts[:, ix],
+            verts[:, iy],
+            c="#dddddd",
+            s=0.3,
+            alpha=0.2,
+            rasterized=True,
+            zorder=1,
+        )
+
+        # Neurite face centroids — cycled palette
+        for i, nf in enumerate(neurites):
+            if len(nf) == 0:
+                continue
+            color = NEURITE_COLORS[i % len(NEURITE_COLORS)]
+            fc = face_centroids[nf]
+            ax.scatter(
+                fc[:, ix],
+                fc[:, iy],
+                color=color,
+                s=0.3,
+                alpha=0.4,
+                rasterized=True,
+                zorder=2,
+                label=f"neurite {i}",
+            )
+
+        # Organelle face centroids (excluding soma overlap)
+        if org_only.any():
+            fc = face_centroids[org_only]
+            ax.scatter(
+                fc[:, ix],
+                fc[:, iy],
+                color=ORG_COLOR,
+                s=0.3,
+                alpha=0.35,
+                rasterized=True,
+                zorder=3,
+                label="organelles",
+            )
+
+        # Soma vertices
+        if soma is not None and len(soma.verts) > 0:
+            sv = verts[soma.verts]
+            ax.scatter(
+                sv[:, ix],
+                sv[:, iy],
+                color=SOMA_COLOR,
+                s=0.8,
+                alpha=0.6,
+                rasterized=True,
+                zorder=4,
+                label="soma",
+            )
+
+        # Soma ellipsoid outline
+        if soma is not None:
+            ell = _soma_ellipse2d(soma, plane)
+            ell.set_edgecolor(SOMA_COLOR)
+            ell.set_linewidth(1.5)
+            ax.add_patch(ell)
+
+        # Nucleus center + z_range
+        if nucleus is not None:
+            nc = nucleus["center"]
+            ax.plot(
+                nc[ix],
+                nc[iy],
+                "+",
+                color="cyan",
+                markersize=12,
+                markeredgewidth=2,
+                zorder=10,
+            )
+            if 2 in (ix, iy):
+                z_lo, z_hi = nucleus["z_range"]
+                z_ax = ix if ix == 2 else iy
+                for zv in (z_lo, z_hi):
+                    if z_ax == ix:
+                        ax.axvline(
+                            zv,
+                            color="cyan",
+                            linewidth=0.8,
+                            alpha=0.6,
+                            linestyle="--",
+                        )
+                    else:
+                        ax.axhline(
+                            zv,
+                            color="cyan",
+                            linewidth=0.8,
+                            alpha=0.6,
+                            linestyle="--",
                         )
 
         # Zoom to soma region with generous padding

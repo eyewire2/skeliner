@@ -5438,7 +5438,7 @@ def _split_fan_vertices(
 def remove_fusions(
     mesh: trimesh.Trimesh,
     *,
-    fusion_clusters: list[list[int]] | None = None,
+    fusions: list[list[int]] | None = None,
     radius: float | None = None,
     radius_multiplier: float = 5.0,
     verbose: bool = False,
@@ -5473,35 +5473,34 @@ def remove_fusions(
         Mesh with fusions removed and shared vertices split.
     """
     # Step 1: remove non-manifold fusion faces
-    if fusion_clusters is not None:
-        clusters = fusion_clusters
+    if fusions is not None:
         if verbose:
-            n = sum(len(c) for c in clusters)
+            n = sum(len(c) for c in fusions)
             print(
                 f"[skeliner.pre] Using provided fusion clusters "
-                f"({len(clusters)} regions, {n} faces)"
+                f"({len(fusions)} regions, {n} faces)"
             )
     else:
-        clusters = find_fusions(
+        fusions = find_fusions(
             mesh,
             radius=radius,
             radius_multiplier=radius_multiplier,
             verbose=verbose,
         )
 
-    all_fusion: set[int] = set()
-    for c in clusters:
-        all_fusion.update(c)
+    all_fusions: set[int] = set()
+    for c in fusions:
+        all_fusions.update(c)
 
-    if all_fusion:
+    if all_fusions:
         keep = np.ones(len(mesh.faces), dtype=bool)
-        for fi in all_fusion:
+        for fi in all_fusions:
             keep[fi] = False
         mesh = _rebuild_mesh(mesh, keep)
         if verbose:
             print(
-                f"[skeliner.pre] Removed {len(all_fusion)} fusion faces "
-                f"({len(clusters)} regions)"
+                f"[skeliner.pre] Removed {len(all_fusions)} fusion faces "
+                f"({len(fusions)} regions)"
             )
 
     # Step 2: split shared vertices
@@ -5509,7 +5508,7 @@ def remove_fusions(
 
     if verbose:
         print(
-            f"[skeliner.pre] Fusions: {len(all_fusion)} faces removed, vertices split"
+            f"[skeliner.pre] Fusions: {len(all_fusions)} faces removed, vertices split"
         )
 
     # Invalidate topology (components split at fan vertices)
