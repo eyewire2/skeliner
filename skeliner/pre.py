@@ -5920,6 +5920,9 @@ def find_parallel_patches(
     boundaries: dict[int, np.ndarray] | None = None,
     normal_thresh: float = 0.99,
     boundary_dist: float = 30.0,
+    expand_tilted: bool = True,
+    loose_normal_thresh: float = 0.9,
+    min_sandwich_overlap: float = 0.3,
     verbose: bool = False,
 ) -> list[dict]:
     """Detect parallel-patch artifacts at chunk boundaries.
@@ -5940,6 +5943,18 @@ def find_parallel_patches(
         Minimum |normal·axis| to count as axis-aligned (default 0.99).
     boundary_dist : float
         Max distance from a boundary plane in nm (default 30).
+    expand_tilted : bool, default True
+        Run :func:`_expand_parallel_patches` at the end to absorb
+        tilted transition faces at the rim of each seed patch.
+    loose_normal_thresh : float, default 0.9
+        Looser threshold used during rim expansion (passed to
+        :func:`_expand_parallel_patches`).
+    min_sandwich_overlap : float, default 0.3
+        After detection, drop patch pairs whose triangle-area overlap
+        (in the perpendicular plane) is below this fraction of the
+        smaller partner's area.  Filters out organelle-to-main
+        parallels that are not marching-cubes sandwich artifacts.
+        Set to ``0.0`` to disable.
     verbose : bool
         Print summary.
 
@@ -6244,6 +6259,21 @@ def find_parallel_patches(
             }
         )
 
+    if expand_tilted:
+        results = _expand_parallel_patches(
+            mesh,
+            results,
+            loose_normal_thresh=loose_normal_thresh,
+            boundary_dist=boundary_dist,
+        )
+
+    if min_sandwich_overlap > 0:
+        results = _filter_weak_sandwich_pairs(
+            mesh,
+            results,
+            min_overlap=min_sandwich_overlap,
+        )
+
     results.sort(key=lambda r: (r["axis"], r["bval"], -len(r["faces"])))
 
     if verbose:
@@ -6259,6 +6289,386 @@ def find_parallel_patches(
             )
 
     return results
+
+
+def _trim_patches_to_overlap(
+    mesh: trimesh.Trimesh,
+    patches: list[dict],
+) -> list[dict]:
+    """Trim each patch to the subset of faces whose projection onto
+    the plane perpendicular to the patch axis intersects an opposing
+    partner at the same ``(axis, bval)``.
+
+    Only the portion of a parallel patch that actually sits above an
+    opposing sandwich partner is a marching-cubes double-layer.  The
+    rest of the same connected flat region (a large axis-aligned sheet
+    that happens to be at a chunk boundary) is load-bearing topology
+    and must not be removed — otherwise the mesh gets disconnected.
+
+    Patches with no opposing partner in their group are dropped
+    (empty ``faces``).  Mixed patches with both up and down faces are
+    self-opposing: each sign is trimmed against the other sign's
+    union.
+    """
+    from collections import defaultdict
+
+    if not patches:
+        return patches
+
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    verts = mesh.vertices
+    faces = mesh.faces
+    normals = mesh.face_normals
+    perp = {0: [1, 2], 1: [0, 2], 2: [0, 1]}
+
+    groups: dict[tuple, list[int]] = defaultdict(list)
+    for pi, p in enumerate(patches):
+        groups[(int(p["axis"]), int(p["bval"]))].append(pi)
+
+    new_patches: list[dict] = []
+    for (axis, bval), group_pis in groups.items():
+        perp_axes = perp[axis]
+
+        # Union polygon per sign, pooled from all patches in the group.
+        sign_union: dict[int, object] = {}
+        for sign_val in (1, -1):
+            polys = []
+            for pj in group_pis:
+                p = patches[pj]
+                side_faces = (
+                    p["up_faces"] if sign_val > 0 else p["down_faces"]
+                )
+                if not side_faces:
+                    continue
+                for tri in verts[faces[side_faces]][:, :, perp_axes]:
+                    try:
+                        poly = Polygon(tri)
+                        if poly.is_valid and poly.area > 0:
+                            polys.append(poly)
+                    except Exception:
+                        continue
+            if polys:
+                sign_union[sign_val] = unary_union(polys)
+
+        for pi in group_pis:
+            p = patches[pi]
+            kept_faces: list[int] = []
+            kept_up: list[int] = []
+            kept_down: list[int] = []
+
+            for fi in p["faces"]:
+                n_ax = normals[fi, axis]
+                is_up = n_ax > 0
+                opp_sign = -1 if is_up else 1
+                opp = sign_union.get(opp_sign)
+                if opp is None:
+                    continue
+                tri = verts[faces[fi]][:, perp_axes]
+                try:
+                    face_poly = Polygon(tri)
+                    if not face_poly.is_valid:
+                        continue
+                    if face_poly.intersects(opp):
+                        fi_int = int(fi)
+                        kept_faces.append(fi_int)
+                        if is_up:
+                            kept_up.append(fi_int)
+                        else:
+                            kept_down.append(fi_int)
+                except Exception:
+                    continue
+
+            if kept_faces:
+                new_patches.append(
+                    {
+                        "axis": axis,
+                        "bval": bval,
+                        "faces": kept_faces,
+                        "up_faces": kept_up,
+                        "down_faces": kept_down,
+                    }
+                )
+
+    return new_patches
+
+
+def _sandwich_overlap_ratio(
+    mesh: trimesh.Trimesh,
+    faces_a: list[int],
+    faces_b: list[int],
+    axis: int,
+) -> float:
+    """Triangle-area overlap of two patches projected onto the plane
+    perpendicular to *axis*, normalised by the smaller patch's area.
+
+    Returns 0.0 if either side is empty or the polygons are invalid.
+    """
+    if not faces_a or not faces_b:
+        return 0.0
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    perp = [i for i in range(3) if i != axis]
+    verts = mesh.vertices
+    tris_a = verts[mesh.faces[faces_a]][:, :, perp]
+    tris_b = verts[mesh.faces[faces_b]][:, :, perp]
+
+    polys_a = [Polygon(t) for t in tris_a if Polygon(t).is_valid]
+    polys_b = [Polygon(t) for t in tris_b if Polygon(t).is_valid]
+    if not polys_a or not polys_b:
+        return 0.0
+
+    union_a = unary_union(polys_a)
+    union_b = unary_union(polys_b)
+    if union_a.is_empty or union_b.is_empty:
+        return 0.0
+
+    area_a = float(union_a.area)
+    area_b = float(union_b.area)
+    if area_a <= 0 or area_b <= 0:
+        return 0.0
+
+    inter_area = float(union_a.intersection(union_b).area)
+    return inter_area / min(area_a, area_b)
+
+
+def _filter_weak_sandwich_pairs(
+    mesh: trimesh.Trimesh,
+    patches: list[dict],
+    *,
+    min_overlap: float = 0.3,
+) -> list[dict]:
+    """Drop patches whose best opposing partner at the same (axis,bval)
+    has triangle-area overlap below *min_overlap* in the perpendicular
+    plane.  Keeps only patches that are genuine marching-cubes sandwich
+    sides — filters out organelle-to-main parallels where the two
+    sheets barely intersect.
+    """
+    from collections import defaultdict
+
+    if not patches or min_overlap <= 0:
+        return patches
+
+    groups: dict[tuple, list[int]] = defaultdict(list)
+    for pi, p in enumerate(patches):
+        groups[(int(p["axis"]), int(p["bval"]))].append(pi)
+
+    keep = [False] * len(patches)
+
+    for (axis, _bval), group_pis in groups.items():
+        # For each patch, find the best opposing overlap ratio.
+        for pi in group_pis:
+            p = patches[pi]
+            up_i = p["up_faces"]
+            dn_i = p["down_faces"]
+            # Self-opposing (mixed patch): its own up vs down
+            best = 0.0
+            if up_i and dn_i:
+                best = max(
+                    best, _sandwich_overlap_ratio(mesh, up_i, dn_i, axis)
+                )
+            # Pure plus or minus: look at other patches at same boundary
+            for pj in group_pis:
+                if pj == pi:
+                    continue
+                q = patches[pj]
+                if up_i and q["down_faces"]:
+                    best = max(
+                        best,
+                        _sandwich_overlap_ratio(
+                            mesh, up_i, q["down_faces"], axis
+                        ),
+                    )
+                if dn_i and q["up_faces"]:
+                    best = max(
+                        best,
+                        _sandwich_overlap_ratio(
+                            mesh, dn_i, q["up_faces"], axis
+                        ),
+                    )
+            if best >= min_overlap:
+                keep[pi] = True
+
+    return [p for pi, p in enumerate(patches) if keep[pi]]
+
+
+def _expand_parallel_patches(
+    mesh: trimesh.Trimesh,
+    patches: list[dict],
+    *,
+    loose_normal_thresh: float = 0.9,
+    boundary_dist: float = 30.0,
+) -> list[dict]:
+    """Absorb tilted transition faces adjacent to strict-parallel seed
+    patches.
+
+    At the rim of a parallel sandwich patch, marching cubes often emits
+    a few slightly-tilted triangles that bridge the flat sheet to the
+    surrounding geometry.  These faces fail the strict ``normal_thresh``
+    test but should still be treated as part of the patch, otherwise
+    they split one logical sandwich into multiple disconnected seed
+    patches (and leave the rim contour broken).
+
+    For each seed patch this function BFS-expands through edge-adjacent
+    faces whose axis-aligned normal component satisfies
+
+    * same sign as the patch (``n_axis * sign > 0``),
+    * ``|n_axis| > loose_normal_thresh`` (default 0.9 — about 26° tilt),
+    * centroid within ``2 * boundary_dist`` of the patch's ``bval``,
+    * projection (in the plane perpendicular to the axis) overlapping
+      the bbox of an *opposing* patch at the same axis/bval.
+
+    Patches whose expansions share any absorbed face get merged into
+    one in the returned list.
+    """
+    from collections import defaultdict, deque
+
+    if not patches:
+        return patches
+
+    verts = mesh.vertices
+    faces = mesh.faces
+    normals = mesh.face_normals
+    centroids = verts[faces].mean(axis=1)
+    perp = {0: [1, 2], 1: [0, 2], 2: [0, 1]}
+    expand_dist = 2.0 * boundary_dist
+
+    # Mesh-wide edge adjacency
+    full_ef: dict[tuple, list[int]] = defaultdict(list)
+    for fi in range(len(faces)):
+        f = faces[fi]
+        if f[0] == f[1] or f[1] == f[2] or f[0] == f[2]:
+            continue
+        for i in range(3):
+            a, b = int(f[i]), int(f[(i + 1) % 3])
+            full_ef[(min(a, b), max(a, b))].append(int(fi))
+
+    def patch_sign(p):
+        if p["up_faces"]:
+            return 1
+        if p["down_faces"]:
+            return -1
+        return 0
+
+    # Group patches by (axis, bval) and compute opposing XY bbox per sign.
+    groups: dict[tuple, list[int]] = defaultdict(list)
+    for pi, p in enumerate(patches):
+        groups[(int(p["axis"]), int(p["bval"]))].append(pi)
+
+    expansions: list[set[int]] = [set(p["faces"]) for p in patches]
+
+    for (axis, bval), group_pis in groups.items():
+        perp_axes = perp[axis]
+
+        opp_bbox: dict[int, tuple] = {}
+        for sign_val in (1, -1):
+            opp_vs: list[np.ndarray] = []
+            for pj in group_pis:
+                if patch_sign(patches[pj]) == -sign_val:
+                    opp_vs.append(
+                        verts[faces[patches[pj]["faces"]]].reshape(-1, 3)
+                    )
+            if not opp_vs:
+                continue
+            stacked = np.vstack(opp_vs)
+            opp_bbox[sign_val] = (
+                stacked[:, perp_axes].min(0),
+                stacked[:, perp_axes].max(0),
+            )
+
+        for pi in group_pis:
+            sign_p = patch_sign(patches[pi])
+            if sign_p == 0 or sign_p not in opp_bbox:
+                continue
+            xy_min, xy_max = opp_bbox[sign_p]
+            q = deque(patches[pi]["faces"])
+            while q:
+                fi = q.popleft()
+                f = faces[fi]
+                for i in range(3):
+                    a, b = int(f[i]), int(f[(i + 1) % 3])
+                    e = (min(a, b), max(a, b))
+                    for nb in full_ef[e]:
+                        if nb in expansions[pi]:
+                            continue
+                        n_ax = normals[nb, axis]
+                        if n_ax * sign_p <= 0:
+                            continue
+                        if abs(n_ax) < loose_normal_thresh:
+                            continue
+                        if abs(centroids[nb, axis] - bval) > expand_dist:
+                            continue
+                        v = verts[faces[nb]][:, perp_axes]
+                        if not (
+                            (v.min(0) < xy_max).all()
+                            and (v.max(0) > xy_min).all()
+                        ):
+                            continue
+                        expansions[pi].add(int(nb))
+                        q.append(int(nb))
+
+    # Merge patches whose expansions share absorbed faces (same axis,
+    # bval, and sign).
+    parent = list(range(len(patches)))
+
+    def uf_find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def uf_union(a, b):
+        ra, rb = uf_find(a), uf_find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(len(patches)):
+        for j in range(i + 1, len(patches)):
+            if patches[i]["axis"] != patches[j]["axis"]:
+                continue
+            if patches[i]["bval"] != patches[j]["bval"]:
+                continue
+            if patch_sign(patches[i]) != patch_sign(patches[j]):
+                continue
+            if expansions[i] & expansions[j]:
+                uf_union(i, j)
+
+    merged_groups: dict[int, list[int]] = defaultdict(list)
+    for i in range(len(patches)):
+        merged_groups[uf_find(i)].append(i)
+
+    new_patches: list[dict] = []
+    for root, members in merged_groups.items():
+        axis = int(patches[root]["axis"])
+        bval = int(patches[root]["bval"])
+        merged_faces: set[int] = set()
+        merged_up: set[int] = set()
+        merged_down: set[int] = set()
+        orig: set[int] = set()
+        for mi in members:
+            merged_faces |= expansions[mi]
+            merged_up.update(patches[mi]["up_faces"])
+            merged_down.update(patches[mi]["down_faces"])
+            orig.update(patches[mi]["faces"])
+        # Classify absorbed faces by their signed normal component
+        for fi in merged_faces - orig:
+            if normals[fi, axis] > 0:
+                merged_up.add(fi)
+            else:
+                merged_down.add(fi)
+        new_patches.append(
+            {
+                "axis": axis,
+                "bval": bval,
+                "faces": sorted(int(f) for f in merged_faces),
+                "up_faces": sorted(int(f) for f in merged_up),
+                "down_faces": sorted(int(f) for f in merged_down),
+            }
+        )
+
+    return new_patches
 
 
 def _find_fold_faces(mesh, patch):
@@ -6472,6 +6882,25 @@ def remove_parallel_patches(
     if not patches:
         if verbose:
             print("[skeliner.pre] No parallel patches to remove")
+        return mesh
+
+    # ── Step 0: trim patches to overlap with opposing partner ─────
+    # Only the portion of a parallel patch that sits above an opposing
+    # sandwich partner is a marching-cubes double-layer.  Trimming
+    # avoids disconnecting the mesh when a large flat axis-aligned
+    # sheet is load-bearing topology with only a small MC sandwich
+    # sitting in one corner (see site_02 case).
+    n_faces_before_trim = sum(len(p["faces"]) for p in patches)
+    patches = _trim_patches_to_overlap(mesh, patches)
+    n_faces_after_trim = sum(len(p["faces"]) for p in patches)
+    if verbose and n_faces_after_trim != n_faces_before_trim:
+        print(
+            f"[skeliner.pre] Trimmed patches to overlap: "
+            f"{n_faces_before_trim} → {n_faces_after_trim} faces"
+        )
+    if not patches:
+        if verbose:
+            print("[skeliner.pre] No patch-overlap regions to remove")
         return mesh
 
     faces = mesh.faces
