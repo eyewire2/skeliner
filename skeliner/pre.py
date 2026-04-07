@@ -2289,7 +2289,7 @@ def _build_org_output(
 def break_up_mesh(
     mesh: trimesh.Trimesh,
     soma: Soma,
-    organelle: np.ndarray | Organelles,
+    organelles: np.ndarray | Organelles,
     *,
     verbose: bool = False,
 ) -> MeshComponents:
@@ -2313,7 +2313,7 @@ def break_up_mesh(
     mesh : trimesh.Trimesh
     soma : Soma
         From ``find_soma_via_ring_cutoff`` (must have ``.verts``).
-    organelle : np.ndarray or Organelles
+    organelles : np.ndarray or Organelles
         ``(nFaces,)`` bool mask, or an :class:`Organelles` instance
         (the combined ``.mask`` is used).
     verbose : bool
@@ -2323,9 +2323,9 @@ def break_up_mesh(
     MeshComponents
     """
     # Accept either raw mask or Organelles dataclass
-    if isinstance(organelle, Organelles):
-        org_dc = organelle
-        organelle = org_dc.mask
+    if isinstance(organelles, Organelles):
+        org_dc = organelles
+        organelles = org_dc.mask
     else:
         org_dc = None
     faces = np.asarray(mesh.faces)
@@ -2350,12 +2350,12 @@ def break_up_mesh(
         if s >= 2:
             soma_face[fi] = True
 
-    # --- Phase 1: reachability without crossing organelle ---
+    # --- Phase 1: reachability without crossing organelles ---
     # For each mesh component, find its largest non-organelle body.
-    # Faces not in their component's body are trapped by organelle.
+    # Faces not in their component's body are trapped by organelles.
     # This is per-component so disconnected neurite fragments are
     # handled correctly (each has its own reachable body).
-    non_org = usable & ~organelle
+    non_org = usable & ~organelles
     ef_non_org = _build_edge_to_faces(faces, non_org)
     non_org_fi = np.where(non_org)[0]
     non_org_comps = _face_components(faces, ef_non_org, non_org_fi)
@@ -2388,14 +2388,14 @@ def break_up_mesh(
         if ci in body_labels:
             reachable[comp] = True
 
-    # --- Phase 2: break at soma + organelle ---
-    remain = usable & ~soma_face & ~organelle
+    # --- Phase 2: break at soma + organelles ---
+    remain = usable & ~soma_face & ~organelles
     remain_fi = np.where(remain)[0]
 
     if len(remain_fi) == 0:
         if verbose:
             print("break_up_mesh: no remaining faces after exclusion")
-        org_out = _build_org_output(org_dc, organelle, organelle)
+        org_out = _build_org_output(org_dc, organelles, organelles)
         return MeshComponents(
             soma=soma,
             organelles=org_out,
@@ -2409,15 +2409,15 @@ def break_up_mesh(
     # --- classify ---
     neurite_candidates: list[np.ndarray] = []
     extra_soma_vi: list[int] = []
-    organelle_expanded = organelle.copy()
+    organelles_expanded = organelles.copy()
 
     for comp in components:
         # Reachability: is any face in its mesh component's body?
         in_main = reachable[comp].any()
 
         if not in_main:
-            # trapped by organelle
-            organelle_expanded[comp] = True
+            # trapped by organelles
+            organelles_expanded[comp] = True
             if verbose:
                 print(
                     f"break_up_mesh: absorbed {len(comp)} faces "
@@ -2481,10 +2481,10 @@ def break_up_mesh(
             f"{len(discarded)} discarded ({n_disc_faces:,} faces, "
             f"threshold ~{thresh} faces), "
             f"soma {len(soma.verts):,} verts, "
-            f"organelle {organelle_expanded.sum():,} faces"
+            f"organelles {organelles_expanded.sum():,} faces"
         )
 
-    org_out = _build_org_output(org_dc, organelle, organelle_expanded)
+    org_out = _build_org_output(org_dc, organelles, organelles_expanded)
     return MeshComponents(
         soma=soma,
         organelles=org_out,
@@ -5621,14 +5621,14 @@ def remove_organelles(
     # soma.verts is still valid on clean — no remapping needed
     """
     if organelles is not None and len(organelles) == len(mesh.faces):
-        organelle = np.asarray(organelles, dtype=bool)
+        organelles = np.asarray(organelles, dtype=bool)
         if verbose:
             print(
-                f"[skeliner.pre] Using provided organelle mask "
-                f"({int(organelle.sum()):,} faces)"
+                f"[skeliner.pre] Using provided organelles mask "
+                f"({int(organelles.sum()):,} faces)"
             )
     else:
-        organelle = find_organelles(
+        organelles = find_organelles(
             mesh,
             radius=radius,
             radius_multiplier=radius_multiplier,
@@ -5636,17 +5636,17 @@ def remove_organelles(
             verbose=verbose,
         ).mask
 
-    if not organelle.any():
+    if not organelles.any():
         if verbose:
             print("[skeliner.pre] Nothing to remove")
         return mesh
 
-    clean = _rebuild_mesh(mesh, ~organelle)
+    clean = _rebuild_mesh(mesh, ~organelles)
 
     if verbose:
         print(
             f"[skeliner.pre] Result: {len(clean.faces):,} faces "
-            f"(removed {organelle.sum():,} faces)"
+            f"(removed {organelles.sum():,} faces)"
         )
 
     return clean
