@@ -26,7 +26,6 @@ __all__ = [
     "find_gaps",
     "find_holes",
     "find_nucleus_center",
-    "find_offsets",
     "find_soma_via_neurite_exclusion",
     "find_soma_via_ring_cutoff",
     "find_soma_via_z_contour",
@@ -36,7 +35,6 @@ __all__ = [
     "remove_fragments",
     "remove_fusions",
     "remove_islands",
-    "remove_offsets",
     "remove_organelles",
 ]
 
@@ -972,7 +970,9 @@ def _validate_loop_pair(
         return f"loop too small ({na}v + {nb}v, min {min_verts})"
     ratio = max(na, nb) / min(na, nb)
     if ratio > max_ratio:
-        return f"loop size mismatch ({na}v + {nb}v, ratio {ratio:.1f} > {max_ratio:.1f})"
+        return (
+            f"loop size mismatch ({na}v + {nb}v, ratio {ratio:.1f} > {max_ratio:.1f})"
+        )
     return None
 
 
@@ -3883,12 +3883,8 @@ def remove_gaps(
     loop_pairs: list[tuple[list[int], list[int]]] = []
     n_skipped = 0
     for gap_i, (faces_a, faces_b, dist, *_comp_ids) in enumerate(gaps):
-        sel_a, loop_a = _expand_tip_to_good_rim(
-            mesh, faces_a, edge_to_faces, face_adj
-        )
-        sel_b, loop_b = _expand_tip_to_good_rim(
-            mesh, faces_b, edge_to_faces, face_adj
-        )
+        sel_a, loop_a = _expand_tip_to_good_rim(mesh, faces_a, edge_to_faces, face_adj)
+        sel_b, loop_b = _expand_tip_to_good_rim(mesh, faces_b, edge_to_faces, face_adj)
 
         if loop_a is None or loop_b is None:
             if verbose:
@@ -6434,9 +6430,7 @@ def _trim_patches_to_overlap(
             polys = []
             for pj in group_pis:
                 p = patches[pj]
-                side_faces = (
-                    p["up_faces"] if sign_val > 0 else p["down_faces"]
-                )
+                side_faces = p["up_faces"] if sign_val > 0 else p["down_faces"]
                 if not side_faces:
                     continue
                 for tri in verts[faces[side_faces]][:, :, perp_axes]:
@@ -6563,9 +6557,7 @@ def _filter_weak_sandwich_pairs(
             # Self-opposing (mixed patch): its own up vs down
             best = 0.0
             if up_i and dn_i:
-                best = max(
-                    best, _sandwich_overlap_ratio(mesh, up_i, dn_i, axis)
-                )
+                best = max(best, _sandwich_overlap_ratio(mesh, up_i, dn_i, axis))
             # Pure plus or minus: look at other patches at same boundary
             for pj in group_pis:
                 if pj == pi:
@@ -6574,16 +6566,12 @@ def _filter_weak_sandwich_pairs(
                 if up_i and q["down_faces"]:
                     best = max(
                         best,
-                        _sandwich_overlap_ratio(
-                            mesh, up_i, q["down_faces"], axis
-                        ),
+                        _sandwich_overlap_ratio(mesh, up_i, q["down_faces"], axis),
                     )
                 if dn_i and q["up_faces"]:
                     best = max(
                         best,
-                        _sandwich_overlap_ratio(
-                            mesh, dn_i, q["up_faces"], axis
-                        ),
+                        _sandwich_overlap_ratio(mesh, dn_i, q["up_faces"], axis),
                     )
             if best >= min_overlap:
                 keep[pi] = True
@@ -6664,9 +6652,7 @@ def _expand_parallel_patches(
             opp_vs: list[np.ndarray] = []
             for pj in group_pis:
                 if patch_sign(patches[pj]) == -sign_val:
-                    opp_vs.append(
-                        verts[faces[patches[pj]["faces"]]].reshape(-1, 3)
-                    )
+                    opp_vs.append(verts[faces[patches[pj]["faces"]]].reshape(-1, 3))
             if not opp_vs:
                 continue
             stacked = np.vstack(opp_vs)
@@ -6699,8 +6685,7 @@ def _expand_parallel_patches(
                             continue
                         v = verts[faces[nb]][:, perp_axes]
                         if not (
-                            (v.min(0) < xy_max).all()
-                            and (v.max(0) > xy_min).all()
+                            (v.min(0) < xy_max).all() and (v.max(0) > xy_min).all()
                         ):
                             continue
                         expansions[pi].add(int(nb))
@@ -6925,12 +6910,8 @@ def _zip_vertex_loops(
                 cost += float(np.linalg.norm(verts[a_next] - verts[t_curr]))
                 i += 1
             else:
-                d_adv_a = float(
-                    np.linalg.norm(verts[a_next] - verts[t_curr])
-                )
-                d_adv_b = float(
-                    np.linalg.norm(verts[a_curr] - verts[t_next])
-                )
+                d_adv_a = float(np.linalg.norm(verts[a_next] - verts[t_curr]))
+                d_adv_b = float(np.linalg.norm(verts[a_curr] - verts[t_next]))
                 if d_adv_a <= d_adv_b:
                     tris.append((a_curr, a_next, t_curr))
                     cost += d_adv_a
@@ -7048,11 +7029,13 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
         # A real contour needs at least 3 vertices (closed) or 2
         # vertices for a single-edge chain.  Drop anything smaller.
         up_traces = [
-            (lp, c) for lp, c in up_traces
+            (lp, c)
+            for lp, c in up_traces
             if (c and len(lp) >= 3) or (not c and len(lp) >= 2)
         ]
         dn_traces = [
-            (lp, c) for lp, c in dn_traces
+            (lp, c)
+            for lp, c in dn_traces
             if (c and len(lp) >= 3) or (not c and len(lp) >= 2)
         ]
         if not up_traces or not dn_traces:
@@ -7064,25 +7047,31 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
         up_info = []
         for lp, c in up_traces:
             pts = verts[lp]
-            up_info.append({
-                "loop": lp, "closed": c, "pts": pts,
-                "center": pts.mean(axis=0),
-                "bmin": pts[:, perp_axes].min(0),
-                "bmax": pts[:, perp_axes].max(0),
-            })
+            up_info.append(
+                {
+                    "loop": lp,
+                    "closed": c,
+                    "pts": pts,
+                    "center": pts.mean(axis=0),
+                    "bmin": pts[:, perp_axes].min(0),
+                    "bmax": pts[:, perp_axes].max(0),
+                }
+            )
         dn_info = []
         for lp, c in dn_traces:
             pts = verts[lp]
-            dn_info.append({
-                "loop": lp, "closed": c, "pts": pts,
-                "center": pts.mean(axis=0),
-                "bmin": pts[:, perp_axes].min(0),
-                "bmax": pts[:, perp_axes].max(0),
-            })
+            dn_info.append(
+                {
+                    "loop": lp,
+                    "closed": c,
+                    "pts": pts,
+                    "center": pts.mean(axis=0),
+                    "bmin": pts[:, perp_axes].min(0),
+                    "bmax": pts[:, perp_axes].max(0),
+                }
+            )
 
-        up_order = sorted(
-            range(len(up_info)), key=lambda i: -len(up_info[i]["loop"])
-        )
+        up_order = sorted(range(len(up_info)), key=lambda i: -len(up_info[i]["loop"]))
         dn_used: set[int] = set()
 
         for ui in up_order:
@@ -7140,11 +7129,7 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
         print(
             f"[skeliner.pre] Stitch: {n_pairs} rim pairs zipped, "
             f"{len(new_faces)} bridge faces"
-            + (
-                f" ({n_skipped_loops} loops unpaired)"
-                if n_skipped_loops
-                else ""
-            )
+            + (f" ({n_skipped_loops} loops unpaired)" if n_skipped_loops else "")
         )
 
     return trimesh.Trimesh(vertices=verts, faces=combined, process=False)
