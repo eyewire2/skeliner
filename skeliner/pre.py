@@ -3595,6 +3595,8 @@ def find_disconnected(
     main_centroids = mesh.triangles_center[main_face_idx]
     main_normals = mesh.face_normals[main_face_idx]
     main_tree = KDTree(main_centroids)
+    # Local mesh scale — used to gate the enclosed test below.
+    median_edge_len = float(np.median(mesh.edges_unique_length))
 
     # Collect non-main components (skip degenerate faces with label -2)
     comp_faces: dict[int, list[int]] = {}
@@ -3643,20 +3645,29 @@ def find_disconnected(
         # check which side of that face the vertex is on: if the vector
         # from the main face centroid to the vertex is opposite the main
         # face normal, the vertex is on the interior side.
+        #
+        # The nearest-face-normal vote is only reliable when the
+        # component sits close to main: a true enclosed organelle is
+        # right against the inner surface. For components far from main,
+        # the nearest face may lie on a curved/concave region whose
+        # normal points the wrong way, producing false "inside" votes.
+        # Skip the test entirely when the component is clearly external.
         _, nn_idx = main_tree.query(coords)
         vecs = coords - main_centroids[nn_idx]
-        dots = np.einsum("ij,ij->i", vecs, main_normals[nn_idx])
-        # Component is enclosed if the majority of vertices are on the
-        # inward side (dot < 0)
-        if (dots < 0).sum() > len(dots) / 2:
-            n_enclosed_excluded += 1
-            if verbose:
-                print(
-                    f"[skeliner.pre]   Excluded enclosed component "
-                    f"({len(fis):,} faces, "
-                    f"{(dots < 0).sum()}/{len(dots)} verts inside)"
-                )
-            continue
+        dists = np.linalg.norm(vecs, axis=1)
+        if np.median(dists) <= 5.0 * median_edge_len:
+            dots = np.einsum("ij,ij->i", vecs, main_normals[nn_idx])
+            # Component is enclosed if the majority of vertices are on
+            # the inward side (dot < 0)
+            if (dots < 0).sum() > len(dots) / 2:
+                n_enclosed_excluded += 1
+                if verbose:
+                    print(
+                        f"[skeliner.pre]   Excluded enclosed component "
+                        f"({len(fis):,} faces, "
+                        f"{(dots < 0).sum()}/{len(dots)} verts inside)"
+                    )
+                continue
 
         components.append((cid, fis))
 
