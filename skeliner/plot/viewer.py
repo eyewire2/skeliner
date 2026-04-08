@@ -1546,6 +1546,12 @@ def _create_app(
             mesh_state["soma"] = soma
 
         cached_disc = mesh_state.get("disconnected")
+        cached_fusions = mesh_state.get("fusion_clusters")
+        if cached_fusions:
+            await _log(
+                f"[skeliner.pre]   using {len(cached_fusions)} cached "
+                f"fusion clusters as walls"
+            )
         await _log("[skeliner.pre] Detecting gaps...")
         gaps = await _run_with_log(
             find_gaps,
@@ -1554,6 +1560,7 @@ def _create_app(
             soma=soma,
             disconnected=cached_disc,
             mesh_stats=mesh_state.get("mesh_stats"),
+            fusions=cached_fusions,
         )
         mesh_state["gap_clusters"] = gaps
 

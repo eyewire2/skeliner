@@ -3868,6 +3868,7 @@ def find_gaps(
     disconnected: list[list[int]] | None = None,
     organelles: Organelles | None = None,
     mesh_stats: MeshStats | None = None,
+    fusions: list[list[int]] | None = None,
 ) -> list[tuple[list[int], list[int], float]]:
     """Detect gaps between disconnected components and the main mesh.
 
@@ -3887,6 +3888,13 @@ def find_gaps(
         Pre-computed soma from any ``find_soma_via_*`` function.
     disconnected : list[list[int]] or None
         Pre-computed disconnected components from :func:`find_disconnected`.
+    fusions : list[list[int]] or None
+        Fusion clusters from :func:`find_fusions`.  When provided,
+        vertices touched by any fusion-cluster face are excluded from
+        each component's KDTree so the gap query finds the real
+        geometric gap rather than the zero-distance fusion overlap.
+        Pass-through to :func:`find_disconnected` when ``disconnected``
+        is ``None``.
 
     Returns
     -------
@@ -3901,6 +3909,15 @@ def find_gaps(
     else:
         labels, main = _face_edge_components(mesh)
 
+    # When fusions are provided, refine the main component the same
+    # way find_disconnected does — otherwise the main label still
+    # spans both glued branches and we'd be querying nearest neighbors
+    # within a single merged blob.
+    if fusions:
+        labels, main = _refine_components_with_fusions(
+            mesh, labels, main, fusions
+        )
+
     # Get disconnected components (reuse filtering logic)
     if disconnected is not None:
         disc = disconnected
@@ -3911,6 +3928,7 @@ def find_gaps(
             soma=soma,
             organelles=organelles,
             mesh_stats=mesh_stats,
+            fusions=fusions,
         )
 
     if verbose:
@@ -3919,12 +3937,35 @@ def find_gaps(
     if not disc:
         return []
 
+    # Build the set of vertices touched by any fusion-cluster face.
+    # Components share these verts (fusion = "glued at the rim"), so
+    # excluding them is what reveals the real geometric gap distance.
+    fusion_vert_set: set[int] = set()
+    if fusions:
+        for cluster in fusions:
+            for fi in cluster:
+                for v in mesh.faces[int(fi)]:
+                    fusion_vert_set.add(int(v))
+
+    def _component_verts(fis: np.ndarray) -> np.ndarray:
+        verts = np.unique(mesh.faces[fis])
+        if not fusion_vert_set:
+            return verts
+        mask = np.array(
+            [int(v) not in fusion_vert_set for v in verts], dtype=bool
+        )
+        kept = verts[mask]
+        # Fall back to the unfiltered set if filtering would empty the
+        # component (shouldn't happen for real branches but keeps the
+        # KDTree well-defined).
+        return kept if len(kept) > 0 else verts
+
     # Build KD-trees: main component + each disconnected component
     comp_data: dict[int, dict] = {}
 
     # Main component
     main_fi = np.where(labels == main)[0]
-    main_verts = np.unique(mesh.faces[main_fi])
+    main_verts = _component_verts(main_fi)
     comp_data[main] = {
         "fi": main_fi,
         "verts": main_verts,
@@ -3935,7 +3976,7 @@ def find_gaps(
     # Disconnected components — identify by their label
     for fis in disc:
         cid = int(labels[fis[0]])
-        verts = np.unique(mesh.faces[fis])
+        verts = _component_verts(np.asarray(fis))
         comp_data[cid] = {
             "fi": np.asarray(fis),
             "verts": verts,
