@@ -83,18 +83,18 @@
                 flex-shrink: 0;
             }
             button.toggle-vis {
-                line-height: 0;
-                padding: 2px 4px;
-                background: none;
-                border: 1px solid #555;
-                border-radius: 2px;
-                color: #ccc;
+                display: inline-flex;
+                align-items: center;
+                gap: 3px;
+                line-height: 1;
+                font-size: 10px;
                 cursor: pointer;
             }
             button.toggle-vis svg {
                 display: block;
-                width: 12px;
-                height: 12px;
+                width: 11px;
+                height: 11px;
+                flex-shrink: 0;
             }
             .hl-swatch {
                 display: inline-block;
@@ -514,9 +514,7 @@
             <div id="hlList" style="margin-top: 4px; max-height: 200px; overflow-y: auto"></div>
             <div style="margin-top: 2px; display: flex; justify-content: space-between; align-items: center">
                 <div id="hlClearAllRow" style="display: none">
-                    <button id="hlHideAll" style="font-size: 10px; cursor: pointer">
-                        Hide All
-                    </button>
+                    <button id="hlHideAll" class="toggle-vis" title="hide all"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span>All</span></button>
                     <button id="hlClearAll" style="font-size: 10px; cursor: pointer; margin-left: 6px">
                         Clear All
                     </button>
@@ -2836,9 +2834,13 @@ let meshCentroid = [0, 0, 0];
                 ' 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16' +
                 ' 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>' +
                 '<line x1="1" y1="1" x2="23" y2="23"/></svg>';
-            function setToggleVisIcon(btn, visible) {
-                btn.innerHTML = visible ? EYE_OPEN_SVG : EYE_OFF_SVG;
-                btn.title = visible ? "hide" : "show";
+            function setToggleVisIcon(btn, visible, label) {
+                const svg = visible ? EYE_OPEN_SVG : EYE_OFF_SVG;
+                btn.innerHTML = label
+                    ? svg + "<span>" + label + "</span>"
+                    : svg;
+                const verb = visible ? "hide" : "show";
+                btn.title = label ? verb + " " + label.toLowerCase() : verb;
             }
             function syncAnnotationsToServer() {
                 if (!currentAnnotations) return;
@@ -3201,8 +3203,7 @@ let meshCentroid = [0, 0, 0];
                 document.querySelectorAll("#hlList button.toggle-vis").forEach((btn) => {
                     setToggleVisIcon(btn, vis);
                 });
-                document.getElementById("hlHideAll").textContent =
-                    annotationsHidden ? "Show All" : "Hide All";
+                setToggleVisIcon(document.getElementById("hlHideAll"), vis, "All");
             }
 
             function clearAllAnnotations() {
