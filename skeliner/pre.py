@@ -950,6 +950,81 @@ def _trace_border_loops(
     return loops
 
 
+def _validate_loop_pair(
+    la: list[int],
+    lb: list[int],
+    *,
+    min_verts: int = 4,
+    max_ratio: float = 5.0,
+) -> str | None:
+    """Return a reason string if the loop pair is unsuitable for stitching.
+
+    Reject 3-vertex "loops" (degenerate triangle holes that no stitcher
+    can bridge to a larger rim manifoldly), and reject pairs whose size
+    ratio exceeds *max_ratio* (highly mismatched rims force the zipper
+    or the tube fitter to fan multiple ring verts onto a single rim
+    vert, producing fan vertices and non-manifold edges).
+
+    Returns ``None`` if the pair passes.
+    """
+    na, nb = len(la), len(lb)
+    if na < min_verts or nb < min_verts:
+        return f"loop too small ({na}v + {nb}v, min {min_verts})"
+    ratio = max(na, nb) / min(na, nb)
+    if ratio > max_ratio:
+        return f"loop size mismatch ({na}v + {nb}v, ratio {ratio:.1f} > {max_ratio:.1f})"
+    return None
+
+
+def _expand_tip_to_good_rim(
+    mesh: trimesh.Trimesh,
+    tip: list[int],
+    edge_to_faces: dict[tuple[int, int], list[int]],
+    face_adj: dict[int, set[int]],
+    *,
+    target_verts: int = 6,
+    max_iters: int = 20,
+    max_eat_factor: int = 30,
+) -> tuple[set[int], list[int] | None]:
+    """Iteratively peel BFS rings from *tip* until its border has at least
+    *target_verts* vertices.
+
+    Returns ``(expanded_tip, best_loop)``. ``best_loop`` is the largest
+    border loop found at the final tip (``None`` if no loop ever traced).
+
+    The initial tip from :func:`find_gaps` can produce a degenerate
+    "rim" (e.g. 3 verts when the tip is a tongue attached at a single
+    triangle). Each expansion step adds the next BFS ring of
+    edge-neighbors and re-traces the border. Expansion is capped at
+    ``len(tip) * max_eat_factor`` faces to avoid swallowing the entire
+    component.
+    """
+    sel: set[int] = set(int(fi) for fi in tip)
+    if not sel:
+        return sel, None
+    max_size = max(len(sel) * max_eat_factor, target_verts * 4)
+
+    best_loop: list[int] | None = None
+    for _ in range(max_iters):
+        loops = _trace_border_loops(mesh, sel, edge_to_faces)
+        loops = [lp for lp in loops if len(lp) >= 3]
+        if loops:
+            biggest = max(loops, key=len)
+            best_loop = biggest
+            if len(biggest) >= target_verts:
+                return sel, biggest
+        # Expand by one BFS ring
+        next_sel = set(sel)
+        for fi in sel:
+            for nfi in face_adj.get(fi, ()):
+                next_sel.add(nfi)
+        if next_sel == sel or len(next_sel) > max_size:
+            break
+        sel = next_sel
+
+    return sel, best_loop
+
+
 def _fit_loop_circle(pts: np.ndarray) -> tuple[np.ndarray, float, np.ndarray]:
     """Fit a circle to a 3D point loop.  Returns (center, radius, normal)."""
     center = pts.mean(axis=0)
@@ -3792,48 +3867,70 @@ def remove_gaps(
             print("[skeliner.pre] No gaps to bridge")
         return mesh
 
-    # Build edge map once
+    # Build edge / face adjacency once
     edge_to_faces = _edge_to_faces(mesh)
+    face_adj = _face_adjacency(mesh, edge_to_faces)
 
     if verbose:
         print(f"[skeliner.pre] Bridging {len(gaps)} gaps")
 
-    # For each gap, trace its border loops. Only collect faces to
-    # remove for gaps that successfully produce a loop pair.
+    # For each gap, expand each side's tip until both rims are real
+    # loops. The initial tip from find_gaps can produce a degenerate
+    # "rim" (e.g. 3 verts when the tip is a tongue attached at a single
+    # triangle); peeling more rings exposes a clean cross-section that
+    # the stitcher can bridge manifoldly.
     faces_to_remove: set[int] = set()
     loop_pairs: list[tuple[list[int], list[int]]] = []
+    n_skipped = 0
     for gap_i, (faces_a, faces_b, dist, *_comp_ids) in enumerate(gaps):
-        gap_sel = set(faces_a) | set(faces_b)
-        loops = _trace_border_loops(mesh, gap_sel, edge_to_faces)
+        sel_a, loop_a = _expand_tip_to_good_rim(
+            mesh, faces_a, edge_to_faces, face_adj
+        )
+        sel_b, loop_b = _expand_tip_to_good_rim(
+            mesh, faces_b, edge_to_faces, face_adj
+        )
 
-        if len(loops) < 2:
+        if loop_a is None or loop_b is None:
             if verbose:
                 print(
                     f"[skeliner.pre]   Gap {gap_i} (dist={dist:.0f}): "
-                    f"only {len(loops)} loop(s), skipping"
+                    f"could not trace rim loops on one side, skipping"
                 )
+            n_skipped += 1
             continue
 
-        # Pair the two closest loops for this gap
-        centroids = [mesh.vertices[lp].mean(axis=0) for lp in loops]
-        best_d = float("inf")
-        best_pair = (0, 1)
-        for ii in range(len(loops)):
-            for jj in range(ii + 1, len(loops)):
-                d = float(np.linalg.norm(centroids[ii] - centroids[jj]))
-                if d < best_d:
-                    best_d = d
-                    best_pair = (ii, jj)
+        # Final safety net: if expansion still didn't reach a clean
+        # pair (degenerate or wildly mismatched), skip rather than
+        # introduce a fusion.
+        reason = _validate_loop_pair(loop_a, loop_b)
+        if reason is not None:
+            if verbose:
+                print(
+                    f"[skeliner.pre]   Gap {gap_i} (dist={dist:.0f}): "
+                    f"skipped after expansion ({reason})"
+                )
+            n_skipped += 1
+            continue
 
-        la, lb = loops[best_pair[0]], loops[best_pair[1]]
-        loop_pairs.append((la, lb))
-        faces_to_remove |= gap_sel
+        loop_pairs.append((loop_a, loop_b))
+        faces_to_remove |= sel_a | sel_b
 
         if verbose:
+            extra = ""
+            if len(sel_a) != len(faces_a) or len(sel_b) != len(faces_b):
+                extra = (
+                    f" [expanded a:{len(faces_a)}->{len(sel_a)}f, "
+                    f"b:{len(faces_b)}->{len(sel_b)}f]"
+                )
             print(
                 f"[skeliner.pre]   Gap {gap_i} (dist={dist:.0f}): "
-                f"{len(la)}v + {len(lb)}v"
+                f"{len(loop_a)}v + {len(loop_b)}v{extra}"
             )
+
+    if not loop_pairs:
+        if verbose:
+            print("[skeliner.pre] No valid loop pairs; nothing to bridge")
+        return mesh
 
     if verbose:
         print(f"[skeliner.pre] Removing {len(faces_to_remove)} tip faces")
