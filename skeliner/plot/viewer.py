@@ -2239,6 +2239,38 @@ def _create_app(
             }
         )
 
+    async def do_remove_selected(request):
+        """Remove selected faces from the mesh, leaving open holes."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        body = await request.json()
+        face_indices = body.get("faces", [])
+        if not face_indices:
+            return JSONResponse(
+                {"ok": False, "error": "No faces selected"}, status_code=400
+            )
+
+        from skeliner.pre import remove_selected_faces
+
+        mesh = mesh_state["mesh"]
+        n_before = len(mesh.faces)
+        new_mesh = await _run_with_log(
+            remove_selected_faces, mesh, face_indices, verbose=True
+        )
+
+        await _apply_new_mesh(new_mesh)
+        await _log(f"Remove selected: {len(face_indices):,} faces removed")
+        return JSONResponse(
+            {
+                "ok": True,
+                "facesBefore": n_before,
+                "facesRemoved": len(face_indices),
+            }
+        )
+
     async def edit_vertices(request):
         """Apply vertex position edits from the transform gizmo."""
         if mesh_state["mesh"] is None:
@@ -3369,6 +3401,7 @@ def _create_app(
             Route("/remove_fragments", do_remove_fragments, methods=["POST"]),
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
+            Route("/remove_selected", do_remove_selected, methods=["POST"]),
             Route("/edit_vertices", edit_vertices, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/break_up_mesh", do_break_up_mesh, methods=["POST"]),

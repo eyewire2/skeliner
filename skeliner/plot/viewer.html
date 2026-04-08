@@ -368,6 +368,7 @@
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
                     <span style="color: #888; margin-left: 12px">Mesh:</span>
                     <button id="hlMerge" style="margin-left: 4px">Merge</button>
+                    <button id="hlRemove" style="margin-left: 4px">Remove</button>
                     <button id="breakUpMeshBtn" style="margin-left: 4px">Break</button>
                     <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
                 </span>
@@ -760,6 +761,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("saveAnnotations").addEventListener("click", () => doSave("annotations"));
                 document.getElementById("saveAll").addEventListener("click", () => doSave("all"));
                 document.getElementById("hlMerge").addEventListener("click", runMergeSelected);
+                document.getElementById("hlRemove").addEventListener("click", runRemoveSelected);
                 document.getElementById("breakUpMeshBtn").addEventListener("click", runBreakUpMesh);
                 document.getElementById("compactMeshBtn").addEventListener("click", runCompactMesh);
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
@@ -1768,6 +1770,23 @@ let meshCentroid = [0, 0, 0];
                 const data = await _runAction(
                     document.getElementById("hlMerge"),
                     () => fetch("/merge_selected", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
+                    }),
+                );
+                if (data && data.ok) {
+                    manualHighlightFaces.clear();
+                    rebuildManualHighlight();
+                    syncManualHighlight();
+                }
+            }
+
+            async function runRemoveSelected() {
+                if (manualHighlightFaces.size === 0) return;
+                const data = await _runAction(
+                    document.getElementById("hlRemove"),
+                    () => fetch("/remove_selected", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),

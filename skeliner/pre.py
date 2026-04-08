@@ -1512,6 +1512,46 @@ def merge_selected_faces(
     return _stitch_and_rebuild(mesh, sel, pairs, verbose=verbose)
 
 
+def remove_selected_faces(
+    mesh: trimesh.Trimesh,
+    face_indices: list[int],
+    *,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Remove the selected faces from the mesh, leaving open holes.
+
+    Companion to :func:`merge_selected_faces`.  Where
+    ``merge_selected_faces`` bridges the rims of the removed region
+    with new triangles, this function leaves the boundary loops as
+    open holes — useful when the user just wants to delete a chunk
+    and inspect the result, or feed it into other repair steps.
+
+    Face and vertex indices are preserved (removed faces become
+    degenerate ``[0, 0, 0]``) so face-based annotations remain valid.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    face_indices : list[int]
+        Indices of faces to remove.
+    verbose : bool
+
+    Returns
+    -------
+    trimesh.Trimesh
+        Mesh with selected faces removed.
+    """
+    if not face_indices:
+        return mesh
+    keep = np.ones(len(mesh.faces), dtype=bool)
+    keep[np.asarray(face_indices, dtype=np.int64)] = False
+    if verbose:
+        n_remove = int((~keep).sum())
+        print(f"[skeliner.pre] remove_selected_faces: {n_remove} faces")
+    return _rebuild_mesh(mesh, keep)
+
+
 def _find_island_faces(
     faces: np.ndarray,
     active: np.ndarray,
