@@ -1447,9 +1447,7 @@ def merge_selected_faces(
     # as remove_gaps's per-side expansion — so the resulting rims
     # converge to matching sizes (`_zipper_stitch` only welds
     # manifoldly when both rims have similar vertex counts).
-    sel, loops = _expand_selection_per_group(
-        mesh, sel_input, edge_to_faces, face_adj
-    )
+    sel, loops = _expand_selection_per_group(mesh, sel_input, edge_to_faces, face_adj)
 
     if verbose:
         if len(sel) != len(sel_input):
@@ -1498,9 +1496,7 @@ def merge_selected_faces(
         reason = _validate_loop_pair(la, lb)
         if reason is not None:
             if verbose:
-                print(
-                    f"[skeliner.pre]   Pair skipped after expansion ({reason})"
-                )
+                print(f"[skeliner.pre]   Pair skipped after expansion ({reason})")
         else:
             pairs.append((la, lb))
         available.pop(best_j)
@@ -3737,9 +3733,7 @@ def find_disconnected(
     # Optional fusion-aware refinement: split the main blob along
     # fusion clusters so glued branches become separate components.
     if fusions:
-        labels, main = _refine_components_with_fusions(
-            mesh, labels, main, fusions
-        )
+        labels, main = _refine_components_with_fusions(mesh, labels, main, fusions)
     n_faces = len(mesh.faces)
     if verbose:
         n_total_comps = int(labels.max()) + 1 if len(labels) else 0
@@ -3921,9 +3915,7 @@ def find_gaps(
     # spans both glued branches and we'd be querying nearest neighbors
     # within a single merged blob.
     if fusions:
-        labels, main = _refine_components_with_fusions(
-            mesh, labels, main, fusions
-        )
+        labels, main = _refine_components_with_fusions(mesh, labels, main, fusions)
 
     # Get disconnected components (reuse filtering logic)
     if disconnected is not None:
@@ -3983,9 +3975,7 @@ def find_gaps(
         verts = np.unique(mesh.faces[fis])
         if not fusion_vert_set:
             return verts
-        mask = np.array(
-            [int(v) not in fusion_vert_set for v in verts], dtype=bool
-        )
+        mask = np.array([int(v) not in fusion_vert_set for v in verts], dtype=bool)
         kept = verts[mask]
         # Fall back to the unfiltered set if filtering would empty the
         # component (shouldn't happen for real branches but keeps the
@@ -7850,8 +7840,8 @@ def preprocess(
       1. find_parallel_patches → remove_parallel_patches
       2. find_organelles
       3. find_soma_via_ring_cutoff
-      4. find_disconnected → find_gaps → remove_gaps
-      5. find_fusions → remove_fusions
+      4. find_fusions → find_disconnected → find_gaps
+      5. remove_gaps → remove_fusions
       6. break_up_mesh
       7. compact_mesh (optional)
 
@@ -7890,11 +7880,13 @@ def preprocess(
     )
 
     # 4. Disconnected → gaps
+    fusions = find_fusions(mesh, mesh_stats=mesh_stats, verbose=verbose)
     disconnected = find_disconnected(
         mesh,
         soma=soma,
         organelles=org,
         mesh_stats=mesh_stats,
+        fusions=fusions,
         verbose=verbose,
     )
 
@@ -7903,13 +7895,13 @@ def preprocess(
         soma=soma,
         disconnected=disconnected,
         mesh_stats=mesh_stats,
+        fusions=fusions,
         verbose=verbose,
     )
     if gaps:
         mesh = remove_gaps(mesh, gaps=gaps, mesh_stats=mesh_stats, verbose=verbose)
 
     # 5. Fusions
-    fusions = find_fusions(mesh, mesh_stats=mesh_stats, verbose=verbose)
     if fusions:
         mesh = remove_fusions(
             mesh, fusions=fusions, mesh_stats=mesh_stats, verbose=verbose
