@@ -82,6 +82,20 @@
                 margin-left: 4px;
                 flex-shrink: 0;
             }
+            button.icon-btn {
+                box-sizing: border-box;
+                width: 22px;
+                height: 18px;
+                padding: 0;
+                margin-left: 4px;
+                font-size: 12px;
+                line-height: 1;
+                cursor: pointer;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                flex-shrink: 0;
+            }
             button.toggle-vis {
                 display: inline-flex;
                 align-items: center;
@@ -90,10 +104,11 @@
                 font-size: 10px;
                 cursor: pointer;
             }
-            button.toggle-vis svg {
+            button.toggle-vis svg,
+            button.icon-btn svg {
                 display: block;
-                width: 11px;
-                height: 11px;
+                width: 12px;
+                height: 12px;
                 flex-shrink: 0;
             }
             .hl-swatch {
@@ -531,8 +546,8 @@
             <div id="loadedMesh" class="item" style="display: none">
                 <input type="color" id="meshColorPicker" class="hl-color-input" value="#8c8c99" title="Mesh color">
                 <span class="name" id="meshName">-</span>
-                <button id="toggleMesh" class="toggle-vis" title="hide" style="margin-left: 4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
-                <button id="removeMesh">x</button>
+                <button id="toggleMesh" class="toggle-vis icon-btn" title="hide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                <button id="removeMesh" class="icon-btn">x</button>
             </div>
             <div id="loadedSkel"></div>
         </div>
@@ -913,8 +928,7 @@ let meshCentroid = [0, 0, 0];
                             div.appendChild(nameSpan);
 
                             const toggleBtn = document.createElement("button");
-                            toggleBtn.className = "toggle-vis";
-                            toggleBtn.style.marginLeft = "4px";
+                            toggleBtn.className = "toggle-vis icon-btn";
                             setToggleVisIcon(toggleBtn, true);
                             toggleBtn.addEventListener("click", () => {
                                 const sg = skelGroups[sname];
@@ -925,6 +939,7 @@ let meshCentroid = [0, 0, 0];
                             });
                             div.appendChild(toggleBtn);
                             const btn = document.createElement("button");
+                            btn.className = "icon-btn";
                             btn.textContent = "x";
                             btn.addEventListener("click", () => removeItem("skeleton", sname));
                             div.appendChild(btn);
@@ -1505,6 +1520,7 @@ let meshCentroid = [0, 0, 0];
                     div.style.color = rgb;
                     div.innerHTML = `<span>Node ${s.nodeIndex} (${s.skelName}) r=${s.radius !== null ? s.radius.toFixed(0) : "?"}</span>`;
                     const btn = document.createElement("button");
+                    btn.className = "icon-btn";
                     btn.textContent = "x";
                     btn.addEventListener("click", () => {
                         scene.remove(selectedNodes[key].mesh);
@@ -2983,15 +2999,14 @@ let meshCentroid = [0, 0, 0];
                         div.appendChild(left);
 
                         const focusBtn = document.createElement("button");
+                        focusBtn.className = "icon-btn";
                         focusBtn.textContent = "⌖";
                         focusBtn.title = "Center camera on this annotation";
-                        focusBtn.style.cssText = "font-size:12px;cursor:pointer;margin-left:4px;";
                         focusBtn.addEventListener("click", () => focusOnAnnotation(idx));
                         div.appendChild(focusBtn);
 
                         const toggleBtn = document.createElement("button");
-                        toggleBtn.className = "toggle-vis";
-                        toggleBtn.style.marginLeft = "4px";
+                        toggleBtn.className = "toggle-vis icon-btn";
                         setToggleVisIcon(
                             toggleBtn,
                             !(annotationMeshes[idx] && !annotationMeshes[idx].visible),
@@ -3009,6 +3024,7 @@ let meshCentroid = [0, 0, 0];
                         div.appendChild(toggleBtn);
 
                         const btn = document.createElement("button");
+                        btn.className = "icon-btn";
                         btn.textContent = "x";
                         btn.addEventListener("click", () => removeAnnotationGroup(idx));
                         div.appendChild(btn);
@@ -3025,8 +3041,7 @@ let meshCentroid = [0, 0, 0];
                         div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}; border-radius:50%"></span>${label}</span>`;
 
                         const toggleBtn = document.createElement("button");
-                        toggleBtn.className = "toggle-vis";
-                        toggleBtn.style.marginLeft = "4px";
+                        toggleBtn.className = "toggle-vis icon-btn";
                         setToggleVisIcon(
                             toggleBtn,
                             !(markerMeshes[idx] && !markerMeshes[idx].visible),
@@ -3039,6 +3054,7 @@ let meshCentroid = [0, 0, 0];
                         div.appendChild(toggleBtn);
 
                         const btn = document.createElement("button");
+                        btn.className = "icon-btn";
                         btn.textContent = "x";
                         btn.addEventListener("click", () => removeMarker(idx));
                         div.appendChild(btn);
@@ -3108,15 +3124,14 @@ let meshCentroid = [0, 0, 0];
                         div.appendChild(left);
 
                         const focusBtn = document.createElement("button");
+                        focusBtn.className = "icon-btn";
                         focusBtn.textContent = "⌖";
                         focusBtn.title = "Center camera on this edge group";
-                        focusBtn.style.cssText = "font-size:12px;cursor:pointer;margin-left:4px;";
                         focusBtn.addEventListener("click", () => focusOnEdgeGroup(idx));
                         div.appendChild(focusBtn);
 
                         const toggleBtn = document.createElement("button");
-                        toggleBtn.className = "toggle-vis";
-                        toggleBtn.style.marginLeft = "4px";
+                        toggleBtn.className = "toggle-vis icon-btn";
                         setToggleVisIcon(
                             toggleBtn,
                             !(edgeGroupMeshes[idx] && !edgeGroupMeshes[idx].visible),
@@ -3129,6 +3144,7 @@ let meshCentroid = [0, 0, 0];
                         div.appendChild(toggleBtn);
 
                         const btn = document.createElement("button");
+                        btn.className = "icon-btn";
                         btn.textContent = "x";
                         btn.addEventListener("click", () => removeEdgeGroup(idx));
                         div.appendChild(btn);
