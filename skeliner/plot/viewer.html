@@ -315,7 +315,8 @@
               <div>S: toggle shortcuts</div>
               <div>H: toggle UI</div>
               <div>L: lock camera</div>
-              <div>R: reset camera</div>
+              <div>X/Y/Z: view along axis</div>
+              <div>R: flip current axis view</div>
             </details>
         </div>
 
@@ -1328,6 +1329,51 @@ let meshCentroid = [0, 0, 0];
                 controls.target.copy(sphere.center);
                 camera.lookAt(controls.target);
                 controls.update();
+            }
+
+            let viewAxis = { axis: "z", sign: 1 };
+            function setAxisView(axis, sign) {
+                let box = new THREE.Box3();
+                if (meshGeometry) {
+                    meshGeometry.computeBoundingBox();
+                    box.union(meshGeometry.boundingBox);
+                }
+                for (const sg of Object.values(skelGroups)) {
+                    if (sg && sg.group) {
+                        const skelBox = new THREE.Box3().setFromObject(sg.group);
+                        box.union(skelBox);
+                    }
+                }
+                for (const em of Object.values(extraMeshObjs)) {
+                    if (em && em.geometry) {
+                        em.geometry.computeBoundingBox();
+                        box.union(em.geometry.boundingBox);
+                    }
+                }
+                if (box.isEmpty()) return;
+
+                const sphere = new THREE.Sphere();
+                box.getBoundingSphere(sphere);
+                const c = sphere.center;
+                const d = sphere.radius * 2;
+
+                camera.near = sphere.radius * 0.001;
+                camera.far = sphere.radius * 10;
+                if (axis === "x") {
+                    camera.position.set(c.x + sign * d, c.y, c.z);
+                    camera.up.set(0, 0, 1);
+                } else if (axis === "y") {
+                    camera.position.set(c.x, c.y + sign * d, c.z);
+                    camera.up.set(0, 0, 1);
+                } else {
+                    camera.position.set(c.x, c.y, c.z + sign * d);
+                    camera.up.set(0, 1, 0);
+                }
+                camera.updateProjectionMatrix();
+                controls.target.copy(c);
+                camera.lookAt(controls.target);
+                controls.update();
+                viewAxis = { axis, sign };
             }
 
             // ── Controls ─────────────────────────────────────────────────────────
@@ -3459,7 +3505,11 @@ let meshCentroid = [0, 0, 0];
               if (e.key === 's' || e.key === 'S') { const d = document.getElementById('shortcutsPanel'); d.open = !d.open; }
               if (e.key === 'h' || e.key === 'H') togglePanels();
               if (e.key === 'l' || e.key === 'L') toggleCameraLock();
-              if (e.key === 'r' || e.key === 'R') { localStorage.removeItem('skeliner_camera'); fitCamera(); }
+              if (e.ctrlKey || e.metaKey || e.altKey) return;
+              if (e.key === 'x' || e.key === 'X') setAxisView('x', 1);
+              if (e.key === 'y' || e.key === 'Y') setAxisView('y', 1);
+              if (e.key === 'z' || e.key === 'Z') setAxisView('z', 1);
+              if (e.key === 'r' || e.key === 'R') setAxisView(viewAxis.axis, -viewAxis.sign);
             }
 
             function onResize() {
