@@ -2400,10 +2400,6 @@ def _create_app(
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
             )
         soma = mesh_state.get("soma")
-        if soma is None:
-            return JSONResponse(
-                {"ok": False, "error": "Run soma detection first"}, status_code=400
-            )
         org = mesh_state.get("organelles")
         if org is None:
             return JSONResponse(
@@ -2431,12 +2427,19 @@ def _create_app(
         new_soma = result.soma
         new_org = result.organelles.mask
 
-        soma_vset = set(int(v) for v in new_soma.verts)
-        soma_faces = [
-            int(fi)
-            for fi in range(len(faces))
-            if sum(1 for v in faces[fi] if int(v) in soma_vset) >= 2
-        ]
+        if new_soma is not None:
+            soma_vset = set(int(v) for v in new_soma.verts)
+            soma_face_mask = np.array(
+                [
+                    sum(1 for v in faces[fi] if int(v) in soma_vset) >= 2
+                    for fi in range(len(faces))
+                ],
+                dtype=bool,
+            )
+            soma_faces = np.where(soma_face_mask)[0].tolist()
+        else:
+            soma_face_mask = np.zeros(len(faces), dtype=bool)
+            soma_faces = []
 
         ann = {}
         if annotations_path.exists():
@@ -2444,21 +2447,16 @@ def _create_app(
 
         # Replace all highlights and ellipsoids with break_up_mesh results
         highlights = []
-        highlights.append(
-            {
-                "faces": soma_faces,
-                "color": [0.9, 0.5, 0.9],
-                "label": "soma",
-            }
-        )
+        if new_soma is not None:
+            highlights.append(
+                {
+                    "faces": soma_faces,
+                    "color": [0.9, 0.5, 0.9],
+                    "label": "soma",
+                }
+            )
 
-        org_only = new_org & ~np.array(
-            [
-                sum(1 for v in faces[fi] if int(v) in soma_vset) >= 2
-                for fi in range(len(faces))
-            ],
-            dtype=bool,
-        )
+        org_only = new_org & ~soma_face_mask
         highlights.append(
             {
                 "faces": np.where(org_only)[0].tolist(),
@@ -2494,14 +2492,17 @@ def _create_app(
             )
 
         ann["highlights"] = highlights
-        ann["ellipsoids"] = [
-            {
-                "center": (new_soma.center - centroid).tolist(),
-                "axes": new_soma.axes.tolist(),
-                "R": new_soma.R.tolist(),
-                "color": [0.9, 0.5, 0.9],
-            }
-        ]
+        if new_soma is not None:
+            ann["ellipsoids"] = [
+                {
+                    "center": (new_soma.center - centroid).tolist(),
+                    "axes": new_soma.axes.tolist(),
+                    "R": new_soma.R.tolist(),
+                    "color": [0.9, 0.5, 0.9],
+                }
+            ]
+        else:
+            ann["ellipsoids"] = []
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
@@ -2510,7 +2511,9 @@ def _create_app(
                 "ok": True,
                 "nNeurites": len(result.neurites),
                 "nDiscarded": len(result.discarded),
-                "somaVerts": len(new_soma.verts),
+                "somaVerts": (
+                    len(new_soma.verts) if new_soma is not None else 0
+                ),
                 "orgFaces": int(new_org.sum()),
             }
         )

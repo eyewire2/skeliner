@@ -2483,7 +2483,7 @@ def _build_org_output(
 
 def break_up_mesh(
     mesh: trimesh.Trimesh,
-    soma: Soma,
+    soma: Soma | None,
     organelles: Organelles,
     *,
     verbose: bool = False,
@@ -2503,11 +2503,18 @@ def break_up_mesh(
     size descending; once the cumulative face count reaches 95% of
     the total, the remaining components are discarded.
 
+    When ``soma`` is ``None`` (no soma in this mesh — e.g. a fragment
+    or a non-somal cell type), the soma face mask is empty, the
+    "missed soma" classification is skipped, and every reachable
+    non-organelle component flows straight into the neurite/discarded
+    split.
+
     Parameters
     ----------
     mesh : trimesh.Trimesh
-    soma : Soma
+    soma : Soma or None
         From ``find_soma_via_ring_cutoff`` (must have ``.verts``).
+        Pass ``None`` if the mesh has no soma.
     organelles : Organelles
         From :func:`find_organelles`.
     verbose : bool
@@ -2540,15 +2547,16 @@ def break_up_mesh(
     usable = good & nonzero_area
 
     # --- soma face mask: face is soma if >=2 of 3 verts are soma ---
-    soma_set = set(soma.verts.tolist())
     soma_face = np.zeros(nF, dtype=bool)
-    for fi in range(nF):
-        s = 0
-        for v in faces[fi]:
-            if int(v) in soma_set:
-                s += 1
-        if s >= 2:
-            soma_face[fi] = True
+    if soma is not None:
+        soma_set = set(soma.verts.tolist())
+        for fi in range(nF):
+            s = 0
+            for v in faces[fi]:
+                if int(v) in soma_set:
+                    s += 1
+            if s >= 2:
+                soma_face[fi] = True
 
     # --- Phase 1: reachability without crossing organelles ---
     # For each mesh component, find its largest non-organelle body.
@@ -2625,36 +2633,40 @@ def break_up_mesh(
                 )
             continue
 
-        # Boundary analysis for soma detection
-        comp_set = set(comp.tolist())
-        n_soma = 0
-        n_total = 0
-        for fi in comp:
-            face = faces[fi]
-            for i in range(3):
-                a, b = int(face[i]), int(face[(i + 1) % 3])
-                e = (min(a, b), max(a, b))
-                for nb in ef_all[e]:
-                    if nb not in comp_set:
-                        n_total += 1
-                        if soma_face[nb]:
-                            n_soma += 1
+        # Boundary analysis for soma detection (skipped without a soma)
+        if soma is not None:
+            comp_set = set(comp.tolist())
+            n_soma = 0
+            n_total = 0
+            for fi in comp:
+                face = faces[fi]
+                for i in range(3):
+                    a, b = int(face[i]), int(face[(i + 1) % 3])
+                    e = (min(a, b), max(a, b))
+                    for nb in ef_all[e]:
+                        if nb not in comp_set:
+                            n_total += 1
+                            if soma_face[nb]:
+                                n_soma += 1
 
-        soma_frac = n_soma / n_total if n_total > 0 else 0.0
-        if soma_frac > 0.5:
-            comp_vi = np.unique(faces[comp])
-            extra_soma_vi.extend(comp_vi.tolist())
-            if verbose:
-                print(
-                    f"break_up_mesh: absorbed {len(comp)} faces "
-                    f"({len(comp_vi)} verts) as missed soma"
-                )
-        else:
-            neurite_candidates.append(comp)
+            soma_frac = n_soma / n_total if n_total > 0 else 0.0
+            if soma_frac > 0.5:
+                comp_vi = np.unique(faces[comp])
+                extra_soma_vi.extend(comp_vi.tolist())
+                if verbose:
+                    print(
+                        f"break_up_mesh: absorbed {len(comp)} faces "
+                        f"({len(comp_vi)} verts) as missed soma"
+                    )
+                continue
+
+        neurite_candidates.append(comp)
 
     # --- refit soma if we absorbed extra verts ---
-    if extra_soma_vi:
-        all_soma_vi = np.union1d(soma.verts, np.array(extra_soma_vi, dtype=np.intp))
+    if soma is not None and extra_soma_vi:
+        all_soma_vi = np.union1d(
+            soma.verts, np.array(extra_soma_vi, dtype=np.intp)
+        )
         prev_nucleus = soma.nucleus
         soma = Soma.fit(verts[all_soma_vi], verts=all_soma_vi)
         soma.nucleus = prev_nucleus
@@ -2676,11 +2688,16 @@ def break_up_mesh(
     if verbose:
         n_disc_faces = sum(len(c) for c in discarded)
         thresh = len(neurites[-1]) if neurites else 0
+        soma_msg = (
+            f"soma {len(soma.verts):,} verts, "
+            if soma is not None
+            else "no soma, "
+        )
         print(
             f"break_up_mesh: {len(neurites)} neurites, "
             f"{len(discarded)} discarded ({n_disc_faces:,} faces, "
             f"threshold ~{thresh} faces), "
-            f"soma {len(soma.verts):,} verts, "
+            f"{soma_msg}"
             f"organelles {organelles_expanded.sum():,} faces"
         )
 
@@ -7908,15 +7925,7 @@ def preprocess(
         )
 
     # 6. Break up mesh
-    if soma is not None:
-        components = break_up_mesh(mesh, soma, org, verbose=verbose)
-    else:
-        components = MeshComponents(
-            soma=None,
-            organelles=org,
-            neurites=Neurites([]),
-            discarded=Discarded([]),
-        )
+    components = break_up_mesh(mesh, soma, org, verbose=verbose)
 
     # 7. Compact (optional — remaps everything in MeshComponents)
     if compact:
