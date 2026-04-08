@@ -6704,30 +6704,185 @@ def _find_fold_faces(mesh, patch):
     return fold
 
 
-def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
-    """Bridge gaps left by Mode B parallel patch removal.
+def _trace_edge_loops(
+    edges: list[tuple[int, int]],
+) -> list[tuple[list[int], bool]]:
+    """Trace a set of undirected edges into ordered vertex sequences.
 
-    For each disconnected component created by Mode B removal, finds
-    open edges on both sides (disc and nearest other component) and
-    bridges each disc edge to its nearest target edge with two
-    triangles.
+    Returns a list of ``(vertex_sequence, is_closed)`` pairs.  For
+    closed loops the last vertex is implicitly connected back to the
+    first (i.e. the wrap-around edge exists in the input).  For open
+    chains the first and last vertices are the dangling endpoints.
 
-    Only stitches edges that overlap across the boundary — i.e., the
-    two edges must be on opposite sides of the boundary axis (different
-    coordinate along the patch axis).  Edges at the same level are
-    skipped to avoid creating faces parallel to the boundary.
+    Open chains are emitted first, starting at any degree-1 vertex.
+    Remaining unused edges form closed loops.  Non-manifold vertices
+    (degree ≥ 3) are split — each incident edge is walked at most
+    once, so a figure-8 becomes two separate loops touching at the
+    shared vertex.
     """
     from collections import defaultdict
 
-    from scipy.spatial import cKDTree
+    if not edges:
+        return []
+
+    ve: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    eset: set[tuple[int, int]] = set()
+    for e in edges:
+        key = (min(e[0], e[1]), max(e[0], e[1]))
+        if key in eset:
+            continue
+        eset.add(key)
+        ve[key[0]].append(key)
+        ve[key[1]].append(key)
+
+    used: set[tuple[int, int]] = set()
+    out: list[tuple[list[int], bool]] = []
+
+    def walk(start_edge: tuple[int, int]) -> tuple[list[int], bool]:
+        chain = [start_edge[0], start_edge[1]]
+        used.add(start_edge)
+        curr = start_edge[1]
+        closed = False
+        while True:
+            nxt_e = None
+            for cand in ve[curr]:
+                if cand not in used:
+                    nxt_e = cand
+                    break
+            if nxt_e is None:
+                break
+            used.add(nxt_e)
+            nxt = nxt_e[1] if nxt_e[0] == curr else nxt_e[0]
+            if nxt == chain[0]:
+                closed = True
+                break
+            chain.append(nxt)
+            curr = nxt
+        return chain, closed
+
+    # Open chains: start at degree-1 endpoints
+    endpoints = [v for v, es in ve.items() if len(es) == 1]
+    for v in endpoints:
+        for e in ve[v]:
+            if e in used:
+                continue
+            oriented = e if e[0] == v else (e[1], e[0])
+            chain, closed = walk(oriented)
+            out.append((chain, closed))
+
+    # Closed loops from any remaining unused edge
+    for e in eset:
+        if e in used:
+            continue
+        chain, closed = walk(e)
+        out.append((chain, closed))
+
+    return out
+
+
+def _zip_vertex_loops(
+    loop_a: list[int],
+    loop_b: list[int],
+    verts: np.ndarray,
+    *,
+    closed_a: bool = True,
+    closed_b: bool = True,
+) -> list[tuple[int, int, int]]:
+    """Zip two ordered vertex loops into a strip of triangles.
+
+    Both loops are walked in lock-step with a "shortest diagonal"
+    decision rule: at each step, advance whichever side produces the
+    shorter bridge edge to the other side's current vertex.  Each
+    source edge of loop_a and loop_b is consumed in exactly one new
+    triangle, so the result is manifold by construction (no fans, no
+    duplicate edges).
+
+    Before walking, this tries every starting offset and both winding
+    orders on ``loop_b`` and picks the alignment that minimises the
+    sum of bridge-edge lengths.  This is O((m + n) * n) which is fine
+    for small rim loops.
+    """
+    m = len(loop_a)
+    n = len(loop_b)
+    if m < 2 or n < 2:
+        return []
+
+    def walk(shifted_b: list[int]) -> tuple[float, list[tuple[int, int, int]]]:
+        tris: list[tuple[int, int, int]] = []
+        cost = 0.0
+        i, j = 0, 0
+        # Closed loops walk m + n steps total; open chains walk m-1 + n-1.
+        steps_a = m if closed_a else m - 1
+        steps_b = n if closed_b else n - 1
+        while i < steps_a or j < steps_b:
+            a_curr = loop_a[i % m]
+            a_next = loop_a[(i + 1) % m]
+            t_curr = shifted_b[j % n]
+            t_next = shifted_b[(j + 1) % n]
+            if i >= steps_a:
+                tris.append((a_curr, t_next, t_curr))
+                cost += float(np.linalg.norm(verts[t_next] - verts[a_curr]))
+                j += 1
+            elif j >= steps_b:
+                tris.append((a_curr, a_next, t_curr))
+                cost += float(np.linalg.norm(verts[a_next] - verts[t_curr]))
+                i += 1
+            else:
+                d_adv_a = float(
+                    np.linalg.norm(verts[a_next] - verts[t_curr])
+                )
+                d_adv_b = float(
+                    np.linalg.norm(verts[a_curr] - verts[t_next])
+                )
+                if d_adv_a <= d_adv_b:
+                    tris.append((a_curr, a_next, t_curr))
+                    cost += d_adv_a
+                    i += 1
+                else:
+                    tris.append((a_curr, t_next, t_curr))
+                    cost += d_adv_b
+                    j += 1
+        return cost, tris
+
+    best: tuple[float, list[tuple[int, int, int]]] | None = None
+    # Try both winding directions and all starting offsets on loop_b
+    # (for closed loops).  For open chains, only offset 0 is valid.
+    reverse_options = [False, True]
+    shift_options = range(n) if closed_b else [0]
+    for reverse in reverse_options:
+        base = list(loop_b[::-1] if reverse else loop_b)
+        for shift in shift_options:
+            shifted = base[shift:] + base[:shift]
+            cost, tris = walk(shifted)
+            if best is None or cost < best[0]:
+                best = (cost, tris)
+
+    return best[1] if best is not None else []
+
+
+def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
+    """Bridge gaps left by Mode B parallel-patch removal using
+    per-sandwich rim tracing and contour zipping.
+
+    For each ``(axis, bval)`` sandwich group in *patches*, collect the
+    rim edges on each sign side (edges where an up-removed or
+    down-removed face meets a surviving face), trace them into ordered
+    vertex loops, pair up-side loops with down-side loops by spatial
+    proximity, and zip each pair into a manifold triangle strip.
+
+    Bridges are emitted with :func:`_zip_vertex_loops`, which consumes
+    each rim edge exactly once in exactly one new triangle — so the
+    result has no fans, no duplicate faces, and no non-manifold edges
+    by construction.
+    """
+    from collections import defaultdict
 
     verts = mesh.vertices
     faces = mesh.faces
     degen = np.all(faces == 0, axis=1)
-    labels, main_c = _face_edge_components(mesh)
 
-    # Edge→face for surviving faces
-    surv_ef = defaultdict(set)
+    # Edge → surviving faces map (excludes degenerates)
+    surv_ef: dict[tuple[int, int], set[int]] = defaultdict(set)
     for fi in range(len(faces)):
         if degen[fi]:
             continue
@@ -6739,91 +6894,145 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
         surv_ef[(min(b, c), max(b, c))].add(fi)
         surv_ef[(min(a, c), max(a, c))].add(fi)
 
-    # Open edges from removal, by component
-    open_by_comp = defaultdict(set)
-    for fi in range(len(faces)):
-        if not degen[fi]:
-            continue
-        f = orig_faces[fi]
-        for i in range(3):
-            a, b = int(f[i]), int(f[(i + 1) % 3])
-            if a == b:
-                continue
-            e = (min(a, b), max(a, b))
-            surv = surv_ef.get(e, set())
-            if len(surv) == 1:
-                c = int(labels[next(iter(surv))])
-                open_by_comp[c].add(e)
+    mode_b_set = set(int(fi) for fi in mode_b_faces)
 
-    disc_comps = set(c for c in open_by_comp if c != main_c)
-    if not disc_comps:
+    def rim_edges_for(removed_side: set[int]) -> list[tuple[int, int]]:
+        """Return edges of *orig_faces* in removed_side where the
+        other side of the edge is a surviving face (not a degen or
+        another removed face)."""
+        out: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for fi in removed_side:
+            f = orig_faces[fi]
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                if a == b:
+                    continue
+                e = (min(a, b), max(a, b))
+                if e in seen:
+                    continue
+                surv = surv_ef.get(e, set())
+                if len(surv) == 1:
+                    seen.add(e)
+                    out.append(e)
+        return out
+
+    # Group Mode-B patches by (axis, bval)
+    groups: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    for p in patches:
+        pf = set(p["faces"])
+        if not (pf & mode_b_set):
+            continue
+        groups[(int(p["axis"]), int(p["bval"]))].append(p)
+
+    if not groups:
         if verbose:
-            print("[skeliner.pre] Mode B: no contours to stitch")
+            print("[skeliner.pre] Stitch: no Mode-B sandwich groups")
         return mesh
 
-    # Collect all non-disc open edges with midpoints for KDTree
-    non_disc_edges = []
-    non_disc_mids = []
-    non_disc_comp = []
-    for c, edges in open_by_comp.items():
-        if c in disc_comps:
+    all_new_tris: list[tuple[int, int, int]] = []
+    n_pairs = 0
+    n_skipped_loops = 0
+
+    for (_axis, _bval), group in groups.items():
+        up_removed: set[int] = set()
+        dn_removed: set[int] = set()
+        for p in group:
+            up_removed.update(int(f) for f in p["up_faces"] if int(f) in mode_b_set)
+            dn_removed.update(int(f) for f in p["down_faces"] if int(f) in mode_b_set)
+
+        up_rim = rim_edges_for(up_removed)
+        dn_rim = rim_edges_for(dn_removed)
+        if not up_rim or not dn_rim:
             continue
-        for e in edges:
-            non_disc_edges.append(e)
-            non_disc_mids.append((verts[e[0]] + verts[e[1]]) / 2)
-            non_disc_comp.append(c)
 
-    if not non_disc_mids:
-        if verbose:
-            print("[skeliner.pre] Mode B: no target edges to stitch to")
-        return mesh
-
-    non_disc_mids = np.array(non_disc_mids)
-    tree = cKDTree(non_disc_mids)
-
-    # Pre-check: only stitch disc comps whose contour overlaps with
-    # a nearby target contour.  Prevents stitching far-away components
-    # to unrelated locations.
-    overlap_comps: set[int] = set()
-    for dc in disc_comps:
-        dc_edges = list(open_by_comp[dc])
-        dc_mids = np.array([(verts[e[0]] + verts[e[1]]) / 2 for e in dc_edges])
-        extent = float((dc_mids.max(axis=0) - dc_mids.min(axis=0)).max())
-        margin = max(extent, 100.0)
-        dc_center = dc_mids.mean(axis=0)
-        dist, _ = tree.query(dc_center)
-        if dist < margin:
-            overlap_comps.add(dc)
-
-    all_new_tris = []
-    n_skipped = 0
-    for dc in disc_comps:
-        if dc not in overlap_comps:
-            n_skipped += len(open_by_comp[dc])
+        up_traces = _trace_edge_loops(up_rim)
+        dn_traces = _trace_edge_loops(dn_rim)
+        # A real contour needs at least 3 vertices (closed) or 2
+        # vertices for a single-edge chain.  Drop anything smaller.
+        up_traces = [
+            (lp, c) for lp, c in up_traces
+            if (c and len(lp) >= 3) or (not c and len(lp) >= 2)
+        ]
+        dn_traces = [
+            (lp, c) for lp, c in dn_traces
+            if (c and len(lp) >= 3) or (not c and len(lp) >= 2)
+        ]
+        if not up_traces or not dn_traces:
             continue
-        for de in open_by_comp[dc]:
-            de_mid = (verts[de[0]] + verts[de[1]]) / 2
-            _, idx = tree.query(de_mid)
-            te = non_disc_edges[idx]
 
-            a0, a1 = de
-            b0, b1 = te
-            # Orient: b0 closer to a0
-            if np.linalg.norm(verts[b1] - verts[a0]) < np.linalg.norm(
-                verts[b0] - verts[a0]
-            ):
-                b0, b1 = b1, b0
-            # Skip if edges share vertices (already connected)
-            if {a0, a1} & {b0, b1}:
+        # Pair loops greedily by centroid distance — largest loops first.
+        # Perpendicular plane of the sandwich axis for bbox overlap check.
+        perp_axes = [i for i in range(3) if i != _axis]
+        up_info = []
+        for lp, c in up_traces:
+            pts = verts[lp]
+            up_info.append({
+                "loop": lp, "closed": c, "pts": pts,
+                "center": pts.mean(axis=0),
+                "bmin": pts[:, perp_axes].min(0),
+                "bmax": pts[:, perp_axes].max(0),
+            })
+        dn_info = []
+        for lp, c in dn_traces:
+            pts = verts[lp]
+            dn_info.append({
+                "loop": lp, "closed": c, "pts": pts,
+                "center": pts.mean(axis=0),
+                "bmin": pts[:, perp_axes].min(0),
+                "bmax": pts[:, perp_axes].max(0),
+            })
+
+        up_order = sorted(
+            range(len(up_info)), key=lambda i: -len(up_info[i]["loop"])
+        )
+        dn_used: set[int] = set()
+
+        for ui in up_order:
+            u = up_info[ui]
+            best_dn = -1
+            best_d = float("inf")
+            for di in range(len(dn_info)):
+                if di in dn_used:
+                    continue
+                d_info = dn_info[di]
+                # Require bbox overlap in the perpendicular plane —
+                # without this, a mixed-patch rim whose up and down
+                # sides cover different XY regions would get zipped
+                # into a twisted strip crossing empty space.
+                imin = np.maximum(u["bmin"], d_info["bmin"])
+                imax = np.minimum(u["bmax"], d_info["bmax"])
+                if not (imax > imin).all():
+                    continue
+                d = float(np.linalg.norm(u["center"] - d_info["center"]))
+                if d < best_d:
+                    best_d = d
+                    best_dn = di
+            if best_dn < 0:
+                n_skipped_loops += 1
                 continue
-            all_new_tris.append((a0, a1, b0))
-            all_new_tris.append((a1, b0, b1))
+            dn_used.add(best_dn)
+            d_info = dn_info[best_dn]
+            tris = _zip_vertex_loops(
+                u["loop"],
+                d_info["loop"],
+                verts,
+                closed_a=u["closed"],
+                closed_b=d_info["closed"],
+            )
+            if tris:
+                all_new_tris.extend(tris)
+                n_pairs += 1
+            else:
+                n_skipped_loops += 1
+
+        n_skipped_loops += len(dn_info) - len(dn_used)
 
     if not all_new_tris:
         if verbose:
             print(
-                f"[skeliner.pre] Mode B: no contours to stitch"
-                f" ({n_skipped} non-overlapping skipped)"
+                f"[skeliner.pre] Stitch: no contours zipped "
+                f"({n_skipped_loops} loops unpaired)"
             )
         return mesh
 
@@ -6832,9 +7041,13 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
 
     if verbose:
         print(
-            f"[skeliner.pre] Mode B: stitched with "
-            f"{len(new_faces)} bridging faces"
-            f" ({n_skipped} non-overlapping skipped)"
+            f"[skeliner.pre] Stitch: {n_pairs} rim pairs zipped, "
+            f"{len(new_faces)} bridge faces"
+            + (
+                f" ({n_skipped_loops} loops unpaired)"
+                if n_skipped_loops
+                else ""
+            )
         )
 
     return trimesh.Trimesh(vertices=verts, faces=combined, process=False)
