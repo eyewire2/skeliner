@@ -1379,6 +1379,12 @@ def _create_app(
             )
             mesh_state["soma"] = soma
         await _log("[skeliner.pre] Detecting disconnected components...")
+        cached_fusions = mesh_state.get("fusion_clusters")
+        if cached_fusions:
+            await _log(
+                f"[skeliner.pre]   using {len(cached_fusions)} cached "
+                f"fusion clusters as walls"
+            )
         components = await _run_with_log(
             find_disconnected,
             mesh,
@@ -1386,6 +1392,7 @@ def _create_app(
             soma=soma,
             organelles=mesh_state.get("organelles"),
             mesh_stats=mesh_state.get("mesh_stats"),
+            fusions=cached_fusions,
         )
         mesh_state["disconnected"] = components
 

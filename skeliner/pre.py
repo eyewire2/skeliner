@@ -3574,6 +3574,119 @@ def find_soma_via_geodesic(
     return soma
 
 
+def _refine_components_with_fusions(
+    mesh: trimesh.Trimesh,
+    labels: np.ndarray,
+    main: int,
+    fusions: list[list[int]],
+) -> tuple[np.ndarray, int]:
+    """Re-label the main component, treating fusion-cluster faces as walls.
+
+    Two branches glued together by non-manifold fusion edges merge into
+    one component in :func:`_face_edge_components` (BFS walks straight
+    through the shared edge).  Treating the fusion-cluster faces as
+    breakpoints and re-running BFS over only the main component splits
+    the merged blob into separate logical branches without disturbing
+    any of the smaller components.
+
+    Fusion-cluster faces are assigned the sentinel label ``-3`` so they
+    are excluded from any reported component (and won't be picked up by
+    downstream rim/gap detection).
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+    labels : np.ndarray
+        Output of :func:`_face_edge_components`.
+    main : int
+        Main component label.
+    fusions : list[list[int]]
+        Fusion clusters from :func:`find_fusions`.  Each cluster is a
+        list of face indices.
+
+    Returns
+    -------
+    new_labels : np.ndarray
+        Refined labels.  Fusion faces in the main component are -3.
+    new_main : int
+        Largest sub-component of the original main, or unchanged ``main``
+        if no fusion faces fell inside it.
+    """
+    fusion_faces: set[int] = set()
+    for cluster in fusions:
+        for f in cluster:
+            fusion_faces.add(int(f))
+
+    main_face_idx = np.where(labels == main)[0]
+    main_set = set(int(i) for i in main_face_idx)
+    fusion_in_main = fusion_faces & main_set
+
+    # Edge bookkeeping over the WHOLE main component:
+    # `edge_count` knows the total face uses (used to detect
+    # non-manifold edges that must be severed).  `edge_to_faces` maps
+    # each edge to its non-fusion main faces (the BFS-walkable ones).
+    edge_count: dict[tuple[int, int], int] = defaultdict(int)
+    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for fi in main_face_idx:
+        ifi = int(fi)
+        face = mesh.faces[ifi]
+        is_fusion = ifi in fusion_faces
+        for i in range(3):
+            a, b = int(face[i]), int(face[(i + 1) % 3])
+            e = (min(a, b), max(a, b))
+            edge_count[e] += 1
+            if not is_fusion:
+                edge_to_faces[e].append(ifi)
+
+    # BFS the main component.  Walls:
+    #   1. Fusion-cluster faces (skipped as seeds and as neighbors)
+    #   2. Non-manifold edges (face-count > 2 in the original main):
+    #      these are the actual fusion structure; severing them is
+    #      what splits the glued branches.
+    #
+    # Severing a non-manifold edge does not over-segment same-branch
+    # faces in practice — two faces of one branch that share a
+    # non-manifold edge always have other manifold paths between them
+    # (otherwise the branch would be 2 faces, well below the < 7 filter).
+    new_labels = labels.copy()
+    visited: set[int] = set()
+    next_id = int(labels.max()) + 1
+    sub_sizes: dict[int, int] = {}
+    for seed in main_face_idx:
+        seed = int(seed)
+        if seed in visited or seed in fusion_faces:
+            continue
+        cid = next_id
+        next_id += 1
+        size = 0
+        stack = [seed]
+        while stack:
+            fi = stack.pop()
+            if fi in visited:
+                continue
+            visited.add(fi)
+            new_labels[fi] = cid
+            size += 1
+            face = mesh.faces[fi]
+            for i in range(3):
+                a, b = int(face[i]), int(face[(i + 1) % 3])
+                e = (min(a, b), max(a, b))
+                if edge_count[e] > 2:
+                    continue  # non-manifold — sever
+                for nb in edge_to_faces.get(e, ()):
+                    if nb in visited or nb in fusion_faces:
+                        continue
+                    stack.append(nb)
+        sub_sizes[cid] = size
+
+    # Mark fusion faces in main with sentinel label -3.
+    for fi in fusion_in_main:
+        new_labels[fi] = -3
+
+    new_main = max(sub_sizes, key=sub_sizes.get) if sub_sizes else main
+    return new_labels, new_main
+
+
 def find_disconnected(
     mesh: trimesh.Trimesh,
     *,
@@ -3581,6 +3694,7 @@ def find_disconnected(
     soma: Soma | None = None,
     organelles: Organelles | None = None,
     mesh_stats: MeshStats | None = None,
+    fusions: list[list[int]] | None = None,
 ) -> list[list[int]]:
     """Detect disconnected mesh components from segmentation errors.
 
@@ -3602,6 +3716,12 @@ def find_disconnected(
     mesh_stats : MeshStats or None
         From :func:`compute_mesh_stats`.  Reuses ``face_comp`` and
         ``main_ci`` to skip redundant component detection.
+    fusions : list[list[int]] or None
+        Fusion clusters from :func:`find_fusions`.  When provided, the
+        main component is re-split treating each fusion cluster as a
+        wall, so two branches that are glued by non-manifold fusion
+        edges surface as separate components.  This function does NOT
+        run :func:`find_fusions` itself — pass the result explicitly.
 
     Returns
     -------
@@ -3613,6 +3733,13 @@ def find_disconnected(
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
+
+    # Optional fusion-aware refinement: split the main blob along
+    # fusion clusters so glued branches become separate components.
+    if fusions:
+        labels, main = _refine_components_with_fusions(
+            mesh, labels, main, fusions
+        )
     n_faces = len(mesh.faces)
     if verbose:
         n_total_comps = int(labels.max()) + 1 if len(labels) else 0
