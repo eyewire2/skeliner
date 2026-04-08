@@ -1025,6 +1025,72 @@ def _expand_tip_to_good_rim(
     return sel, best_loop
 
 
+def _expand_selection_per_group(
+    mesh: trimesh.Trimesh,
+    sel: list[int] | set[int],
+    edge_to_faces: dict[tuple[int, int], list[int]],
+    face_adj: dict[int, set[int]],
+    *,
+    target_verts: int = 6,
+    max_iters: int = 20,
+    max_eat_factor: int = 30,
+) -> tuple[set[int], list[list[int]]]:
+    """Split *sel* into edge-connected sub-groups, expand each
+    independently with :func:`_expand_tip_to_good_rim`, then re-trace
+    the border loops on the merged expanded selection.
+
+    This is the user-driven merge analogue of the per-side expansion
+    in :func:`remove_gaps`. Expanding each connected sub-selection on
+    its own (rather than the whole selection at once) lets each side's
+    rim grow toward similar sizes — `_zipper_stitch`'s KDTree weld
+    only behaves manifoldly when the two rims are matched in vertex
+    count, so symmetric per-side expansion is what unlocks a clean
+    bridge.
+    """
+    sel_set: set[int] = set(int(fi) for fi in sel)
+    if not sel_set:
+        return sel_set, []
+
+    # Split sel into edge-connected sub-groups via BFS over face_adj,
+    # restricted to faces inside sel_set.
+    groups: list[set[int]] = []
+    visited: set[int] = set()
+    for seed in sel_set:
+        if seed in visited:
+            continue
+        group: set[int] = set()
+        stack = [seed]
+        while stack:
+            f = stack.pop()
+            if f in visited:
+                continue
+            visited.add(f)
+            group.add(f)
+            for nf in face_adj.get(f, ()):
+                if nf in sel_set and nf not in visited:
+                    stack.append(nf)
+        groups.append(group)
+
+    # Expand each group independently
+    expanded: set[int] = set()
+    for grp in groups:
+        sub_sel, _ = _expand_tip_to_good_rim(
+            mesh,
+            list(grp),
+            edge_to_faces,
+            face_adj,
+            target_verts=target_verts,
+            max_iters=max_iters,
+            max_eat_factor=max_eat_factor,
+        )
+        expanded |= sub_sel
+
+    # Re-trace loops on the final merged selection
+    loops = _trace_border_loops(mesh, expanded, edge_to_faces)
+    loops = [lp for lp in loops if len(lp) >= 3]
+    return expanded, loops
+
+
 def _fit_loop_circle(pts: np.ndarray) -> tuple[np.ndarray, float, np.ndarray]:
     """Fit a circle to a 3D point loop.  Returns (center, radius, normal)."""
     center = pts.mean(axis=0)
@@ -1364,19 +1430,33 @@ def merge_selected_faces(
     trimesh.Trimesh
         Mesh with selected faces replaced by a stitched strip.
     """
-    sel = set(face_indices)
-    if not sel:
+    sel_input = set(face_indices)
+    if not sel_input:
         return mesh
 
-    # Edge-to-face map
+    # Edge / face adjacency maps
     edge_to_faces = _edge_to_faces(mesh)
+    face_adj = _face_adjacency(mesh, edge_to_faces)
 
     if verbose:
-        print(f"[skeliner.pre] Merge: removing {len(sel)} faces")
+        print(f"[skeliner.pre] Merge: requested {len(sel_input)} faces")
 
-    loops = _trace_border_loops(mesh, sel, edge_to_faces)
+    # Expand the user selection if needed so every border loop is a
+    # real rim (not a 3-vert tongue base). Each edge-connected
+    # sub-group of the selection is expanded independently — same fix
+    # as remove_gaps's per-side expansion — so the resulting rims
+    # converge to matching sizes (`_zipper_stitch` only welds
+    # manifoldly when both rims have similar vertex counts).
+    sel, loops = _expand_selection_per_group(
+        mesh, sel_input, edge_to_faces, face_adj
+    )
 
     if verbose:
+        if len(sel) != len(sel_input):
+            print(
+                f"[skeliner.pre] Merge: expanded selection "
+                f"{len(sel_input)} -> {len(sel)} faces"
+            )
         for i, lp in enumerate(loops):
             pts = mesh.vertices[lp]
             perimeter = float(
@@ -1409,7 +1489,20 @@ def merge_selected_faces(
                 if d < best_d:
                     best_d = d
                     best_i, best_j = ii, jj
-        pairs.append((loops[available[best_i]], loops[available[best_j]]))
+        la = loops[available[best_i]]
+        lb = loops[available[best_j]]
+        # Safety net: if expansion couldn't fix this pair, skip it
+        # rather than introduce a fusion. Both loops still get their
+        # tip faces removed (so they become unbridged holes the user
+        # can inspect), unlike `remove_gaps` where we keep the tips.
+        reason = _validate_loop_pair(la, lb)
+        if reason is not None:
+            if verbose:
+                print(
+                    f"[skeliner.pre]   Pair skipped after expansion ({reason})"
+                )
+        else:
+            pairs.append((la, lb))
         available.pop(best_j)
         available.pop(best_i)
 
