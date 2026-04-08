@@ -1794,6 +1794,18 @@ let meshCentroid = [0, 0, 0];
                 return fname;
             }
 
+            async function saveAnnotationSubmesh(idx) {
+                try {
+                    const fname = await downloadFile(
+                        `/export_annotation_submesh?index=${idx}`,
+                    );
+                    showLogStatus(`Saved ${fname}`);
+                } catch (e) {
+                    showLogStatus("Save failed: " + (e.message || "unknown"));
+                }
+                fadeLogStatus();
+            }
+
             function getSavePrefix() {
                 const v = document.getElementById("savePrefix").value.trim();
                 return v ? v + "_" : "";
@@ -3028,6 +3040,13 @@ let meshCentroid = [0, 0, 0];
                             _saveAnnVisibility();
                         });
                         div.appendChild(toggleBtn);
+
+                        const saveBtn = document.createElement("button");
+                        saveBtn.className = "icon-btn";
+                        saveBtn.textContent = "\u2913";
+                        saveBtn.title = "Save this annotation as .obj submesh";
+                        saveBtn.addEventListener("click", () => saveAnnotationSubmesh(idx));
+                        div.appendChild(saveBtn);
 
                         const btn = document.createElement("button");
                         btn.className = "icon-btn";

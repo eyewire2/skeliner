@@ -2819,6 +2819,67 @@ def _create_app(
             },
         )
 
+    async def export_annotation_submesh(request):
+        """Export a single highlight annotation as an OBJ submesh."""
+        import tempfile
+
+        from starlette.responses import Response
+
+        from skeliner.io import save_mesh
+
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        if not annotations_path.exists():
+            return JSONResponse(
+                {"ok": False, "error": "No annotations"}, status_code=400
+            )
+        try:
+            idx = int(request.query_params.get("index", ""))
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "Invalid index"}, status_code=400
+            )
+        ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        highlights = ann.get("highlights") or []
+        if idx < 0 or idx >= len(highlights):
+            return JSONResponse(
+                {"ok": False, "error": "Index out of range"}, status_code=400
+            )
+        entry = highlights[idx]
+        faces = entry.get("faces") or []
+        if not faces:
+            return JSONResponse(
+                {"ok": False, "error": "Annotation has no faces"},
+                status_code=400,
+            )
+
+        mesh = mesh_state["mesh"]
+        sub = mesh.submesh([faces], append=True)
+
+        fmt = request.query_params.get("format", "obj")
+        prefix = request.query_params.get("prefix", "")
+        label = entry.get("label") or f"highlight_{idx}"
+        safe_label = "".join(
+            c if c.isalnum() or c in "-_." else "_" for c in label
+        )
+
+        tmp = Path(tempfile.mktemp(suffix=f".{fmt}"))
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: save_mesh(sub, tmp))
+        content = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{prefix}{safe_label}.{fmt}"'
+                )
+            },
+        )
+
     async def export_skeleton(request):
         """Export a skeleton as a downloadable SWC or NPZ file."""
         import tempfile
@@ -3321,6 +3382,11 @@ def _create_app(
             Route("/export_neurites", export_neurites, methods=["GET"]),
             Route("/export_discarded", export_discarded, methods=["GET"]),
             Route("/export_annotations", export_annotations, methods=["GET"]),
+            Route(
+                "/export_annotation_submesh",
+                export_annotation_submesh,
+                methods=["GET"],
+            ),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
