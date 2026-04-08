@@ -82,6 +82,20 @@
                 margin-left: 4px;
                 flex-shrink: 0;
             }
+            button.toggle-vis {
+                line-height: 0;
+                padding: 2px 4px;
+                background: none;
+                border: 1px solid #555;
+                border-radius: 2px;
+                color: #ccc;
+                cursor: pointer;
+            }
+            button.toggle-vis svg {
+                display: block;
+                width: 12px;
+                height: 12px;
+            }
             .hl-swatch {
                 display: inline-block;
                 width: 10px;
@@ -519,9 +533,7 @@
             <div id="loadedMesh" class="item" style="display: none">
                 <input type="color" id="meshColorPicker" class="hl-color-input" value="#8c8c99" title="Mesh color">
                 <span class="name" id="meshName">-</span>
-                <button id="toggleMesh" style="font-size: 10px; cursor: pointer; margin-left: 4px">
-                    hide
-                </button>
+                <button id="toggleMesh" class="toggle-vis" title="hide" style="margin-left: 4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
                 <button id="removeMesh">x</button>
             </div>
             <div id="loadedSkel"></div>
@@ -757,7 +769,7 @@ let meshCentroid = [0, 0, 0];
                         if (wireframeObj)
                             wireframeObj.visible =
                                 meshObj.visible && document.getElementById("wireToggle").checked;
-                        btn.textContent = meshObj.visible ? "hide" : "show";
+                        setToggleVisIcon(btn, meshObj.visible);
                     }
                 });
                 document.getElementById("hlHideAll").addEventListener("click", hideAllAnnotations);
@@ -903,14 +915,15 @@ let meshCentroid = [0, 0, 0];
                             div.appendChild(nameSpan);
 
                             const toggleBtn = document.createElement("button");
-                            toggleBtn.textContent = "hide";
-                            toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
+                            toggleBtn.className = "toggle-vis";
+                            toggleBtn.style.marginLeft = "4px";
+                            setToggleVisIcon(toggleBtn, true);
                             toggleBtn.addEventListener("click", () => {
                                 const sg = skelGroups[sname];
                                 if (!sg) return;
                                 const vis = !sg.group.visible;
                                 sg.group.visible = vis;
-                                toggleBtn.textContent = vis ? "hide" : "show";
+                                setToggleVisIcon(toggleBtn, vis);
                             });
                             div.appendChild(toggleBtn);
                             const btn = document.createElement("button");
@@ -2811,6 +2824,22 @@ let meshCentroid = [0, 0, 0];
                 const m = hex.match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
                 return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
             }
+            const EYE_OPEN_SVG =
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+                ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>' +
+                '<circle cx="12" cy="12" r="3"/></svg>';
+            const EYE_OFF_SVG =
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+                ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1' +
+                ' 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16' +
+                ' 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>' +
+                '<line x1="1" y1="1" x2="23" y2="23"/></svg>';
+            function setToggleVisIcon(btn, visible) {
+                btn.innerHTML = visible ? EYE_OPEN_SVG : EYE_OFF_SVG;
+                btn.title = visible ? "hide" : "show";
+            }
             function syncAnnotationsToServer() {
                 if (!currentAnnotations) return;
                 fetch("/update_annotations", {
@@ -2959,9 +2988,12 @@ let meshCentroid = [0, 0, 0];
                         div.appendChild(focusBtn);
 
                         const toggleBtn = document.createElement("button");
-                        toggleBtn.textContent =
-                            annotationMeshes[idx] && !annotationMeshes[idx].visible ? "show" : "hide";
-                        toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
+                        toggleBtn.className = "toggle-vis";
+                        toggleBtn.style.marginLeft = "4px";
+                        setToggleVisIcon(
+                            toggleBtn,
+                            !(annotationMeshes[idx] && !annotationMeshes[idx].visible),
+                        );
                         toggleBtn.addEventListener("click", () => {
                             if (!annotationMeshes[idx]) return;
                             const vis = !annotationMeshes[idx].visible;
@@ -2969,7 +3001,7 @@ let meshCentroid = [0, 0, 0];
                             if (annotationMeshes[idx]._linkedEllipsoid) {
                                 annotationMeshes[idx]._linkedEllipsoid.visible = vis;
                             }
-                            toggleBtn.textContent = vis ? "hide" : "show";
+                            setToggleVisIcon(toggleBtn, vis);
                             _saveAnnVisibility();
                         });
                         div.appendChild(toggleBtn);
@@ -2991,13 +3023,16 @@ let meshCentroid = [0, 0, 0];
                         div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}; border-radius:50%"></span>${label}</span>`;
 
                         const toggleBtn = document.createElement("button");
-                        toggleBtn.textContent =
-                            markerMeshes[idx] && !markerMeshes[idx].visible ? "show" : "hide";
-                        toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
+                        toggleBtn.className = "toggle-vis";
+                        toggleBtn.style.marginLeft = "4px";
+                        setToggleVisIcon(
+                            toggleBtn,
+                            !(markerMeshes[idx] && !markerMeshes[idx].visible),
+                        );
                         toggleBtn.addEventListener("click", () => {
                             if (!markerMeshes[idx]) return;
                             markerMeshes[idx].visible = !markerMeshes[idx].visible;
-                            toggleBtn.textContent = markerMeshes[idx].visible ? "hide" : "show";
+                            setToggleVisIcon(toggleBtn, markerMeshes[idx].visible);
                         });
                         div.appendChild(toggleBtn);
 
@@ -3078,13 +3113,16 @@ let meshCentroid = [0, 0, 0];
                         div.appendChild(focusBtn);
 
                         const toggleBtn = document.createElement("button");
-                        toggleBtn.textContent =
-                            edgeGroupMeshes[idx] && !edgeGroupMeshes[idx].visible ? "show" : "hide";
-                        toggleBtn.style.cssText = "font-size:10px;cursor:pointer;margin-left:4px;";
+                        toggleBtn.className = "toggle-vis";
+                        toggleBtn.style.marginLeft = "4px";
+                        setToggleVisIcon(
+                            toggleBtn,
+                            !(edgeGroupMeshes[idx] && !edgeGroupMeshes[idx].visible),
+                        );
                         toggleBtn.addEventListener("click", () => {
                             if (!edgeGroupMeshes[idx]) return;
                             edgeGroupMeshes[idx].visible = !edgeGroupMeshes[idx].visible;
-                            toggleBtn.textContent = edgeGroupMeshes[idx].visible ? "hide" : "show";
+                            setToggleVisIcon(toggleBtn, edgeGroupMeshes[idx].visible);
                         });
                         div.appendChild(toggleBtn);
 
@@ -3160,9 +3198,8 @@ let meshCentroid = [0, 0, 0];
                 for (const m of markerMeshes) m.visible = vis;
                 for (const m of edgeGroupMeshes) m.visible = vis;
                 // Sync individual toggle buttons
-                document.querySelectorAll("#hlList button").forEach(btn => {
-                    if (btn.textContent === "hide" || btn.textContent === "show")
-                        btn.textContent = vis ? "hide" : "show";
+                document.querySelectorAll("#hlList button.toggle-vis").forEach((btn) => {
+                    setToggleVisIcon(btn, vis);
                 });
                 document.getElementById("hlHideAll").textContent =
                     annotationsHidden ? "Show All" : "Hide All";
