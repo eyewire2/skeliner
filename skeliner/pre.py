@@ -3869,6 +3869,7 @@ def find_gaps(
     organelles: Organelles | None = None,
     mesh_stats: MeshStats | None = None,
     fusions: list[list[int]] | None = None,
+    fusion_clearance: float | None = None,
 ) -> list[tuple[list[int], list[int], float]]:
     """Detect gaps between disconnected components and the main mesh.
 
@@ -3895,6 +3896,12 @@ def find_gaps(
         geometric gap rather than the zero-distance fusion overlap.
         Pass-through to :func:`find_disconnected` when ``disconnected``
         is ``None``.
+    fusion_clearance : float or None
+        Only used when ``fusions`` is provided.  Candidate gap face
+        pairs whose endpoints lie within this distance of any
+        fusion-cluster face are dropped — they represent "kissing
+        points" near fusion zones (artifacts of the wrong fusion),
+        not real gaps to bridge.  Defaults to ``10 * median_edge``.
 
     Returns
     -------
@@ -3941,11 +3948,36 @@ def find_gaps(
     # Components share these verts (fusion = "glued at the rim"), so
     # excluding them is what reveals the real geometric gap distance.
     fusion_vert_set: set[int] = set()
+    fusion_face_idx: list[int] = []
     if fusions:
+        seen_ff: set[int] = set()
         for cluster in fusions:
             for fi in cluster:
-                for v in mesh.faces[int(fi)]:
+                ifi = int(fi)
+                if ifi not in seen_ff:
+                    seen_ff.add(ifi)
+                    fusion_face_idx.append(ifi)
+                for v in mesh.faces[ifi]:
                     fusion_vert_set.add(int(v))
+
+    # Fusion proximity check: candidate gaps with both endpoints inside
+    # the fusion blast radius are kissing points, not real gaps.
+    fusion_face_tree: KDTree | None = None
+    fusion_clear: float = 0.0
+    if fusion_face_idx:
+        fusion_centroids = mesh.triangles_center[fusion_face_idx]
+        fusion_face_tree = KDTree(fusion_centroids)
+        median_edge = float(np.median(mesh.edges_unique_length))
+        fusion_clear = (
+            float(fusion_clearance)
+            if fusion_clearance is not None
+            else 10.0 * median_edge
+        )
+        if verbose:
+            print(
+                f"[skeliner.pre] Gaps: fusion clearance = {fusion_clear:.0f} nm "
+                f"(10 * median edge {median_edge:.0f})"
+            )
 
     def _component_verts(fis: np.ndarray) -> np.ndarray:
         verts = np.unique(mesh.faces[fis])
@@ -3963,25 +3995,34 @@ def find_gaps(
     # Build KD-trees: main component + each disconnected component
     comp_data: dict[int, dict] = {}
 
+    def _attach_fusion_dists(coords: np.ndarray) -> np.ndarray | None:
+        if fusion_face_tree is None or len(coords) == 0:
+            return None
+        return fusion_face_tree.query(coords)[0]
+
     # Main component
     main_fi = np.where(labels == main)[0]
     main_verts = _component_verts(main_fi)
+    main_coords = mesh.vertices[main_verts]
     comp_data[main] = {
         "fi": main_fi,
         "verts": main_verts,
-        "coords": mesh.vertices[main_verts],
-        "tree": KDTree(mesh.vertices[main_verts]),
+        "coords": main_coords,
+        "tree": KDTree(main_coords),
+        "fusion_dist": _attach_fusion_dists(main_coords),
     }
 
     # Disconnected components — identify by their label
     for fis in disc:
         cid = int(labels[fis[0]])
         verts = _component_verts(np.asarray(fis))
+        coords = mesh.vertices[verts]
         comp_data[cid] = {
             "fi": np.asarray(fis),
             "verts": verts,
-            "coords": mesh.vertices[verts],
-            "tree": KDTree(mesh.vertices[verts]),
+            "coords": coords,
+            "tree": KDTree(coords),
+            "fusion_dist": _attach_fusion_dists(coords),
         }
 
     if verbose:
@@ -4068,11 +4109,33 @@ def find_gaps(
             da = comp_data[cid_a]
             db = comp_data[cid_b]
             dists, idxs = db["tree"].query(da["coords"])
-            min_i = int(np.argmin(dists))
-            raw_dist = float(dists[min_i])
-            # Vertex-connected pairs are fusions (will be broken later),
-            # not real gaps — treat as infinite cost so the MST avoids them.
-            cost = float("inf") if raw_dist < 1.0 else raw_dist
+            # Mask candidate pairs whose endpoints lie within the fusion
+            # blast radius — those are kissing-point artifacts of the
+            # wrong fusion, not real gaps.  Both sides must be clear.
+            if (
+                fusion_face_tree is not None
+                and da["fusion_dist"] is not None
+                and db["fusion_dist"] is not None
+            ):
+                a_clear = da["fusion_dist"] > fusion_clear
+                b_clear = db["fusion_dist"][idxs] > fusion_clear
+                valid = a_clear & b_clear
+                if not valid.any():
+                    cost = float("inf")
+                    min_i = int(np.argmin(dists))
+                    raw_dist = float(dists[min_i])
+                else:
+                    masked = np.where(valid, dists, np.inf)
+                    min_i = int(np.argmin(masked))
+                    raw_dist = float(dists[min_i])
+                    cost = float("inf") if raw_dist < 1.0 else raw_dist
+            else:
+                min_i = int(np.argmin(dists))
+                raw_dist = float(dists[min_i])
+                # Vertex-connected pairs are fusions (will be broken later),
+                # not real gaps — treat as infinite cost so the MST avoids
+                # them.
+                cost = float("inf") if raw_dist < 1.0 else raw_dist
             key = (min(cid_a, cid_b), max(cid_a, cid_b))
             edge_info[key] = (
                 cost,
