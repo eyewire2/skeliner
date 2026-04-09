@@ -881,6 +881,8 @@ def _skeletonize_preproc(
     geodesic_shell_count: int,
     min_shell_vertices: int,
     max_shell_width_factor: float,
+    soma_init_guess_axis: str,
+    soma_init_guess_mode: str,
     unit: str,
     id: str | int | None,
     verbose: bool,
@@ -1017,18 +1019,47 @@ def _skeletonize_preproc(
     ntype = np.zeros(len(nodes_arr), np.int8)
     if has_soma:
         ntype[0] = 1
-    else:
+    elif len(nodes_arr):
         ntype[0] = -1
-        # placeholder soma at node 0 (same as direct track
-        # when has_soma=False)
-        r0 = float(
-            list(radii_dict.values())[0][0]
-        ) if len(nodes_arr) else 0.0
+        # pick a deterministic root like the direct track
+        root_vid = _extreme_vertex(
+            mesh,
+            axis=soma_init_guess_axis,
+            mode=soma_init_guess_mode,
+        )
+        if root_vid in vert2node:
+            root_nid = vert2node[root_vid]
+        else:
+            # extreme vertex not in any neurite — pick
+            # the closest skeleton node instead
+            dists = np.linalg.norm(
+                nodes_arr
+                - mesh_vertices[root_vid],
+                axis=1,
+            )
+            root_nid = int(np.argmin(dists))
+        if root_nid != 0:
+            # swap node 0 and root_nid
+            nodes_arr[[0, root_nid]] = (
+                nodes_arr[[root_nid, 0]]
+            )
+            for k in radii_dict:
+                radii_dict[k][[0, root_nid]] = (
+                    radii_dict[k][[root_nid, 0]]
+                )
+            node2verts[0], node2verts[root_nid] = (
+                node2verts[root_nid],
+                node2verts[0],
+            )
+            m0 = edges_mst == 0
+            mi = edges_mst == root_nid
+            edges_mst[m0] = root_nid
+            edges_mst[mi] = 0
+            vert2node = rebuild_vert2node(node2verts)
+        # placeholder soma at the root
+        r0 = float(list(radii_dict.values())[0][0])
         soma = Soma.from_sphere(
-            nodes_arr[0] if len(nodes_arr)
-            else np.zeros(3),
-            r0,
-            verts=None,
+            nodes_arr[0], r0, verts=None
         )
 
     return Skeleton(
@@ -1157,6 +1188,8 @@ def skeletonize(
             geodesic_shell_count=geodesic_shell_count,
             min_shell_vertices=min_shell_vertices,
             max_shell_width_factor=max_shell_width_factor,
+            soma_init_guess_axis=soma_init_guess_axis,
+            soma_init_guess_mode=soma_init_guess_mode,
             unit=unit,
             id=id,
             verbose=verbose,
