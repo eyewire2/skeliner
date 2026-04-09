@@ -760,6 +760,118 @@ def _stitch_to_soma(
     )
 
 
+def _pick_neurite_seed(
+    neurite_verts: np.ndarray,
+    mesh_vertices: np.ndarray,
+    soma: Soma | None,
+) -> int:
+    """Choose a geodesic seed for one neurite.
+
+    With soma: pick the boundary vertex closest to
+    ``soma.center`` (shells grow outward from the soma).
+    Without soma: pick the vertex closest to the neurite
+    centroid (shells grow outward from the centre).
+    """
+    if soma is not None and soma.verts is not None:
+        boundary = np.intersect1d(
+            neurite_verts, soma.verts
+        )
+        if boundary.size:
+            dists = np.linalg.norm(
+                mesh_vertices[boundary] - soma.center,
+                axis=1,
+            )
+            return int(boundary[np.argmin(dists)])
+        # no shared verts — fall back to nearest
+        dists = np.linalg.norm(
+            mesh_vertices[neurite_verts] - soma.center,
+            axis=1,
+        )
+        return int(neurite_verts[np.argmin(dists)])
+
+    # no soma — seed at centroid of the neurite
+    centroid = mesh_vertices[neurite_verts].mean(axis=0)
+    dists = np.linalg.norm(
+        mesh_vertices[neurite_verts] - centroid, axis=1
+    )
+    return int(neurite_verts[np.argmin(dists)])
+
+
+def _concatenate_sub_skeletons(
+    sub_skeletons: list[
+        tuple[
+            np.ndarray,
+            dict[str, np.ndarray],
+            list[np.ndarray],
+            dict[int, int],
+            np.ndarray,
+        ]
+    ],
+    radius_estimators: list[str],
+) -> tuple[
+    np.ndarray,
+    dict[str, np.ndarray],
+    list[np.ndarray],
+    dict[int, int],
+    np.ndarray,
+]:
+    """Join per-neurite sub-skeletons without a soma node.
+
+    Unlike :func:`_stitch_to_soma`, no node 0 is prepended
+    and no stem edges are added.  The result is a forest
+    (one tree per neurite).
+    """
+    all_nodes: list[np.ndarray] = []
+    all_radii: dict[str, list[np.ndarray]] = {
+        k: [] for k in radius_estimators
+    }
+    all_n2v: list[np.ndarray] = []
+    all_edges: list[np.ndarray] = []
+
+    offset = 0
+    for nodes, radii, n2v, _, edges in sub_skeletons:
+        if len(nodes) == 0:
+            continue
+        all_nodes.append(nodes)
+        for k in radius_estimators:
+            all_radii[k].append(radii[k])
+        all_n2v.extend(n2v)
+        if edges.size:
+            all_edges.append(edges + offset)
+        offset += len(nodes)
+
+    nodes_arr = (
+        np.vstack(all_nodes)
+        if all_nodes
+        else np.empty((0, 3), np.float64)
+    )
+    radii_dict = {
+        k: np.concatenate(v) if v else np.empty(0)
+        for k, v in all_radii.items()
+    }
+    edges_arr = (
+        np.vstack(all_edges)
+        if all_edges
+        else np.empty((0, 2), np.int64)
+    )
+    if edges_arr.size:
+        edges_arr = np.sort(edges_arr, axis=1)
+        edges_arr = np.unique(edges_arr, axis=0)
+
+    vert2node: dict[int, int] = {}
+    for nid, verts in enumerate(all_n2v):
+        for vid in verts:
+            vert2node[int(vid)] = nid
+
+    return (
+        nodes_arr,
+        radii_dict,
+        all_n2v,
+        vert2node,
+        edges_arr,
+    )
+
+
 def _skeletonize_preproc(
     mesh: trimesh.Trimesh,
     components: MeshComponents,
@@ -785,21 +897,17 @@ def _skeletonize_preproc(
     neurites).
     """
     soma = components.soma
-    if soma is None:
-        raise ValueError(
-            "skeletonize(components=...) requires "
-            "components.soma to be set.  Run "
-            "pre.find_soma_via_ring_cutoff first, or "
-            "use the direct track (omit components)."
-        )
+    has_soma = soma is not None
 
     if verbose:
         _global_start = time.perf_counter()
+        soma_tag = "with soma" if has_soma else "no soma"
         print(
             f"[skeliner] preprocessing track "
             f"({len(mesh.vertices):,} vertices, "
             f"{len(mesh.faces):,} faces, "
-            f"{len(components.neurites)} neurites)"
+            f"{len(components.neurites)} neurites, "
+            f"{soma_tag})"
         )
 
     with _timed(
@@ -810,7 +918,7 @@ def _skeletonize_preproc(
     mesh_vertices = mesh.vertices.view(np.ndarray)
     soma_verts_set = (
         set(soma.verts.tolist())
-        if soma.verts is not None
+        if has_soma and soma.verts is not None
         else set()
     )
 
@@ -826,38 +934,11 @@ def _skeletonize_preproc(
                 mesh.faces[face_idx].ravel()
             ).astype(np.int64)
 
-            # seed: boundary vert closest to soma centre
-            boundary = (
-                np.intersect1d(neurite_verts, soma.verts)
-                if soma.verts is not None
-                else np.array([], dtype=np.int64)
+            seed_vid = _pick_neurite_seed(
+                neurite_verts,
+                mesh_vertices,
+                soma,
             )
-            if boundary.size:
-                seed_vid = int(
-                    boundary[
-                        np.argmin(
-                            np.linalg.norm(
-                                mesh_vertices[boundary]
-                                - soma.center,
-                                axis=1,
-                            )
-                        )
-                    ]
-                )
-            else:
-                seed_vid = int(
-                    neurite_verts[
-                        np.argmin(
-                            np.linalg.norm(
-                                mesh_vertices[
-                                    neurite_verts
-                                ]
-                                - soma.center,
-                                axis=1,
-                            )
-                        )
-                    ]
-                )
 
             sub = _skeletonize_component(
                 mesh,
@@ -882,19 +963,35 @@ def _skeletonize_preproc(
                 f"→ {sub[0].shape[0]} nodes"
             )
 
-    # -- stitch to soma --
-    with _timed(
-        "↳  stitch neurites to soma", verbose=verbose
-    ):
-        (
-            nodes_arr,
-            radii_dict,
-            node2verts,
-            vert2node,
-            edges_arr,
-        ) = _stitch_to_soma(
-            sub_skeletons, soma, radius_estimators
-        )
+    # -- assemble skeleton -----------------------------------------
+    if has_soma:
+        with _timed(
+            "↳  stitch neurites to soma",
+            verbose=verbose,
+        ):
+            (
+                nodes_arr,
+                radii_dict,
+                node2verts,
+                vert2node,
+                edges_arr,
+            ) = _stitch_to_soma(
+                sub_skeletons, soma, radius_estimators
+            )
+    else:
+        with _timed(
+            "↳  concatenate neurites",
+            verbose=verbose,
+        ):
+            (
+                nodes_arr,
+                radii_dict,
+                node2verts,
+                vert2node,
+                edges_arr,
+            ) = _concatenate_sub_skeletons(
+                sub_skeletons, radius_estimators
+            )
 
     # -- global MST --
     with _timed(
@@ -918,7 +1015,21 @@ def _skeletonize_preproc(
         )
 
     ntype = np.zeros(len(nodes_arr), np.int8)
-    ntype[0] = 1
+    if has_soma:
+        ntype[0] = 1
+    else:
+        ntype[0] = -1
+        # placeholder soma at node 0 (same as direct track
+        # when has_soma=False)
+        r0 = float(
+            list(radii_dict.values())[0][0]
+        ) if len(nodes_arr) else 0.0
+        soma = Soma.from_sphere(
+            nodes_arr[0] if len(nodes_arr)
+            else np.zeros(3),
+            r0,
+            verts=None,
+        )
 
     return Skeleton(
         nodes=nodes_arr,
