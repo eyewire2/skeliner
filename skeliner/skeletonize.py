@@ -17,7 +17,7 @@ from ._core import (
     _prune_neurites,
 )
 from ._state import rebuild_vert2node
-from .dataclass import Skeleton, Soma
+from .dataclass import MeshComponents, Skeleton, Soma
 
 _SKELINER_VERSION = _metadata.version("skeliner")
 
@@ -150,142 +150,192 @@ def _split_comp_if_elongated(
             yield comp_idx[m]
 
 
-def _bin_geodesic_shells(
-    mesh: trimesh.Trimesh,
+def _bin_one_component(
     gsurf: ig.Graph,
+    verts: np.ndarray,
+    seed_vid: int,
     *,
-    soma: Soma,
+    mesh_vertices: np.ndarray,
+    mean_edge_len: float,
+    soma_verts: set[int] | None = None,
     step_size: float | None = None,
     target_shell_count: int = 500,
     min_shell_vertices: int = 6,
     max_shell_width_factor: float = 50.0,
-    # -- split elongated shells (optional) ------------------------
     split_elongated_shells: bool = True,
-    split_aspect_thr: float = 3.0,  # λ1 / λ2
-    split_min_shell_vertices: int = 50,  # minimum size of a cluster to split
-    split_max_vertices_per_slice: int | None = None,  # max size of a slice
+    split_aspect_thr: float = 3.0,
+    split_min_shell_vertices: int = 50,
+    split_max_vertices_per_slice: int | None = None,
 ) -> List[List[np.ndarray]]:
-    """
-    Cluster every connected surface patch into sets of *geodesic shells*.
-
-    The function reproduces the logic that used to live inline in
-    :pyfunc:`skeletonize`, but is now reusable and unit-testable.
+    """Bin one connected surface component into geodesic shells.
 
     Parameters
     ----------
-    mesh
-        The watertight neuron mesh.
     gsurf
-        Undirected triangle-adjacency graph of the mesh (from
-        :pyfunc:`_surface_graph`).
-    c_soma
-        3-vector of the soma centroid **chosen earlier**.
-        (Its exact origin depends on `detect_soma`.)
+        Full surface graph of the mesh.
+    verts
+        1-D int64 array of vertex IDs in this component.
+    seed_vid
+        Mesh-vertex ID to start the geodesic from.
+    mesh_vertices
+        ``mesh.vertices`` as ``(N, 3) float64``.
+    mean_edge_len
+        Mean mesh-edge length (for step-size fallback).
     soma_verts
-        Set of mesh-vertex IDs that belong to the detected soma patch (may be a
-        singleton `{seed_vid}` if soma detection is deferred or disabled).
-    target_shell_count
-        Requested number of shells per connected component.  The actual width
-        is adapted to mesh resolution.
-    min_shell_vertices
-        Discard clusters smaller than this size; they usually represent noise.
-    max_shell_width_factor
-        Upper limit for the shell width expressed as a multiple of the mean
-        mesh-edge length.  Prevents *very* sparse meshes from producing a
-        single giant shell.
+        Vertex IDs to exclude from shells.  ``None`` or
+        empty set means no exclusion.
+
+    Returns
+    -------
+    List[List[np.ndarray]]
+        Shells for this component — same structure as the
+        return of :func:`_bin_geodesic_shells`.
+    """
+    v = mesh_vertices
+    e_m = mean_edge_len
+    exclude = soma_verts or set()
+
+    # -- geodesic distance from seed to every vertex in component --
+    dist_vec = _dist_vec_for_component(gsurf, verts, seed_vid)
+    dist_sub = {
+        int(vid): float(d)
+        for vid, d in zip(verts, dist_vec)
+    }
+    if not dist_sub:
+        return []
+
+    # -- shell width ---------------------------------------------------
+    if step_size is None:
+        arc_len = max(dist_sub.values())
+        step = max(e_m * 2.0, arc_len / target_shell_count)
+    else:
+        step = float(step_size)
+
+    # increase step until at least one non-empty shell
+    shells: List[List[int]] = []
+    while (
+        not any(shells)
+        and step < e_m * max_shell_width_factor
+    ):
+        shells = _geodesic_bins(dist_sub, step)
+        step *= 1.5
+
+    # -- split each shell into connected sub-clusters ------------------
+    component_shells: List[List[np.ndarray]] = []
+    for shell_verts in shells:
+        inner = [
+            vid for vid in shell_verts if vid not in exclude
+        ]
+        if not inner:
+            continue
+
+        sub = gsurf.induced_subgraph(inner)
+        comps = []
+        for comp in sub.components():
+            if len(comp) < min_shell_vertices:
+                continue
+            comp_idx = np.fromiter(
+                (inner[i] for i in comp), dtype=np.int64
+            )
+            if (
+                split_elongated_shells and len(comp) < 1500
+            ):  # hard-coded, might be soma
+                for part in _split_comp_if_elongated(
+                    comp_idx,
+                    v,
+                    aspect_thr=split_aspect_thr,
+                    min_shell_vertices=(
+                        split_min_shell_vertices
+                    ),
+                    max_vertices_per_slice=(
+                        split_max_vertices_per_slice
+                    ),
+                ):
+                    comps.append(part)
+            else:
+                comps.append(comp_idx)
+
+        component_shells.append(comps)
+
+    return component_shells
+
+
+def _bin_geodesic_shells(
+    mesh: trimesh.Trimesh,
+    gsurf: ig.Graph,
+    *,
+    seed_vid: int,
+    soma_verts: set[int] | None = None,
+    step_size: float | None = None,
+    target_shell_count: int = 500,
+    min_shell_vertices: int = 6,
+    max_shell_width_factor: float = 50.0,
+    split_elongated_shells: bool = True,
+    split_aspect_thr: float = 3.0,
+    split_min_shell_vertices: int = 50,
+    split_max_vertices_per_slice: int | None = None,
+) -> List[List[np.ndarray]]:
+    """Cluster every connected surface component into geodesic
+    shells.
+
+    Iterates over connected components of *gsurf*, picks a
+    seed per component, and delegates to
+    :func:`_bin_one_component`.
+
+    Parameters
+    ----------
+    seed_vid
+        Mesh-vertex ID used as the geodesic origin in the
+        component that contains it.  Other components fall
+        back to a deterministic pseudo-random vertex.
+    soma_verts
+        Vertex IDs to exclude from shells (e.g. soma surface
+        vertices).  ``None`` means no exclusion.
 
     Returns
     -------
     List[List[np.ndarray]]
         Outer list = shells ordered by growing distance;
-        inner list = connected vertex clusters inside that shell;
-        each cluster is a 1-D ``int64`` array of mesh-vertex IDs.
-
-        The structure is exactly what stage 2 of *skeletonize()* expects.
+        inner list = connected vertex clusters inside that
+        shell; each cluster is a 1-D ``int64`` array.
     """
     v = mesh.vertices.view(np.ndarray)
-    e_m = float(mesh.edges_unique_length.mean())  # mean mesh-edge length
+    e_m = float(mesh.edges_unique_length.mean())
 
-    c_soma = soma.center
-    soma_verts = set() if soma.verts is None else set(map(int, soma.verts))
-    soma_vids = np.fromiter(soma_verts, dtype=np.int64)
-
-    # ------------------------------------------------------------------
-    # build a vertex list for every connected surface patch
-    # ------------------------------------------------------------------
-    comp_vertices = [np.asarray(c, dtype=np.int64) for c in gsurf.components()]
+    comp_vertices = [
+        np.asarray(c, dtype=np.int64)
+        for c in gsurf.components()
+    ]
     all_shells: List[List[np.ndarray]] = []
 
     for cid, verts in enumerate(comp_vertices):
-        # --------------------------------------------------------------
-        # choose one seed *per component* – deterministic but cheap
-        # --------------------------------------------------------------
-        if np.intersect1d(verts, soma_vids).size:
-            # component that contains (part of) the soma ➜
-            # pick the *furthest* soma vertex from the centroid to avoid
-            # degeneracy when the soma spans many shells
-            seed_vid = int(
-                soma_vids[np.argmax(np.linalg.norm(v[soma_vids] - c_soma, axis=1))]
-            )
+        # one seed per component
+        if np.any(verts == seed_vid):
+            comp_seed = seed_vid
         else:
-            # foreign island ➜ pick a pseudo-random, yet deterministic vertex
-            seed_vid = int(verts[hash(cid) % len(verts)])
+            comp_seed = int(verts[hash(cid) % len(verts)])
 
-        # --------------------------------------------------------------
-        # geodesic distance of *all* vertices in this component
-        # --------------------------------------------------------------
-        dist_vec = _dist_vec_for_component(gsurf, verts, seed_vid)
-        dist_sub = {int(vid): float(d) for vid, d in zip(verts, dist_vec)}
-
-        if not dist_sub:
-            continue
-
-        # shell width: max(edge × 2, arc_len / target_shell_count)
-        if step_size is None:
-            arc_len = max(dist_sub.values())
-            step = max(e_m * 2.0, arc_len / target_shell_count)
-        else:
-            step = float(step_size)
-
-        # ------------------------------------------------------------------
-        # increase the step until we get at least one non-empty shell
-        # (avoids pathological meshes with *too* fine resolution)
-        # ------------------------------------------------------------------
-        shells: List[List[int]] = []
-        while not any(shells) and step < e_m * max_shell_width_factor:
-            shells = _geodesic_bins(dist_sub, step)
-            step *= 1.5
-
-        # --------------------------------------------------------------
-        # for every shell: split it into connected sub-clusters
-        # --------------------------------------------------------------
-        for shell_verts in shells:
-            # exclude explicit soma vertices to keep the center clean
-            inner = [vid for vid in shell_verts if vid not in soma_verts]
-            if not inner:
-                continue
-
-            sub = gsurf.induced_subgraph(inner)
-            comps = []
-            for comp in sub.components():
-                if len(comp) < min_shell_vertices:
-                    continue  # too small ➜ ignore
-                comp_idx = np.fromiter((inner[i] for i in comp), dtype=np.int64)
-                if (
-                    split_elongated_shells and len(comp) < 1500
-                ):  # hard-coded for now, if too large, might be a soma
-                    for part in _split_comp_if_elongated(
-                        comp_idx,
-                        v,
-                        aspect_thr=split_aspect_thr,
-                        min_shell_vertices=split_min_shell_vertices,
-                        max_vertices_per_slice=split_max_vertices_per_slice,
-                    ):
-                        comps.append(part)
-                else:
-                    comps.append(comp_idx)
-
-            all_shells.append(comps)
+        shells = _bin_one_component(
+            gsurf,
+            verts,
+            comp_seed,
+            mesh_vertices=v,
+            mean_edge_len=e_m,
+            soma_verts=soma_verts,
+            step_size=step_size,
+            target_shell_count=target_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=max_shell_width_factor,
+            split_elongated_shells=split_elongated_shells,
+            split_aspect_thr=split_aspect_thr,
+            split_min_shell_vertices=(
+                split_min_shell_vertices
+            ),
+            split_max_vertices_per_slice=(
+                split_max_vertices_per_slice
+            ),
+        )
+        all_shells.extend(shells)
 
     return all_shells
 
@@ -468,6 +518,402 @@ def _make_nodes(
     return nodes_arr, radii_dict, node2verts, vert2node
 
 
+def _skeletonize_component(
+    mesh: trimesh.Trimesh,
+    gsurf: ig.Graph,
+    vert_ids: np.ndarray,
+    *,
+    seed_vid: int,
+    soma_verts: set[int] | None = None,
+    radius_estimators: list[str],
+    merge_nested: bool = True,
+    merge_kwargs: dict | None = None,
+    step_size: float | None = None,
+    target_shell_count: int = 500,
+    min_shell_vertices: int = 6,
+    max_shell_width_factor: float = 50.0,
+    split_elongated_shells: bool = True,
+    split_aspect_thr: float = 3.0,
+    split_min_shell_vertices: int = 50,
+    split_max_vertices_per_slice: int | None = None,
+) -> tuple[
+    np.ndarray,
+    dict[str, np.ndarray],
+    list[np.ndarray],
+    dict[int, int],
+    np.ndarray,
+]:
+    """Bin, build nodes, and extract edges for one component.
+
+    Combines :func:`_bin_one_component`, :func:`_make_nodes`,
+    and :func:`_edges_from_mesh` into a single call that
+    produces a complete sub-skeleton for one connected vertex
+    set.
+
+    Parameters
+    ----------
+    mesh
+        The neuron mesh (needed for ``edges_unique`` and
+        ``vertices``).
+    gsurf
+        Full surface graph of the mesh.
+    vert_ids
+        1-D int64 array — vertex IDs for this component.
+    seed_vid
+        Where to start the geodesic.
+    soma_verts
+        Vertices to exclude from shells (``None`` = none).
+    radius_estimators
+        Passed to :func:`_make_nodes`.
+    merge_nested, merge_kwargs
+        Passed to :func:`_make_nodes`.
+
+    Returns
+    -------
+    nodes_arr, radii_dict, node2verts, vert2node, edges_arr
+    """
+    mesh_vertices = mesh.vertices.view(np.ndarray)
+    e_m = float(mesh.edges_unique_length.mean())
+
+    all_shells = _bin_one_component(
+        gsurf,
+        vert_ids,
+        seed_vid,
+        mesh_vertices=mesh_vertices,
+        mean_edge_len=e_m,
+        soma_verts=soma_verts,
+        step_size=step_size,
+        target_shell_count=target_shell_count,
+        min_shell_vertices=min_shell_vertices,
+        max_shell_width_factor=max_shell_width_factor,
+        split_elongated_shells=split_elongated_shells,
+        split_aspect_thr=split_aspect_thr,
+        split_min_shell_vertices=(
+            split_min_shell_vertices
+        ),
+        split_max_vertices_per_slice=(
+            split_max_vertices_per_slice
+        ),
+    )
+
+    nodes_arr, radii_dict, node2verts, vert2node = (
+        _make_nodes(
+            all_shells,
+            mesh_vertices,
+            radius_estimators=radius_estimators,
+            merge_nested=merge_nested,
+            merge_kwargs=merge_kwargs,
+        )
+    )
+
+    edges_arr = _edges_from_mesh(
+        mesh.edges_unique,
+        vert2node,
+        n_mesh_verts=len(mesh.vertices),
+    )
+
+    return (
+        nodes_arr,
+        radii_dict,
+        node2verts,
+        vert2node,
+        edges_arr,
+    )
+
+
+# -----------------------------------------------------------------------------
+#  Preprocessing track helpers
+# -----------------------------------------------------------------------------
+
+
+def _stitch_to_soma(
+    sub_skeletons: list[
+        tuple[
+            np.ndarray,
+            dict[str, np.ndarray],
+            list[np.ndarray],
+            dict[int, int],
+            np.ndarray,
+        ]
+    ],
+    soma: Soma,
+    radius_estimators: list[str],
+) -> tuple[
+    np.ndarray,
+    dict[str, np.ndarray],
+    list[np.ndarray],
+    dict[int, int],
+    np.ndarray,
+]:
+    """Combine per-neurite sub-skeletons with soma node 0.
+
+    Each sub-skeleton's node IDs are offset so they sit after
+    the soma and all earlier sub-skeletons.  One synthetic
+    stem edge ``(0, root_i)`` is added per neurite, where
+    ``root_i`` is the node closest to the soma centre.
+
+    Returns
+    -------
+    nodes, radii, node2verts, vert2node, edges
+    """
+    r_soma = soma.spherical_radius
+
+    # -- node 0 = soma --
+    soma_verts_arr = (
+        soma.verts
+        if soma.verts is not None
+        else np.empty(0, np.int64)
+    )
+    all_nodes = [soma.center.reshape(1, 3)]
+    all_radii: dict[str, list[np.ndarray]] = {
+        k: [np.array([r_soma])] for k in radius_estimators
+    }
+    all_n2v: list[np.ndarray] = [soma_verts_arr]
+    all_edges: list[np.ndarray] = []
+
+    offset = 1  # node 0 is soma
+    for nodes, radii, n2v, _, edges in sub_skeletons:
+        if len(nodes) == 0:
+            continue
+
+        all_nodes.append(nodes)
+        for k in radius_estimators:
+            all_radii[k].append(radii[k])
+        all_n2v.extend(n2v)
+
+        # offset edge endpoints
+        all_edges.append(edges + offset)
+
+        # stem edge: soma → closest node
+        dists = np.linalg.norm(
+            nodes - soma.center, axis=1
+        )
+        root = int(np.argmin(dists)) + offset
+        all_edges.append(
+            np.array([[0, root]], dtype=np.int64)
+        )
+
+        offset += len(nodes)
+
+    nodes_arr = (
+        np.vstack(all_nodes)
+        if all_nodes
+        else np.empty((0, 3), np.float64)
+    )
+    radii_dict = {
+        k: np.concatenate(v) for k, v in all_radii.items()
+    }
+    edges_arr = (
+        np.vstack(all_edges)
+        if all_edges
+        else np.empty((0, 2), np.int64)
+    )
+    edges_arr = np.sort(edges_arr, axis=1)
+    edges_arr = np.unique(edges_arr, axis=0)
+
+    vert2node: dict[int, int] = {}
+    for nid, verts in enumerate(all_n2v):
+        for vid in verts:
+            vert2node[int(vid)] = nid
+
+    return (
+        nodes_arr,
+        radii_dict,
+        all_n2v,
+        vert2node,
+        edges_arr,
+    )
+
+
+def _skeletonize_preproc(
+    mesh: trimesh.Trimesh,
+    components: MeshComponents,
+    *,
+    radius_estimators: list[str],
+    geodesic_step_size: float | None,
+    geodesic_shell_count: int,
+    min_shell_vertices: int,
+    max_shell_width_factor: float,
+    split_elongated_shells: bool,
+    split_aspect_thr: float,
+    split_min_shell_vertices: int,
+    split_max_vertices_per_slice: int | None,
+    merge_nodes_overlap_fraction: float,
+    collapse_soma: bool,
+    collapse_soma_dist_factor: float,
+    collapse_soma_radius_factor: float,
+    unit: str,
+    id: str | int | None,
+    verbose: bool,
+) -> Skeleton:
+    """Preprocessing track: per-neurite skeletonization.
+
+    Each neurite in *components* is skeletonized via
+    :func:`_skeletonize_component`, then all sub-skeletons
+    are grafted onto the precomputed soma.
+
+    Skips: soma detection, gap bridging, neurite pruning.
+    Keeps: nested-node merge, near-soma collapse, MST.
+    """
+    soma = components.soma
+    if soma is None:
+        raise ValueError(
+            "skeletonize(components=...) requires "
+            "components.soma to be set.  Run "
+            "pre.find_soma_via_ring_cutoff first, or "
+            "use the direct track (omit components)."
+        )
+
+    if verbose:
+        _t0 = time.perf_counter()
+        print(
+            f"[skeliner] preprocessing track "
+            f"({len(components.neurites)} neurites)"
+        )
+
+    gsurf = _surface_graph(mesh)
+    mesh_vertices = mesh.vertices.view(np.ndarray)
+    soma_verts_set = (
+        set(soma.verts.tolist())
+        if soma.verts is not None
+        else set()
+    )
+
+    sub_skeletons = []
+    for i, face_idx in enumerate(components.neurites):
+        neurite_verts = np.unique(
+            mesh.faces[face_idx].ravel()
+        ).astype(np.int64)
+
+        # seed: boundary vert closest to soma centre
+        boundary = (
+            np.intersect1d(neurite_verts, soma.verts)
+            if soma.verts is not None
+            else np.array([], dtype=np.int64)
+        )
+        if boundary.size:
+            seed_vid = int(
+                boundary[
+                    np.argmin(
+                        np.linalg.norm(
+                            mesh_vertices[boundary]
+                            - soma.center,
+                            axis=1,
+                        )
+                    )
+                ]
+            )
+        else:
+            seed_vid = int(
+                neurite_verts[
+                    np.argmin(
+                        np.linalg.norm(
+                            mesh_vertices[neurite_verts]
+                            - soma.center,
+                            axis=1,
+                        )
+                    )
+                ]
+            )
+
+        sub = _skeletonize_component(
+            mesh,
+            gsurf,
+            neurite_verts,
+            seed_vid=seed_vid,
+            soma_verts=soma_verts_set,
+            radius_estimators=radius_estimators,
+            merge_nested=True,
+            merge_kwargs={
+                "inside_frac": merge_nodes_overlap_fraction,
+            },
+            step_size=geodesic_step_size,
+            target_shell_count=geodesic_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=max_shell_width_factor,
+            split_elongated_shells=split_elongated_shells,
+            split_aspect_thr=split_aspect_thr,
+            split_min_shell_vertices=(
+                split_min_shell_vertices
+            ),
+            split_max_vertices_per_slice=(
+                split_max_vertices_per_slice
+            ),
+        )
+        sub_skeletons.append(sub)
+
+        if verbose:
+            n = sub[0].shape[0]
+            print(f"  neurite {i}: {n} nodes")
+
+    # -- stitch to soma --
+    (
+        nodes_arr,
+        radii_dict,
+        node2verts,
+        vert2node,
+        edges_arr,
+    ) = _stitch_to_soma(
+        sub_skeletons, soma, radius_estimators
+    )
+
+    # -- collapse near-soma nodes --
+    if collapse_soma and len(nodes_arr) > 1:
+        (
+            nodes_arr,
+            radii_dict,
+            node2verts,
+            vert2node,
+            edges_arr,
+            soma,
+            _,
+        ) = _merge_near_soma_nodes(
+            nodes_arr,
+            radii_dict,
+            edges_arr,
+            node2verts,
+            soma=soma,
+            radius_key=radius_estimators[0],
+            mesh_vertices=mesh_vertices,
+            fat_factor=collapse_soma_radius_factor,
+            near_factor=collapse_soma_dist_factor,
+        )
+
+    # -- global MST --
+    if len(nodes_arr) > 1 and edges_arr.size:
+        edges_mst = _build_mst(nodes_arr, edges_arr)
+    else:
+        edges_mst = edges_arr
+
+    if verbose:
+        dt = time.perf_counter() - _t0
+        print(
+            f"[skeliner] done: {len(nodes_arr)} nodes, "
+            f"{edges_mst.shape[0]} edges ({dt:.2f} s)"
+        )
+
+    ntype = np.zeros(len(nodes_arr), np.int8)
+    ntype[0] = 1
+
+    return Skeleton(
+        nodes=nodes_arr,
+        radii=radii_dict,
+        edges=edges_mst,
+        ntype=ntype,
+        soma=soma,
+        node2verts=node2verts,
+        vert2node=vert2node,
+        meta={
+            "skeliner_version": _SKELINER_VERSION,
+            "skeletonized_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            ),
+            "unit": unit,
+            "id": id,
+        },
+    )
+
+
 # -----------------------------------------------------------------------------
 #  Skeletonization Public API
 # -----------------------------------------------------------------------------
@@ -475,6 +921,8 @@ def _make_nodes(
 
 def skeletonize(
     mesh: trimesh.Trimesh,
+    # --- preprocessing track ---
+    components: MeshComponents | None = None,
     # --- radius estimation ---
     radius_estimators: list[str] = ["median", "mean", "trim"],
     # --- soma detection ---
@@ -562,7 +1010,42 @@ def skeletonize(
         The (acyclic) skeleton with vertex 0 at the soma centroid.
     """
     # ------------------------------------------------------------------
-    #  helpers for verbose timing
+    #  Dispatch: preprocessing track if components are provided
+    # ------------------------------------------------------------------
+    if components is not None:
+        return _skeletonize_preproc(
+            mesh,
+            components,
+            radius_estimators=radius_estimators,
+            geodesic_step_size=geodesic_step_size,
+            geodesic_shell_count=geodesic_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=max_shell_width_factor,
+            split_elongated_shells=split_elongated_shells,
+            split_aspect_thr=split_aspect_thr,
+            split_min_shell_vertices=(
+                split_min_shell_vertices
+            ),
+            split_max_vertices_per_slice=(
+                split_max_vertices_per_slice
+            ),
+            merge_nodes_overlap_fraction=(
+                merge_nodes_overlap_fraction
+            ),
+            collapse_soma=collapse_soma,
+            collapse_soma_dist_factor=(
+                collapse_soma_dist_factor
+            ),
+            collapse_soma_radius_factor=(
+                collapse_soma_radius_factor
+            ),
+            unit=unit,
+            id=id,
+            verbose=verbose,
+        )
+
+    # ------------------------------------------------------------------
+    #  Direct track: helpers for verbose timing
     # ------------------------------------------------------------------
     if verbose:
         _global_start = time.perf_counter()
@@ -634,17 +1117,10 @@ def skeletonize(
                 mesh, axis=soma_init_guess_axis, mode=soma_init_guess_mode
             )
 
-        avg_edge = float(mesh.edges_unique_length.mean())
-        soma = Soma.from_sphere(
-            mesh_vertices[seed_vid],
-            radius=avg_edge,
-            verts=np.asarray([int(seed_vid)], dtype=np.int64),
-        )
-
         all_shells = _bin_geodesic_shells(
             mesh,
             gsurf,
-            soma=soma,
+            seed_vid=seed_vid,
             step_size=geodesic_step_size,
             target_shell_count=geodesic_shell_count,
             min_shell_vertices=min_shell_vertices,
