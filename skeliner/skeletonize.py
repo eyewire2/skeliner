@@ -947,8 +947,7 @@ def _skeletonize_preproc(
                 gsurf,
                 neurite_verts,
                 seed_vid=seed_vid,
-                soma_verts=soma_verts_set,
-                radius_estimators=radius_estimators,
+                    radius_estimators=radius_estimators,
                 merge_nested=False,
                 step_size=geodesic_step_size,
                 target_shell_count=geodesic_shell_count,
@@ -1096,9 +1095,10 @@ def _skeletonize_direct(
     soma_radius_percentile_threshold: float = 99.9,
     soma_radius_distance_factor: float = 4,
     soma_min_nodes: int = 3,
-    # -- for post-skeletonization soma detection only--
-    soma_init_guess_axis: str = "z",  # "x" | "y" | "z"
-    soma_init_guess_mode: str = "min",  # "min" | "max"
+    # -- soma seed heuristic for the geodesic origin --
+    soma_init_guess: str | None = None,  # "nucleus" | "<axis>-<mode>"
+    soma_init_guess_axis: str = "z",  # legacy, when soma_init_guess is None
+    soma_init_guess_mode: str = "min",  # legacy, when soma_init_guess is None
     # --- geodesic binning ---
     geodesic_step_size: float | None = None,
     geodesic_shell_count: int = 1000,  # higher = more bins, smaller bin size
@@ -1163,16 +1163,40 @@ def _skeletonize_direct(
     with _timed("↳  bin surface vertices by geodesic distance", verbose=verbose):
         mesh_vertices = mesh.vertices.view(np.ndarray)
 
-        # pseudo-random soma seed point for kick-starting the binning
+        # -- resolve soma_init_guess → soma_seed_point ----
+        if (
+            soma_seed_point is None
+            and soma_init_guess is not None
+        ):
+            if soma_init_guess == "nucleus":
+                from .pre import find_nucleus_center
+
+                nuc = find_nucleus_center(
+                    mesh, verbose=verbose
+                )
+                if nuc is not None:
+                    soma_seed_point = nuc["center"]
+            elif "-" in soma_init_guess:
+                ax, md = soma_init_guess.split("-", 1)
+                soma_init_guess_axis = ax
+                soma_init_guess_mode = md
+
+        # -- pick seed vertex -----------------------------
         if soma_seed_point is not None:
             seed_vid = int(
                 np.argmin(
-                    np.linalg.norm(mesh_vertices - np.asarray(soma_seed_point), axis=1)
+                    np.linalg.norm(
+                        mesh_vertices
+                        - np.asarray(soma_seed_point),
+                        axis=1,
+                    )
                 )
             )
         else:
             seed_vid = _extreme_vertex(
-                mesh, axis=soma_init_guess_axis, mode=soma_init_guess_mode
+                mesh,
+                axis=soma_init_guess_axis,
+                mode=soma_init_guess_mode,
             )
 
         all_shells = _bin_geodesic_shells(
@@ -1364,9 +1388,10 @@ def skeletonize(
     soma_radius_percentile_threshold: float = 99.9,
     soma_radius_distance_factor: float = 4,
     soma_min_nodes: int = 3,
-    # -- for post-skeletonization soma detection only--
-    soma_init_guess_axis: str = "z",  # "x" | "y" | "z"
-    soma_init_guess_mode: str = "min",  # "min" | "max"
+    # -- soma seed heuristic for the geodesic origin --
+    soma_init_guess: str | None = None,  # "nucleus" | "<axis>-<mode>"
+    soma_init_guess_axis: str = "z",  # legacy, when soma_init_guess is None
+    soma_init_guess_mode: str = "min",  # legacy, when soma_init_guess is None
     # --- geodesic binning ---
     geodesic_step_size: float | None = None,
     geodesic_shell_count: int = 1000,  # higher = more bins, smaller bin size
@@ -1469,6 +1494,7 @@ def skeletonize(
         soma_radius_percentile_threshold=soma_radius_percentile_threshold,
         soma_radius_distance_factor=soma_radius_distance_factor,
         soma_min_nodes=soma_min_nodes,
+        soma_init_guess=soma_init_guess,
         soma_init_guess_axis=soma_init_guess_axis,
         soma_init_guess_mode=soma_init_guess_mode,
         geodesic_step_size=geodesic_step_size,
