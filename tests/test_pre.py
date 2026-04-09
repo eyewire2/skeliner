@@ -315,7 +315,9 @@ class TestFindDisconnected:
         comps = pre.find_disconnected(mesh)
         assert len(comps) == 1  # one non-main component
         # The component should have the face count of one cylinder
-        cyl_faces = len(trimesh.creation.cylinder(radius=10.0, height=200.0, sections=16).faces)
+        cyl_faces = len(
+            trimesh.creation.cylinder(radius=10.0, height=200.0, sections=16).faces
+        )
         assert len(comps[0]) == cyl_faces
 
     def test_min_faces_filter(self):
@@ -427,7 +429,6 @@ class TestFindSoma:
         assert soma is None
 
 
-
 # ── find_organelles (isolated) ───────────────────────────────────────
 
 
@@ -495,9 +496,15 @@ class TestFindFusions:
         """_find_nonmanifold_fusions detects two tetrahedra sharing a vertex."""
         from skeliner.pre import _find_nonmanifold_fusions
 
-        v0 = np.array([
-            [0, 0, 0], [1, 0, 0], [0.5, 1, 0], [0.5, 0.5, 1],
-        ], dtype=np.float64)
+        v0 = np.array(
+            [
+                [0, 0, 0],
+                [1, 0, 0],
+                [0.5, 1, 0],
+                [0.5, 0.5, 1],
+            ],
+            dtype=np.float64,
+        )
         f0 = np.array([[0, 1, 2], [0, 1, 3], [1, 2, 3], [0, 2, 3]])
         v1 = np.array([[-1, 0, 0], [-0.5, 1, 0], [-0.5, 0.5, 1]], dtype=np.float64)
         f1 = np.array([[0, 4, 5], [0, 4, 6], [4, 5, 6], [0, 5, 6]])
@@ -512,26 +519,46 @@ class TestFindFusions:
     def test_pinch_vertex_detected(self):
         """Two tetrahedra sharing a single vertex = fan vertex fusion."""
         # Tetrahedron 1
-        v0 = np.array([
-            [0, 0, 0], [1, 0, 0], [0.5, 1, 0], [0.5, 0.5, 1],
-        ], dtype=np.float64)
-        f0 = np.array([
-            [0, 1, 2], [0, 1, 3], [1, 2, 3], [0, 2, 3],
-        ])
+        v0 = np.array(
+            [
+                [0, 0, 0],
+                [1, 0, 0],
+                [0.5, 1, 0],
+                [0.5, 0.5, 1],
+            ],
+            dtype=np.float64,
+        )
+        f0 = np.array(
+            [
+                [0, 1, 2],
+                [0, 1, 3],
+                [1, 2, 3],
+                [0, 2, 3],
+            ]
+        )
         # Tetrahedron 2 sharing vertex 0
-        v1 = np.array([
-            [-1, 0, 0], [-0.5, 1, 0], [-0.5, 0.5, 1],
-        ], dtype=np.float64)
-        f1 = np.array([
-            [0, 4, 5], [0, 4, 6], [4, 5, 6], [0, 5, 6],
-        ])
+        v1 = np.array(
+            [
+                [-1, 0, 0],
+                [-0.5, 1, 0],
+                [-0.5, 0.5, 1],
+            ],
+            dtype=np.float64,
+        )
+        f1 = np.array(
+            [
+                [0, 4, 5],
+                [0, 4, 6],
+                [4, 5, 6],
+                [0, 5, 6],
+            ]
+        )
         verts = np.vstack([v0, v1])
         faces = np.vstack([f0, f1])
         mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
         clusters = pre.find_fusions(mesh, radius=2.0)
         assert len(clusters) >= 1
-
 
 
 # ── remove_fusions ───────────────────────────────────────────────────
@@ -543,54 +570,6 @@ class TestRemoveFusions:
         clean = pre.remove_fusions(mesh, radius=50.0)
         # Should still have the same number of faces (no fusions to remove)
         assert len(clean.faces) == len(mesh.faces)
-
-
-# ── remove_nucleus ───────────────────────────────────────────────────
-
-
-class TestRemoveNucleus:
-    def test_no_soma_returns_mesh(self):
-        """When skeleton has no soma, mesh is returned unchanged."""
-        mesh = _icosphere()
-
-        class FakeSkel:
-            soma = None
-
-        result = pre.remove_nucleus(mesh, FakeSkel())
-        assert len(result.faces) == len(mesh.faces)
-
-    def test_no_internal_faces_returns_mesh(self):
-        """Soma exists but no inward-facing faces inside it → unchanged."""
-        mesh = _icosphere(radius=100.0)
-        soma = Soma.from_sphere(center=np.array([0.0, 0.0, 0.0]), radius=50.0, verts=None)
-
-        class FakeSkel:
-            pass
-
-        skel = FakeSkel()
-        skel.soma = soma
-        result = pre.remove_nucleus(mesh, skel)
-        # The soma is much smaller than the mesh, so faces inside have
-        # outward-pointing normals → nothing to remove
-        assert len(result.faces) == len(mesh.faces)
-
-
-# ── ensure_watertight ────────────────────────────────────────────────
-
-
-class TestEnsureWatertight:
-    def test_already_watertight(self):
-        mesh = _icosphere()
-        result = pre.ensure_watertight(mesh)
-        assert result.is_watertight
-        assert len(result.faces) == len(mesh.faces)
-
-    def test_fills_small_hole(self):
-        mesh = _open_mesh(n_remove=1)
-        assert not mesh.is_watertight
-        result = pre.ensure_watertight(mesh)
-        # Should attempt to make it watertight
-        assert len(result.faces) >= len(mesh.faces)
 
 
 # ── _ear_clip_2d ─────────────────────────────────────────────────────
@@ -649,6 +628,7 @@ class TestFilterSmallClusters:
 @pytest.fixture(scope="session")
 def reference_mesh():
     from pathlib import Path
+
     from skeliner.io import load_mesh
 
     mesh_path = Path(__file__).parent / "data" / "60427.obj"

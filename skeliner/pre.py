@@ -32,7 +32,6 @@ __all__ = [
     "find_parallel_patches",
     "find_soma_via_ring_cutoff",
     "preprocess",
-    "PreprocessResult",
     "remove_fins",
     "remove_fragments",
     "remove_fusions",
@@ -7631,16 +7630,6 @@ def compact_mesh(
 # -----------------------------------------------------------------------------
 # High-level preprocessing pipeline
 # -----------------------------------------------------------------------------
-from dataclasses import dataclass, field
-
-
-@dataclass
-class PreprocessResult:
-    """Result of :func:`preprocess` — cleaned mesh + break_up_mesh output."""
-
-    mesh: trimesh.Trimesh
-    components: MeshComponents
-    mesh_stats: MeshStats | None = None
 
 
 def preprocess(
@@ -7648,7 +7637,7 @@ def preprocess(
     *,
     compact: bool = False,
     verbose: bool = False,
-) -> PreprocessResult:
+) -> tuple[trimesh.Trimesh, MeshComponents]:
     """Run the full preprocessing pipeline in one call.
 
     Pipeline order:
@@ -7678,9 +7667,11 @@ def preprocess(
 
     Returns
     -------
-    PreprocessResult
-        Cleaned mesh, mesh components, and the :class:`MeshStats`
-        threaded through the pipeline.
+    mesh : trimesh.Trimesh
+        Cleaned mesh (gaps stitched, fusions removed, optionally
+        compacted).
+    components : MeshComponents
+        Classified pieces: soma, organelles, neurites, discarded.
     """
     # 1. Parallel patches
     patches = find_parallel_patches(mesh, verbose=verbose)
@@ -7729,15 +7720,8 @@ def preprocess(
     # 7. Compact (optional — remaps everything in MeshComponents)
     if compact:
         mesh, components = compact_mesh(mesh, components=components, verbose=verbose)
-        # Compaction invalidates mesh_stats; drop the stale reference
-        # so callers don't accidentally reuse it against the new mesh.
-        mesh_stats = None
 
-    return PreprocessResult(
-        mesh=mesh,
-        components=components,
-        mesh_stats=mesh_stats,
-    )
+    return mesh, components
 
 
 # =====================================================================
