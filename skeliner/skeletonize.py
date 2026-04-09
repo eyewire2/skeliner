@@ -1086,10 +1086,8 @@ def _skeletonize_preproc(
 # -----------------------------------------------------------------------------
 
 
-def skeletonize(
+def _skeletonize_direct(
     mesh: trimesh.Trimesh,
-    # --- preprocessing track ---
-    components: MeshComponents | None = None,
     # --- radius estimation ---
     radius_estimators: list[str] = ["median", "mean", "trim"],
     # --- soma detection ---
@@ -1131,70 +1129,12 @@ def skeletonize(
     verbose: bool = False,
     postprocess: bool = True,
 ) -> Skeleton:
-    """Compute a center-line skeleton with radii of a neuronal mesh .
+    """Direct track: full pipeline from raw mesh.
 
-    The algorithm proceeds in eight conceptual stages:
-
-      1. geodesic shell binning of every connected surface patch
-      2. cluster each shell ⇒ interior node with local radius
-      3. optional post-skeletonization soma detection
-      4. project mesh edges ⇒ graph edges between nodes
-      5. optional collapsing of soma-like/fat nodes near the centroid
-      6. optional bridging of disconnected components
-      7. minimum-spanning tree (global) to remove microscopic cycles
-      8. optional pruning of tiny neurites sprouting directly from the soma
-
-
-    Parameters
-    ----------
-    mesh : trimesh.Trimesh
-        Closed surface mesh of the neuron in *arbitrary* units.
-    target_shell_count : int, default ``500``
-        Rough number of geodesic shells to produce per component.  The actual
-        shell width is adapted to mesh resolution.
-    bridge_gaps : bool, default ``True``
-        If the mesh contains disconnected islands (breaks, imaging artefacts),
-        attempt to connect them back to the soma with synthetic edges.
-    bridge_k : int, default ``1``
-        How many candidate node pairs to test when bridging a foreign island.
-    prune_tiny_neurites : bool, default ``True``
-        Remove sub-trees with fewer than ``min_branch_nodes`` that attach
-        *directly* to the soma and do not extend beyond
-        ``min_branch_extent_factor × r_soma``.
-    collapse_soma : bool, default ``True``
-        Merge centroids that sit well inside the soma or have very fat radii.
-    verbose : bool, default ``False``
-        Print progress messages.
-    postprocess : bool, default ``True``
-        When ``False`` the optional post-processing stages (soma detection,
-        near-soma merging, gap bridging, MST rebuild, neurite pruning) are
-        skipped so that you can rerun them later via the corresponding
-        :mod:`skeliner.post` helpers.
-
-    Returns
-    -------
-    Skeleton
-        The (acyclic) skeleton with vertex 0 at the soma centroid.
+    Stages: surface graph, geodesic binning, node creation,
+    soma detection, edge mapping, near-soma collapse, gap
+    bridging, MST, neurite pruning.
     """
-    # ------------------------------------------------------------------
-    #  Dispatch: preprocessing track if components are provided
-    # ------------------------------------------------------------------
-    if components is not None:
-        return _skeletonize_preproc(
-            mesh,
-            components,
-            radius_estimators=radius_estimators,
-            geodesic_step_size=geodesic_step_size,
-            geodesic_shell_count=geodesic_shell_count,
-            min_shell_vertices=min_shell_vertices,
-            max_shell_width_factor=max_shell_width_factor,
-            soma_init_guess_axis=soma_init_guess_axis,
-            soma_init_guess_mode=soma_init_guess_mode,
-            unit=unit,
-            id=id,
-            verbose=verbose,
-        )
-
     # ------------------------------------------------------------------
     #  Direct track: helpers for verbose timing
     # ------------------------------------------------------------------
@@ -1409,4 +1349,149 @@ def skeletonize(
             "unit": unit,
             "id": id,
         },
+    )
+
+
+def skeletonize(
+    mesh: trimesh.Trimesh,
+    # --- preprocessing track ---
+    components: MeshComponents | None = None,
+    # --- radius estimation ---
+    radius_estimators: list[str] = ["median", "mean", "trim"],
+    # --- soma detection ---
+    detect_soma: bool = True,
+    soma_seed_point: np.ndarray | list | tuple | None = None,
+    soma_radius_percentile_threshold: float = 99.9,
+    soma_radius_distance_factor: float = 4,
+    soma_min_nodes: int = 3,
+    # -- for post-skeletonization soma detection only--
+    soma_init_guess_axis: str = "z",  # "x" | "y" | "z"
+    soma_init_guess_mode: str = "min",  # "min" | "max"
+    # --- geodesic binning ---
+    geodesic_step_size: float | None = None,
+    geodesic_shell_count: int = 1000,  # higher = more bins, smaller bin size
+    min_shell_vertices: int = 6,
+    max_shell_width_factor: int = 50,
+    split_elongated_shells: bool = False,
+    split_aspect_thr: float = 3.0,  # λ1 / λ2
+    split_min_shell_vertices: int = 15,
+    split_max_vertices_per_slice: int | None = None,
+    merge_nodes_overlap_fraction: float = 0.8,  # merge nested nodes if inside_frac ≥ this
+    # --- bridging disconnected patches ---
+    bridge_gaps: bool = True,
+    bridge_max_factor: float | None = None,
+    bridge_recalc_after: int | None = None,
+    # -- post‑processing --
+    # --- collapse soma-like nodes ---
+    collapse_soma: bool = True,
+    collapse_soma_dist_factor: float = 1.2,
+    collapse_soma_radius_factor: float = 0.2,
+    # --- prune tiny neurites ---
+    prune_tiny_neurites: bool = True,
+    prune_tip_extent_factor: float = 1.2,  # tip twigs (<–× r_soma)
+    prune_stem_extent_factor: float = 3.0,  # stems touching soma
+    prune_drop_single_node_branches: bool = True,
+    # --- misc ---
+    unit: str = "nm",
+    id: str | int | None = None,
+    verbose: bool = False,
+    postprocess: bool = True,
+) -> Skeleton:
+    """Compute a center-line skeleton with radii of a neuronal mesh .
+
+    The algorithm proceeds in eight conceptual stages:
+
+      1. geodesic shell binning of every connected surface patch
+      2. cluster each shell ⇒ interior node with local radius
+      3. optional post-skeletonization soma detection
+      4. project mesh edges ⇒ graph edges between nodes
+      5. optional collapsing of soma-like/fat nodes near the centroid
+      6. optional bridging of disconnected components
+      7. minimum-spanning tree (global) to remove microscopic cycles
+      8. optional pruning of tiny neurites sprouting directly from the soma
+
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Closed surface mesh of the neuron in *arbitrary* units.
+    target_shell_count : int, default ``500``
+        Rough number of geodesic shells to produce per component.  The actual
+        shell width is adapted to mesh resolution.
+    bridge_gaps : bool, default ``True``
+        If the mesh contains disconnected islands (breaks, imaging artefacts),
+        attempt to connect them back to the soma with synthetic edges.
+    bridge_k : int, default ``1``
+        How many candidate node pairs to test when bridging a foreign island.
+    prune_tiny_neurites : bool, default ``True``
+        Remove sub-trees with fewer than ``min_branch_nodes`` that attach
+        *directly* to the soma and do not extend beyond
+        ``min_branch_extent_factor × r_soma``.
+    collapse_soma : bool, default ``True``
+        Merge centroids that sit well inside the soma or have very fat radii.
+    verbose : bool, default ``False``
+        Print progress messages.
+    postprocess : bool, default ``True``
+        When ``False`` the optional post-processing stages (soma detection,
+        near-soma merging, gap bridging, MST rebuild, neurite pruning) are
+        skipped so that you can rerun them later via the corresponding
+        :mod:`skeliner.post` helpers.
+
+    Returns
+    -------
+    Skeleton
+        The (acyclic) skeleton with vertex 0 at the soma centroid.
+    """
+    # ------------------------------------------------------------------
+    #  Dispatch to the appropriate track
+    # ------------------------------------------------------------------
+    if components is not None:
+        return _skeletonize_preproc(
+            mesh,
+            components,
+            radius_estimators=radius_estimators,
+            geodesic_step_size=geodesic_step_size,
+            geodesic_shell_count=geodesic_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=max_shell_width_factor,
+            soma_init_guess_axis=soma_init_guess_axis,
+            soma_init_guess_mode=soma_init_guess_mode,
+            unit=unit,
+            id=id,
+            verbose=verbose,
+        )
+
+    return _skeletonize_direct(
+        mesh,
+        radius_estimators=radius_estimators,
+        detect_soma=detect_soma,
+        soma_seed_point=soma_seed_point,
+        soma_radius_percentile_threshold=soma_radius_percentile_threshold,
+        soma_radius_distance_factor=soma_radius_distance_factor,
+        soma_min_nodes=soma_min_nodes,
+        soma_init_guess_axis=soma_init_guess_axis,
+        soma_init_guess_mode=soma_init_guess_mode,
+        geodesic_step_size=geodesic_step_size,
+        geodesic_shell_count=geodesic_shell_count,
+        min_shell_vertices=min_shell_vertices,
+        max_shell_width_factor=max_shell_width_factor,
+        split_elongated_shells=split_elongated_shells,
+        split_aspect_thr=split_aspect_thr,
+        split_min_shell_vertices=split_min_shell_vertices,
+        split_max_vertices_per_slice=split_max_vertices_per_slice,
+        merge_nodes_overlap_fraction=merge_nodes_overlap_fraction,
+        bridge_gaps=bridge_gaps,
+        bridge_max_factor=bridge_max_factor,
+        bridge_recalc_after=bridge_recalc_after,
+        collapse_soma=collapse_soma,
+        collapse_soma_dist_factor=collapse_soma_dist_factor,
+        collapse_soma_radius_factor=collapse_soma_radius_factor,
+        prune_tiny_neurites=prune_tiny_neurites,
+        prune_tip_extent_factor=prune_tip_extent_factor,
+        prune_stem_extent_factor=prune_stem_extent_factor,
+        prune_drop_single_node_branches=prune_drop_single_node_branches,
+        unit=unit,
+        id=id,
+        verbose=verbose,
+        postprocess=postprocess,
     )
