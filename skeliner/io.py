@@ -22,16 +22,32 @@ from .dataclass import (
 __all__ = [
     "load_mesh",
     "save_mesh",
+    "load_skeleton",
+    "save_skeleton",
     "load_skeleton_swc",
     "save_skeleton_swc",
     "load_skeleton_npz",
     "save_skeleton_npz",
-    "save_soma_npz",
+    "load_soma",
+    "save_soma",
     "load_soma_npz",
-    "save_organelles_npz",
+    "save_soma_npz",
+    "load_organelles",
+    "save_organelles",
     "load_organelles_npz",
-    "save_mesh_stats_npz",
+    "save_organelles_npz",
+    "load_mesh_stats",
+    "save_mesh_stats",
     "load_mesh_stats_npz",
+    "save_mesh_stats_npz",
+    "load_neurites",
+    "save_neurites",
+    "load_discarded",
+    "save_discarded",
+    "load_components",
+    "save_components",
+    "load_contact_sites",
+    "save_contact_sites",
 ]
 
 _META_KV = re.compile(r"#\s*([^:]+)\s*:\s*(.+)")  #  key: value
@@ -1037,6 +1053,69 @@ def _deprecated_alias(old_name: str, new_func):
 
     return wrapper
 
+
+def save_skeleton(
+    skeleton, path: str | Path, **kwargs
+) -> None:
+    """Save a skeleton to ``.swc`` or ``.npz``.
+
+    The format is inferred from the file extension.
+    Extra *kwargs* are forwarded to the format-specific
+    saver (e.g. ``scale=`` for SWC).
+    """
+    path = Path(path)
+    ext = path.suffix.lower()
+    if ext == ".swc":
+        return save_skeleton_swc(skeleton, path, **kwargs)
+    if ext == ".npz":
+        return save_skeleton_npz(skeleton, path, **kwargs)
+    raise ValueError(
+        f"Cannot infer skeleton format from "
+        f"extension '{ext}'. Use .swc or .npz."
+    )
+
+
+def load_skeleton(
+    path: str | Path, **kwargs
+) -> "Skeleton":
+    """Load a skeleton from ``.swc`` or ``.npz``.
+
+    The format is inferred from the file extension.
+    Extra *kwargs* are forwarded to the format-specific
+    loader (e.g. ``scale=`` for SWC).
+    """
+    path = Path(path)
+    ext = path.suffix.lower()
+    if ext == ".swc":
+        return load_skeleton_swc(path, **kwargs)
+    if ext == ".npz":
+        return load_skeleton_npz(path, **kwargs)
+    raise ValueError(
+        f"Cannot infer skeleton format from "
+        f"extension '{ext}'. Use .swc or .npz."
+    )
+
+
+# -- short aliases (drop the _npz / _swc suffix) ----------
+
+load_soma = load_soma_npz
+load_organelles = load_organelles_npz
+load_mesh_stats = load_mesh_stats_npz
+load_neurites = load_neurites_npz
+load_discarded = load_discarded_npz
+load_components = load_components_npz
+load_contact_sites = load_contact_sites_npz
+
+save_soma = save_soma_npz
+save_organelles = save_organelles_npz
+save_mesh_stats = save_mesh_stats_npz
+save_neurites = save_neurites_npz
+save_discarded = save_discarded_npz
+save_components = save_components_npz
+save_contact_sites = save_contact_sites_npz
+
+
+# -- deprecated aliases ------------------------------------
 
 load_swc = _deprecated_alias("load_swc", load_skeleton_swc)
 to_swc = _deprecated_alias("to_swc", save_skeleton_swc)
