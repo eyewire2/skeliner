@@ -23,19 +23,23 @@ __all__ = [
     "compute_mesh_stats",
     "fill_holes",
     "find_disconnected",
+    "find_fragments",
+    "find_fusions",
     "find_gaps",
     "find_holes",
     "find_nucleus_center",
-    "find_soma_via_neurite_exclusion",
+    "find_organelles",
+    "find_parallel_patches",
     "find_soma_via_ring_cutoff",
-    "find_soma_via_z_contour",
     "preprocess",
     "PreprocessResult",
     "remove_fins",
     "remove_fragments",
     "remove_fusions",
+    "remove_gaps",
     "remove_islands",
     "remove_organelles",
+    "remove_parallel_patches",
 ]
 
 
@@ -2664,9 +2668,7 @@ def break_up_mesh(
 
     # --- refit soma if we absorbed extra verts ---
     if soma is not None and extra_soma_vi:
-        all_soma_vi = np.union1d(
-            soma.verts, np.array(extra_soma_vi, dtype=np.intp)
-        )
+        all_soma_vi = np.union1d(soma.verts, np.array(extra_soma_vi, dtype=np.intp))
         prev_nucleus = soma.nucleus
         soma = Soma.fit(verts[all_soma_vi], verts=all_soma_vi)
         soma.nucleus = prev_nucleus
@@ -2689,9 +2691,7 @@ def break_up_mesh(
         n_disc_faces = sum(len(c) for c in discarded)
         thresh = len(neurites[-1]) if neurites else 0
         soma_msg = (
-            f"soma {len(soma.verts):,} verts, "
-            if soma is not None
-            else "no soma, "
+            f"soma {len(soma.verts):,} verts, " if soma is not None else "no soma, "
         )
         print(
             f"break_up_mesh: {len(neurites)} neurites, "
@@ -4450,49 +4450,6 @@ def remove_fragments(
     return result
 
 
-def ensure_watertight(
-    mesh: trimesh.Trimesh,
-    *,
-    verbose: bool = False,
-) -> trimesh.Trimesh:
-    """Remove fragments, fill holes, and verify watertightness.
-
-    Chains ``remove_fragments`` → ``fill_holes``, iterating until
-    stable.
-
-    Parameters
-    ----------
-    mesh : trimesh.Trimesh
-        Input mesh (typically after ``remove_organelles``).
-    verbose : bool, default False
-        Print progress.
-
-    Returns
-    -------
-    trimesh.Trimesh
-        Watertight mesh (or best-effort if non-manifold edges remain).
-    """
-    result = remove_fragments(mesh, verbose=verbose)
-
-    # Fill holes iteratively — filling can create new fragments
-    for iteration in range(10):
-        prev_faces = len(result.faces)
-        result = fill_holes(result, verbose=verbose)
-        result = remove_fragments(result, verbose=verbose)
-        if len(result.faces) == prev_faces:
-            break
-        if verbose:
-            print(
-                f"[skeliner.pre] Iteration {iteration + 1}: {len(result.faces):,} faces"
-            )
-
-    if verbose:
-        wt = result.is_watertight
-        print(f"[skeliner.pre] Watertight: {wt}")
-
-    return result
-
-
 def _outward_dot(
     mesh: trimesh.Trimesh,
     radius: float,
@@ -6119,164 +6076,6 @@ def remove_organelles(
         print(
             f"[skeliner.pre] Result: {len(clean.faces):,} faces "
             f"(removed {organelles.mask.sum():,} faces)"
-        )
-
-    return clean
-
-
-def remove_nucleus(
-    mesh: trimesh.Trimesh,
-    skeleton,
-    *,
-    soma_inside_frac: float = 0.9,
-    min_nucleus_faces: int = 100,
-    verbose: bool = False,
-) -> trimesh.Trimesh:
-    """Remove the nucleus membrane from inside the soma.
-
-    Uses the soma ellipsoid from a skeleton to identify the nucleus —
-    a large internal shell inside the soma that ``remove_organelles``
-    cannot detect because it resembles a normal surface.
-
-    Algorithm:
-
-    1. Find faces inside the soma ellipsoid.
-    2. Classify each face as outward-facing or inward-facing relative
-       to the soma center.
-    3. Cut the face-adjacency graph at outward/inward transitions.
-    4. The largest inward-facing component is the nucleus — remove it
-       along with any other inward components above *min_nucleus_faces*.
-
-    Intended pipeline::
-
-        clean = pre.remove_organelles(raw_mesh)
-        skel = skeliner.skeletonize(clean)
-        final = pre.remove_nucleus(clean, skel)
-
-    Parameters
-    ----------
-    mesh : trimesh.Trimesh
-        Input mesh (typically after ``remove_organelles``).
-    skeleton : Skeleton
-        Skeleton with soma detection (from ``skeletonize``).
-    soma_inside_frac : float, default 0.9
-        Scale factor for the soma ellipsoid boundary test.
-    min_nucleus_faces : int, default 100
-        Only remove inward components with at least this many faces.
-    verbose : bool, default False
-        Print summary.
-
-    Returns
-    -------
-    trimesh.Trimesh
-        Mesh with nucleus membrane removed.
-    """
-    soma = skeleton.soma
-    if soma is None:
-        if verbose:
-            print("[skeliner.pre] No soma detected — skipping nucleus removal")
-        return mesh
-
-    centroids = mesh.triangles_center
-    normals = mesh.face_normals
-    n_faces = len(mesh.faces)
-
-    # Step 1: faces inside soma ellipsoid (skip degenerate faces)
-    good = _non_degenerate(mesh.faces)
-    inside = soma.contains(centroids, inside_frac=soma_inside_frac) & good
-    inside_idx = np.where(inside)[0]
-
-    if len(inside_idx) == 0:
-        if verbose:
-            print("[skeliner.pre] No faces inside soma ellipsoid")
-        return mesh
-
-    # Step 2: classify outward vs inward relative to soma center
-    dir_from_soma = centroids[inside] - soma.center
-    nrm = np.linalg.norm(dir_from_soma, axis=1, keepdims=True)
-    dir_from_soma /= np.maximum(nrm, 1e-10)
-    soma_dots = np.einsum("ij,ij->i", normals[inside], dir_from_soma)
-    is_outward = soma_dots >= 0
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Faces inside soma: {len(inside_idx):,} "
-            f"(outward: {is_outward.sum():,}, inward: {(~is_outward).sum():,})"
-        )
-
-    # Step 3: build face graph inside soma, cut at outward/inward transitions
-    inside_set = set(int(fi) for fi in inside_idx)
-    fi_remap = {int(fi): i for i, fi in enumerate(inside_idx)}
-
-    edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi in inside_idx:
-        face = mesh.faces[fi]
-        for i in range(3):
-            e = (
-                min(int(face[i]), int(face[(i + 1) % 3])),
-                max(int(face[i]), int(face[(i + 1) % 3])),
-            )
-            edge_to_faces[e].append(int(fi))
-
-    edges: set[tuple[int, int]] = set()
-    for fi in inside_idx:
-        fi_int = int(fi)
-        local_i = fi_remap[fi_int]
-        face = mesh.faces[fi]
-        for i in range(3):
-            e = (
-                min(int(face[i]), int(face[(i + 1) % 3])),
-                max(int(face[i]), int(face[(i + 1) % 3])),
-            )
-            for nfi in edge_to_faces[e]:
-                if nfi != fi_int and nfi in inside_set:
-                    local_j = fi_remap[nfi]
-                    if is_outward[local_i] == is_outward[local_j]:
-                        a, b = min(local_i, local_j), max(local_i, local_j)
-                        edges.add((a, b))
-
-    g = ig.Graph(n=len(inside_idx), edges=list(edges), directed=False)
-    comps = g.connected_components()
-
-    # Step 4: collect large inward components = nucleus
-    nucleus_mask = np.zeros(n_faces, dtype=bool)
-    n_nucleus_comps = 0
-    n_small_inward = 0
-
-    for cl in comps:
-        if is_outward[cl[0]]:
-            continue
-        if len(cl) < min_nucleus_faces:
-            n_small_inward += 1
-            continue
-        for i in cl:
-            nucleus_mask[int(inside_idx[i])] = True
-        n_nucleus_comps += 1
-
-    n_nucleus = int(nucleus_mask.sum())
-    if verbose:
-        print(
-            f"[skeliner.pre] Nucleus: {n_nucleus_comps} component(s), "
-            f"{n_nucleus:,} faces"
-        )
-        if n_small_inward > 0:
-            print(
-                f"[skeliner.pre]   Skipped {n_small_inward} inward component(s) "
-                f"below min_nucleus_faces={min_nucleus_faces}"
-            )
-
-    if n_nucleus == 0:
-        if verbose:
-            print("[skeliner.pre] No nucleus found")
-        return mesh
-
-    keep = ~nucleus_mask
-    clean = _rebuild_mesh(mesh, keep)
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Result: {len(clean.faces):,} faces "
-            f"(removed {n_nucleus:,} nucleus faces)"
         )
 
     return clean
