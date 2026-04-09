@@ -28,6 +28,41 @@ __all__ = [
 
 
 # -----------------------------------------------------------------------------
+#  Verbose timing helper
+# -----------------------------------------------------------------------------
+
+
+@contextmanager
+def _timed(label: str, *, verbose: bool):
+    """Context manager printing  ``↳  label … N.NN s``.
+
+    Use the yielded ``log()`` callback for sub-messages::
+
+        with _timed("stage", verbose=True) as log:
+            log("detail 1")
+    """
+    if not verbose:
+        yield lambda *_: None
+        return
+
+    PAD = 47
+    print(f" {label:<{PAD}} …", end="", flush=True)
+    t0 = time.perf_counter()
+    _msgs: list[str] = []
+
+    def log(msg: str) -> None:
+        _msgs.append(str(msg))
+
+    try:
+        yield log
+    finally:
+        dt = time.perf_counter() - t0
+        print(f" {dt:.2f} s")
+        for m in _msgs:
+            print(f"      └─ {m}")
+
+
+# -----------------------------------------------------------------------------
 #  Graph helpers
 # -----------------------------------------------------------------------------
 
@@ -739,9 +774,6 @@ def _skeletonize_preproc(
     split_min_shell_vertices: int,
     split_max_vertices_per_slice: int | None,
     merge_nodes_overlap_fraction: float,
-    collapse_soma: bool,
-    collapse_soma_dist_factor: float,
-    collapse_soma_radius_factor: float,
     unit: str,
     id: str | int | None,
     verbose: bool,
@@ -765,13 +797,19 @@ def _skeletonize_preproc(
         )
 
     if verbose:
-        _t0 = time.perf_counter()
+        _global_start = time.perf_counter()
         print(
             f"[skeliner] preprocessing track "
-            f"({len(components.neurites)} neurites)"
+            f"({len(mesh.vertices):,} vertices, "
+            f"{len(mesh.faces):,} faces, "
+            f"{len(components.neurites)} neurites)"
         )
 
-    gsurf = _surface_graph(mesh)
+    with _timed(
+        "↳  build surface graph", verbose=verbose
+    ):
+        gsurf = _surface_graph(mesh)
+
     mesh_vertices = mesh.vertices.view(np.ndarray)
     soma_verts_set = (
         set(soma.verts.tolist())
@@ -779,117 +817,121 @@ def _skeletonize_preproc(
         else set()
     )
 
-    sub_skeletons = []
-    for i, face_idx in enumerate(components.neurites):
-        neurite_verts = np.unique(
-            mesh.faces[face_idx].ravel()
-        ).astype(np.int64)
+    with _timed(
+        "↳  skeletonize neurites",
+        verbose=verbose,
+    ) as log:
+        sub_skeletons = []
+        for i, face_idx in enumerate(
+            components.neurites
+        ):
+            neurite_verts = np.unique(
+                mesh.faces[face_idx].ravel()
+            ).astype(np.int64)
 
-        # seed: boundary vert closest to soma centre
-        boundary = (
-            np.intersect1d(neurite_verts, soma.verts)
-            if soma.verts is not None
-            else np.array([], dtype=np.int64)
-        )
-        if boundary.size:
-            seed_vid = int(
-                boundary[
-                    np.argmin(
-                        np.linalg.norm(
-                            mesh_vertices[boundary]
-                            - soma.center,
-                            axis=1,
-                        )
-                    )
-                ]
+            # seed: boundary vert closest to soma centre
+            boundary = (
+                np.intersect1d(neurite_verts, soma.verts)
+                if soma.verts is not None
+                else np.array([], dtype=np.int64)
             )
-        else:
-            seed_vid = int(
-                neurite_verts[
-                    np.argmin(
-                        np.linalg.norm(
-                            mesh_vertices[neurite_verts]
-                            - soma.center,
-                            axis=1,
+            if boundary.size:
+                seed_vid = int(
+                    boundary[
+                        np.argmin(
+                            np.linalg.norm(
+                                mesh_vertices[boundary]
+                                - soma.center,
+                                axis=1,
+                            )
                         )
-                    )
-                ]
+                    ]
+                )
+            else:
+                seed_vid = int(
+                    neurite_verts[
+                        np.argmin(
+                            np.linalg.norm(
+                                mesh_vertices[
+                                    neurite_verts
+                                ]
+                                - soma.center,
+                                axis=1,
+                            )
+                        )
+                    ]
+                )
+
+            sub = _skeletonize_component(
+                mesh,
+                gsurf,
+                neurite_verts,
+                seed_vid=seed_vid,
+                soma_verts=soma_verts_set,
+                radius_estimators=radius_estimators,
+                merge_nested=True,
+                merge_kwargs={
+                    "inside_frac": (
+                        merge_nodes_overlap_fraction
+                    ),
+                },
+                step_size=geodesic_step_size,
+                target_shell_count=geodesic_shell_count,
+                min_shell_vertices=min_shell_vertices,
+                max_shell_width_factor=(
+                    max_shell_width_factor
+                ),
+                split_elongated_shells=(
+                    split_elongated_shells
+                ),
+                split_aspect_thr=split_aspect_thr,
+                split_min_shell_vertices=(
+                    split_min_shell_vertices
+                ),
+                split_max_vertices_per_slice=(
+                    split_max_vertices_per_slice
+                ),
             )
-
-        sub = _skeletonize_component(
-            mesh,
-            gsurf,
-            neurite_verts,
-            seed_vid=seed_vid,
-            soma_verts=soma_verts_set,
-            radius_estimators=radius_estimators,
-            merge_nested=True,
-            merge_kwargs={
-                "inside_frac": merge_nodes_overlap_fraction,
-            },
-            step_size=geodesic_step_size,
-            target_shell_count=geodesic_shell_count,
-            min_shell_vertices=min_shell_vertices,
-            max_shell_width_factor=max_shell_width_factor,
-            split_elongated_shells=split_elongated_shells,
-            split_aspect_thr=split_aspect_thr,
-            split_min_shell_vertices=(
-                split_min_shell_vertices
-            ),
-            split_max_vertices_per_slice=(
-                split_max_vertices_per_slice
-            ),
-        )
-        sub_skeletons.append(sub)
-
-        if verbose:
-            n = sub[0].shape[0]
-            print(f"  neurite {i}: {n} nodes")
+            sub_skeletons.append(sub)
+            log(
+                f"neurite {i}: "
+                f"{len(neurite_verts):,} verts "
+                f"→ {sub[0].shape[0]} nodes"
+            )
 
     # -- stitch to soma --
-    (
-        nodes_arr,
-        radii_dict,
-        node2verts,
-        vert2node,
-        edges_arr,
-    ) = _stitch_to_soma(
-        sub_skeletons, soma, radius_estimators
-    )
-
-    # -- collapse near-soma nodes --
-    if collapse_soma and len(nodes_arr) > 1:
+    with _timed(
+        "↳  stitch neurites to soma", verbose=verbose
+    ):
         (
             nodes_arr,
             radii_dict,
             node2verts,
             vert2node,
             edges_arr,
-            soma,
-            _,
-        ) = _merge_near_soma_nodes(
-            nodes_arr,
-            radii_dict,
-            edges_arr,
-            node2verts,
-            soma=soma,
-            radius_key=radius_estimators[0],
-            mesh_vertices=mesh_vertices,
-            fat_factor=collapse_soma_radius_factor,
-            near_factor=collapse_soma_dist_factor,
+        ) = _stitch_to_soma(
+            sub_skeletons, soma, radius_estimators
         )
 
     # -- global MST --
-    if len(nodes_arr) > 1 and edges_arr.size:
-        edges_mst = _build_mst(nodes_arr, edges_arr)
-    else:
-        edges_mst = edges_arr
+    with _timed(
+        "↳  build global minimum-spanning tree",
+        verbose=verbose,
+    ):
+        if len(nodes_arr) > 1 and edges_arr.size:
+            edges_mst = _build_mst(nodes_arr, edges_arr)
+        else:
+            edges_mst = edges_arr
 
     if verbose:
-        dt = time.perf_counter() - _t0
+        total = time.perf_counter() - _global_start
         print(
-            f"[skeliner] done: {len(nodes_arr)} nodes, "
-            f"{edges_mst.shape[0]} edges ({dt:.2f} s)"
+            f"{'TOTAL':<49}"
+            f"… {total:.2f} s"
+        )
+        print(
+            f"({len(nodes_arr):,} nodes, "
+            f"{edges_mst.shape[0]:,} edges)"
         )
 
     ntype = np.zeros(len(nodes_arr), np.int8)
@@ -1032,13 +1074,6 @@ def skeletonize(
             merge_nodes_overlap_fraction=(
                 merge_nodes_overlap_fraction
             ),
-            collapse_soma=collapse_soma,
-            collapse_soma_dist_factor=(
-                collapse_soma_dist_factor
-            ),
-            collapse_soma_radius_factor=(
-                collapse_soma_radius_factor
-            ),
             unit=unit,
             id=id,
             verbose=verbose,
@@ -1064,40 +1099,7 @@ def skeletonize(
         prune_tiny_neurites = False
         run_mst = False
 
-    @contextmanager
-    def _timed(label: str, *, verbose: bool = verbose):  # keep the signature you like
-        """
-        Context manager that prints
-
-            ↳  <label padded to width> … <elapsed> s
-                └─ <sub-message 1>
-                └─ <sub-message 2>
-                …
-
-        Use the yielded `log()` callback to record any number of sub-messages.
-        """
-        if not verbose:
-            yield lambda *_: None
-            return
-
-        PAD = 47  # keeps the old alignment
-        print(f" {label:<{PAD}} …", end="", flush=True)
-        t0 = time.perf_counter()
-        _msgs: list[str] = []
-
-        def log(msg: str) -> None:
-            _msgs.append(str(msg))
-
-        try:
-            yield log  # the `with`-body gets this function
-        finally:
-            dt = time.perf_counter() - t0
-            print(f" {dt:.2f} s")  # finish first line
-
-            for m in _msgs:  # then all sub-messages, nicely indented
-                print(f"      └─ {m}")
-
-    # 0. soma vertices ---------------------------------------------------
+    # 0. build surface graph -----------------------------------------------
     with _timed("↳  build surface graph", verbose=verbose):
         gsurf = _surface_graph(mesh)
 
@@ -1145,7 +1147,7 @@ def skeletonize(
 
     # 3. soma detection (optional) -----------------------------------
     _t0 = time.perf_counter()
-    with _timed("↳  post-skeletonization soma detection") as log:
+    with _timed("↳  post-skeletonization soma detection", verbose=verbose) as log:
         (
             nodes_arr,
             radii_dict,
