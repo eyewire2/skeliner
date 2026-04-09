@@ -2,9 +2,10 @@ from importlib.metadata import PackageNotFoundError, version
 
 from . import batch, dx, io, pair, plot, post, pre
 from .dataclass import Skeleton, Soma, register_skeleton_methods
+from .plot import view3d
 from .plot.vis2d import projection as plot2d
 from .plot.vis2d import threeviews as plot3v
-from .plot import view3d
+from .pre import preprocess
 from .skeletonize import skeletonize
 
 try:
@@ -29,4 +30,5 @@ __all__ = [
     "pair",
     "pre",
     "plot",
+    "preprocess",
 ]

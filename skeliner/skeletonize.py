@@ -1054,6 +1054,7 @@ def _skeletonize_preproc(
             mi = edges_mst == root_nid
             edges_mst[m0] = root_nid
             edges_mst[mi] = 0
+            edges_mst = np.sort(edges_mst, axis=1)
             vert2node = rebuild_vert2node(node2verts)
         # placeholder soma at the root
         r0 = float(list(radii_dict.values())[0][0])
@@ -1422,50 +1423,44 @@ def skeletonize(
     verbose: bool = False,
     postprocess: bool = True,
 ) -> Skeleton:
-    """Compute a center-line skeleton with radii of a neuronal mesh .
+    """Compute a center-line skeleton with radii from a neuronal mesh.
 
-    The algorithm proceeds in eight conceptual stages:
+    Two tracks are available, selected by the *components* parameter:
 
-      1. geodesic shell binning of every connected surface patch
-      2. cluster each shell ⇒ interior node with local radius
-      3. optional post-skeletonization soma detection
-      4. project mesh edges ⇒ graph edges between nodes
-      5. optional collapsing of soma-like/fat nodes near the centroid
-      6. optional bridging of disconnected components
-      7. minimum-spanning tree (global) to remove microscopic cycles
-      8. optional pruning of tiny neurites sprouting directly from the soma
+    **Direct track** (``components=None``, the default):
+      Full pipeline — geodesic binning, post-skel soma detection,
+      gap bridging, MST, neurite pruning.  Works on any raw mesh.
 
+    **Preprocessing track** (``components=MeshComponents(...)``):
+      Per-neurite skeletonization using the soma and neurite
+      partition from :func:`~skeliner.pre.preprocess` or
+      :func:`~skeliner.pre.break_up_mesh`.  Skips soma detection,
+      gap bridging, and pruning (all handled upstream).  Supports
+      meshes with or without a soma.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
-        Closed surface mesh of the neuron in *arbitrary* units.
-    target_shell_count : int, default ``500``
-        Rough number of geodesic shells to produce per component.  The actual
-        shell width is adapted to mesh resolution.
-    bridge_gaps : bool, default ``True``
-        If the mesh contains disconnected islands (breaks, imaging artefacts),
-        attempt to connect them back to the soma with synthetic edges.
-    bridge_k : int, default ``1``
-        How many candidate node pairs to test when bridging a foreign island.
-    prune_tiny_neurites : bool, default ``True``
-        Remove sub-trees with fewer than ``min_branch_nodes`` that attach
-        *directly* to the soma and do not extend beyond
-        ``min_branch_extent_factor × r_soma``.
-    collapse_soma : bool, default ``True``
-        Merge centroids that sit well inside the soma or have very fat radii.
+        Surface mesh of the neuron.
+    components : MeshComponents or None
+        If provided, selects the preprocessing track.  The soma
+        and neurite partition are taken from *components*; most
+        other parameters (bridging, pruning, soma detection) are
+        ignored.
+    soma_init_guess : str or None
+        Soma-seed heuristic for the direct track.  ``"nucleus"``
+        runs :func:`~skeliner.pre.find_nucleus_center` to locate
+        the soma before binning.  ``"<axis>-<mode>"`` (e.g.
+        ``"z-min"``) selects an extreme vertex.  ``None`` falls
+        back to *soma_init_guess_axis* / *soma_init_guess_mode*.
     verbose : bool, default ``False``
-        Print progress messages.
-    postprocess : bool, default ``True``
-        When ``False`` the optional post-processing stages (soma detection,
-        near-soma merging, gap bridging, MST rebuild, neurite pruning) are
-        skipped so that you can rerun them later via the corresponding
-        :mod:`skeliner.post` helpers.
+        Print per-stage timing.
 
     Returns
     -------
     Skeleton
-        The (acyclic) skeleton with vertex 0 at the soma centroid.
+        Acyclic skeleton.  Node 0 is the soma centroid (when
+        detected) or a deterministic root vertex.
     """
     # ------------------------------------------------------------------
     #  Dispatch to the appropriate track
