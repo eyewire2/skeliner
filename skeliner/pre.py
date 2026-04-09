@@ -5431,6 +5431,116 @@ def find_organelles(
             f"(main: {main_pocket:,}, other: {other_pocket:,})"
         )
 
+    # ── 5. Enclosure pass — find non-pocket regions connected to
+    #       the surface only through a narrow neck.  Pocket flood-
+    #       fill captures the inward-facing membrane but misses the
+    #       positive-dot interior of the fold.  That interior is a
+    #       connected sub-region hanging off the rest of the surface
+    #       through an articulation face (bottleneck).  For each
+    #       articulation point in the non-pocket graph, check whether
+    #       the smaller split-off has high pocket enclosure.
+    _enc_adj = _face_adjacency(mesh)
+    _pocket_set = set(np.where(pocket)[0].tolist())
+    _np_set = set(
+        np.where(structural_mask & ~pocket & ~isolated)[0].tolist()
+    )
+
+    # Tarjan's articulation points (iterative)
+    _disc: dict[int, int] = {}
+    _low: dict[int, int] = {}
+    _par: dict[int, int] = {}
+    _aps: set[int] = set()
+    _tmr = [0]
+
+    def _tarjan_iter(start: int) -> None:
+        _cc: dict[int, int] = {}
+        stk = [(start, iter(sorted(_enc_adj.get(start, set()) & _np_set)))]
+        _disc[start] = _low[start] = _tmr[0]; _tmr[0] += 1
+        _par[start] = -1; _cc[start] = 0
+        while stk:
+            u, nbrs = stk[-1]
+            try:
+                v = next(nbrs)
+                if v not in _disc:
+                    _par[v] = u; _cc[v] = 0
+                    _disc[v] = _low[v] = _tmr[0]; _tmr[0] += 1
+                    stk.append((v, iter(sorted(
+                        _enc_adj.get(v, set()) & _np_set
+                    ))))
+                elif v != _par.get(u, -1):
+                    _low[u] = min(_low[u], _disc[v])
+            except StopIteration:
+                stk.pop()
+                if stk:
+                    pu = stk[-1][0]
+                    _low[pu] = min(_low[pu], _low[u])
+                    _cc[pu] = _cc.get(pu, 0) + 1
+                    if _par[pu] == -1:
+                        if _cc[pu] > 1:
+                            _aps.add(pu)
+                    elif _low[u] >= _disc[pu]:
+                        _aps.add(pu)
+
+    for _s in _np_set:
+        if _s not in _disc:
+            _tarjan_iter(_s)
+
+    # For each AP, remove it and check the smaller component
+    enclosed_count = 0
+    _claimed: set[int] = set()
+    for _ap in _aps:
+        if _ap in _claimed:
+            continue
+        _test = _np_set - {_ap} - _claimed
+        _vis: set[int] = set()
+        _comps: list[list[int]] = []
+        for _s in _test:
+            if _s in _vis:
+                continue
+            _cl: list[int] = []
+            _q = deque([_s])
+            while _q:
+                _cur = _q.popleft()
+                if _cur in _vis:
+                    continue
+                _vis.add(_cur)
+                _cl.append(_cur)
+                for _nfi in _enc_adj.get(_cur, set()):
+                    if _nfi in _test and _nfi not in _vis:
+                        _q.append(_nfi)
+            _comps.append(_cl)
+        if len(_comps) < 2:
+            continue
+        _comps.sort(key=len)
+        # Check the smallest component
+        _small = _comps[0]
+        _sset = set(_small)
+        _n_pb = 0
+        _n_tb = 0
+        for _fi in _small:
+            for _nfi in _enc_adj.get(_fi, set()):
+                if _nfi not in _sset and _nfi != _ap:
+                    _n_tb += 1
+                    if _nfi in _pocket_set:
+                        _n_pb += 1
+        if _n_tb == 0:
+            continue
+        _enc = _n_pb / _n_tb
+        if _enc >= 0.90 and len(_small) >= min_cluster_size:
+            for _fi in _small:
+                pocket[_fi] = True
+            pocket[_ap] = True
+            _pocket_set.update(_small)
+            _pocket_set.add(_ap)
+            _claimed.update(_small)
+            _claimed.add(_ap)
+            enclosed_count += len(_small) + 1
+
+    if verbose and enclosed_count:
+        print(
+            f"{_p} Enclosed by pocket: +{enclosed_count:,} faces"
+        )
+
     dt_total = _time.perf_counter() - t_total
     if verbose:
         print(
