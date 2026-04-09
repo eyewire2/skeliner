@@ -10,6 +10,10 @@ robust contact‑site mapping between pairs of cells using both skeletons and me
 
 ## Features
 
+- Mesh Preprocessing
+    - remove mesh anomolies such as parallel faces due to chunk merging failures, gaps (broken neurites), fusions (wrong connections)
+    - find and classify soma, organelles, neurites and fragments that should be descarded 
+
 - Mesh → SWC skeletons
     - Center‑line, acyclic skeleton.
     - Per‑node radii with multiple estimators (median/mean/trim) and an automatic recommendation.
@@ -123,7 +127,6 @@ print("contact patches:", len(sites.faces_A))
 print("mean areas (mesh units^2):", sites.area_mean)
 
 # Optional: visualize patches
-# from skeliner.plot.vis3d import view_contacts
 # sk.plot.view_contacts(meshA, meshB, sites, sides="A")
 ```
 
