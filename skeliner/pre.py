@@ -5432,124 +5432,129 @@ def find_organelles(
         )
 
     # ── 5. Enclosure pass — find organelle interiors connected to
-    #       the surface through a narrow neck.  Single-pass Tarjan's
-    #       tracks subtree size and pocket enclosure inline; when an
-    #       AP is found, the subtree behind it is evaluated directly
-    #       (no separate BFS).  Uses mesh.face_adjacency to avoid
-    #       recomputing adjacency.
-    _pocket_set = set(np.where(pocket)[0].tolist())
-    _np_arr = np.where(
-        structural_mask & ~pocket & ~isolated
-    )[0]
-    _np_set = set(_np_arr.tolist())
-
-    # Build adjacency restricted to non-pocket structural faces
-    _adj5: dict[int, list[int]] = defaultdict(list)
-    for a, b in mesh.face_adjacency:
-        a, b = int(a), int(b)
-        if a in _np_set and b in _np_set:
-            _adj5[a].append(b)
-            _adj5[b].append(a)
-
-    # Per-face pocket boundary count (neighbours outside _np_set
-    # that are pocket).
-    _pbnd = np.zeros(len(mesh.faces), dtype=np.int8)
-    _tbnd = np.zeros(len(mesh.faces), dtype=np.int8)
-    for a, b in mesh.face_adjacency:
-        a, b = int(a), int(b)
-        a_in = a in _np_set
-        b_in = b in _np_set
-        if a_in and not b_in:
-            _tbnd[a] += 1
-            if b in _pocket_set:
-                _pbnd[a] += 1
-        if b_in and not a_in:
-            _tbnd[b] += 1
-            if a in _pocket_set:
-                _pbnd[b] += 1
-
-    # Tarjan's with subtree size / pocket-boundary accumulation.
-    # When low[v] >= disc[u], the subtree rooted at v is a
-    # biconnected sub-region; check enclosure and claim if high.
-    _disc = np.full(len(mesh.faces), -1, dtype=np.int32)
-    _low = np.full(len(mesh.faces), -1, dtype=np.int32)
-    _sub_sz = np.ones(len(mesh.faces), dtype=np.int32)
-    _sub_pb = _pbnd.astype(np.int32).copy()
-    _sub_tb = _tbnd.astype(np.int32).copy()
-    _tmr = 0
+    #       the surface through a narrow neck (articulation face).
+    #       Single-pass Tarjan's on a CSR graph tracks subtree size
+    #       and pocket enclosure inline.
+    _np_mask = structural_mask & ~pocket & ~isolated
+    _np_arr = np.where(_np_mask)[0]
     enclosed_count = 0
-    _to_claim: list[list[int]] = []
 
-    for _root in _np_arr:
-        if _disc[_root] >= 0:
-            continue
-        # iterative DFS
-        _disc[_root] = _low[_root] = _tmr; _tmr += 1
-        # stack: (node, parent, neighbour_iterator)
-        _stk = [(_root, -1, iter(_adj5[_root]))]
-        _child_cnt = defaultdict(int)
-        while _stk:
-            u, pu, nbrs = _stk[-1]
-            try:
-                v = next(nbrs)
-                if _disc[v] < 0:
-                    _disc[v] = _low[v] = _tmr; _tmr += 1
-                    _stk.append((v, u, iter(_adj5[v])))
-                elif v != pu:
-                    if _low[u] > _disc[v]:
-                        _low[u] = _disc[v]
-            except StopIteration:
-                _stk.pop()
-                if not _stk:
-                    break
-                pu2 = _stk[-1][0]
-                # propagate low
-                if _low[pu2] > _low[u]:
-                    _low[pu2] = _low[u]
-                # accumulate subtree stats
-                _sub_sz[pu2] += _sub_sz[u]
-                _sub_pb[pu2] += _sub_pb[u]
-                _sub_tb[pu2] += _sub_tb[u]
-                _child_cnt[pu2] += 1
-                # AP check
-                is_root = _stk[-1][1] == -1
-                is_ap = (
-                    (is_root and _child_cnt[pu2] > 1)
-                    or (not is_root and _low[u] >= _disc[pu2])
-                )
-                if is_ap and _low[u] >= _disc[pu2]:
-                    sz = int(_sub_sz[u])
-                    tb = int(_sub_tb[u])
-                    pb = int(_sub_pb[u])
-                    if (
-                        tb > 0
-                        and pb / tb >= 0.90
-                        and sz >= min_cluster_size
+    if _np_arr.size > 0:
+        _fa = mesh.face_adjacency
+        _both = _np_mask[_fa[:, 0]] & _np_mask[_fa[:, 1]]
+        _pairs = _fa[_both]
+
+        # Per-face pocket boundary: edges crossing np ↔ non-np
+        _cross_a = _np_mask[_fa[:, 0]] & ~_np_mask[_fa[:, 1]]
+        _cross_b = _np_mask[_fa[:, 1]] & ~_np_mask[_fa[:, 0]]
+        _pbnd = np.zeros(len(mesh.faces), dtype=np.int32)
+        _tbnd = np.zeros(len(mesh.faces), dtype=np.int32)
+        if _cross_a.any():
+            np.add.at(_tbnd, _fa[_cross_a, 0], 1)
+            _pocket_a = _cross_a & pocket[_fa[:, 1]]
+            if _pocket_a.any():
+                np.add.at(_pbnd, _fa[_pocket_a, 0], 1)
+        if _cross_b.any():
+            np.add.at(_tbnd, _fa[_cross_b, 1], 1)
+            _pocket_b = _cross_b & pocket[_fa[:, 0]]
+            if _pocket_b.any():
+                np.add.at(_pbnd, _fa[_pocket_b, 1], 1)
+
+        # Build CSR adjacency for non-pocket faces
+        _edges = np.empty((len(_pairs) * 2, 2), dtype=np.int64)
+        _edges[:len(_pairs)] = _pairs
+        _edges[len(_pairs):, 0] = _pairs[:, 1]
+        _edges[len(_pairs):, 1] = _pairs[:, 0]
+        _ord = np.argsort(_edges[:, 0])
+        _dst = _edges[_ord, 1]
+        _usrc, _ucnt = np.unique(
+            _edges[_ord, 0], return_counts=True
+        )
+        _off = np.zeros(len(mesh.faces) + 1, dtype=np.int64)
+        _off[_usrc + 1] = _ucnt
+        np.cumsum(_off, out=_off)
+
+        # Tarjan's with subtree accumulation
+        nF = len(mesh.faces)
+        _disc = np.full(nF, -1, dtype=np.int32)
+        _low = np.full(nF, -1, dtype=np.int32)
+        _sub_sz = np.ones(nF, dtype=np.int32)
+        _sub_pb = _pbnd.copy()
+        _sub_tb = _tbnd.copy()
+        _tmr = 0
+        _to_claim: list[tuple[int, int]] = []
+
+        for _root in _np_arr:
+            if _disc[_root] >= 0:
+                continue
+            _disc[_root] = _low[_root] = _tmr; _tmr += 1
+            # stack: (node, parent, edge_cursor)
+            _stk: list[tuple[int, int, int]] = [
+                (int(_root), -1, int(_off[_root]))
+            ]
+            _ccnt = np.zeros(nF, dtype=np.int8)
+            while _stk:
+                u, pu, ei = _stk[-1]
+                end_u = int(_off[u + 1])
+                if ei < end_u:
+                    _stk[-1] = (u, pu, ei + 1)
+                    v = int(_dst[ei])
+                    if _disc[v] < 0:
+                        _disc[v] = _low[v] = _tmr
+                        _tmr += 1
+                        _stk.append(
+                            (v, u, int(_off[v]))
+                        )
+                    elif v != pu:
+                        dv = _disc[v]
+                        if _low[u] > dv:
+                            _low[u] = dv
+                else:
+                    _stk.pop()
+                    if not _stk:
+                        break
+                    pu2 = _stk[-1][0]
+                    lu = _low[u]
+                    if _low[pu2] > lu:
+                        _low[pu2] = lu
+                    _sub_sz[pu2] += _sub_sz[u]
+                    _sub_pb[pu2] += _sub_pb[u]
+                    _sub_tb[pu2] += _sub_tb[u]
+                    _ccnt[pu2] += 1
+                    is_root = _stk[-1][1] == -1
+                    if lu >= _disc[pu2] and (
+                        not is_root or _ccnt[pu2] > 1
                     ):
-                        # Collect subtree faces via BFS
-                        # bounded to _sub_sz[u] faces.
-                        _cl = []
-                        _vis: set[int] = set()
-                        _q = deque([int(u)])
-                        while _q:
-                            c = _q.popleft()
-                            if c in _vis:
-                                continue
-                            _vis.add(c)
-                            _cl.append(c)
-                            for n in _adj5[c]:
-                                if (
-                                    n not in _vis
-                                    and _disc[n] >= _disc[u]
-                                ):
-                                    _q.append(n)
-                        _to_claim.append(_cl)
+                        sz = int(_sub_sz[u])
+                        tb = int(_sub_tb[u])
+                        pb = int(_sub_pb[u])
+                        if (
+                            tb > 0
+                            and pb >= tb * 0.9
+                            and sz >= min_cluster_size
+                        ):
+                            _to_claim.append(
+                                (int(u), int(_disc[u]))
+                            )
 
-    for _cl in _to_claim:
-        for _fi in _cl:
-            if not pocket[_fi]:
-                pocket[_fi] = True
-                enclosed_count += 1
+        # Collect subtree faces for each claim via BFS
+        for _u, _d_u in _to_claim:
+            _q = deque([_u])
+            _vis: set[int] = set()
+            while _q:
+                c = _q.popleft()
+                if c in _vis:
+                    continue
+                _vis.add(c)
+                if not pocket[c]:
+                    pocket[c] = True
+                    enclosed_count += 1
+                s = int(_off[c])
+                e = int(_off[c + 1])
+                for i in range(s, e):
+                    nb = int(_dst[i])
+                    if nb not in _vis and _disc[nb] >= _d_u:
+                        _q.append(nb)
 
     if verbose and enclosed_count:
         print(
