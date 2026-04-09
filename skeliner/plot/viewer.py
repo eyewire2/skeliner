@@ -722,6 +722,8 @@ def _create_app(
                 if comp.soma is not None:
                     mesh_state["soma"] = comp.soma
                 mesh_state["organelles"] = comp.organelles
+                mesh_state["neurites"] = comp.neurites
+                mesh_state["discarded"] = comp.discarded
 
                 # Build annotations
                 ann = {}
@@ -3033,6 +3035,25 @@ def _create_app(
         body = await request.json()
         params = body.get("params", {})
         mesh = mesh_state["mesh"]
+
+        # If break_up_mesh has run, use the preprocessing track
+        if mesh_state.get("neurites") is not None:
+            from skeliner.dataclass import (
+                Discarded,
+                MeshComponents,
+                Neurites,
+            )
+
+            params["components"] = MeshComponents(
+                soma=mesh_state.get("soma"),
+                organelles=mesh_state["organelles"],
+                neurites=Neurites(
+                    list(mesh_state["neurites"])
+                ),
+                discarded=Discarded(
+                    list(mesh_state.get("discarded") or [])
+                ),
+            )
 
         skel = await _run_with_log(skeletonize, mesh, verbose=True, **params)
         print(f"Skeletonized: {len(skel.nodes)} nodes, {len(skel.edges)} edges")
