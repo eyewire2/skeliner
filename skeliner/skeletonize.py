@@ -769,11 +769,6 @@ def _skeletonize_preproc(
     geodesic_shell_count: int,
     min_shell_vertices: int,
     max_shell_width_factor: float,
-    split_elongated_shells: bool,
-    split_aspect_thr: float,
-    split_min_shell_vertices: int,
-    split_max_vertices_per_slice: int | None,
-    merge_nodes_overlap_fraction: float,
     unit: str,
     id: str | int | None,
     verbose: bool,
@@ -784,8 +779,10 @@ def _skeletonize_preproc(
     :func:`_skeletonize_component`, then all sub-skeletons
     are grafted onto the precomputed soma.
 
-    Skips: soma detection, gap bridging, neurite pruning.
-    Keeps: nested-node merge, near-soma collapse, MST.
+    Skips: soma detection, gap bridging, neurite pruning,
+    near-soma collapse, nested-node merge, elongated-shell
+    splitting (all unnecessary on clean preprocessed
+    neurites).
     """
     soma = components.soma
     if soma is None:
@@ -869,28 +866,14 @@ def _skeletonize_preproc(
                 seed_vid=seed_vid,
                 soma_verts=soma_verts_set,
                 radius_estimators=radius_estimators,
-                merge_nested=True,
-                merge_kwargs={
-                    "inside_frac": (
-                        merge_nodes_overlap_fraction
-                    ),
-                },
+                merge_nested=False,
                 step_size=geodesic_step_size,
                 target_shell_count=geodesic_shell_count,
                 min_shell_vertices=min_shell_vertices,
                 max_shell_width_factor=(
                     max_shell_width_factor
                 ),
-                split_elongated_shells=(
-                    split_elongated_shells
-                ),
-                split_aspect_thr=split_aspect_thr,
-                split_min_shell_vertices=(
-                    split_min_shell_vertices
-                ),
-                split_max_vertices_per_slice=(
-                    split_max_vertices_per_slice
-                ),
+                split_elongated_shells=False,
             )
             sub_skeletons.append(sub)
             log(
@@ -1063,17 +1046,6 @@ def skeletonize(
             geodesic_shell_count=geodesic_shell_count,
             min_shell_vertices=min_shell_vertices,
             max_shell_width_factor=max_shell_width_factor,
-            split_elongated_shells=split_elongated_shells,
-            split_aspect_thr=split_aspect_thr,
-            split_min_shell_vertices=(
-                split_min_shell_vertices
-            ),
-            split_max_vertices_per_slice=(
-                split_max_vertices_per_slice
-            ),
-            merge_nodes_overlap_fraction=(
-                merge_nodes_overlap_fraction
-            ),
             unit=unit,
             id=id,
             verbose=verbose,
