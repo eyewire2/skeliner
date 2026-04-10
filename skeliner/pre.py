@@ -5084,7 +5084,6 @@ def find_pocket_organelles(
     # Phase 2 — Hole filling: small non-pocket clusters mostly enclosed
     # by pocket faces are filled in.  Sub-folds inside pockets can have
     # positive outward_dot, so we use enclosure ratio only.
-    pre_hole_pocket = pocket.copy()
     non_pocket_main = main_face_mask & ~pocket
     non_pocket_idx = set(np.where(non_pocket_main)[0].tolist())
     np_visited: set[int] = set()
@@ -5168,17 +5167,7 @@ def find_pocket_organelles(
 
         pocket_area = float(mesh.area_faces[comp].sum())
         cap_area = float(mesh.area_faces[list(cap_faces)].sum()) if cap_faces else 0.0
-        if cap_area <= 0:
-            # Hole-filling consumed the entire local region (no
-            # non-pocket neighbors left).  This happens on small
-            # disconnected components.  Instead of rejecting the
-            # whole pocket, roll back to the pre-hole-filling state
-            # which preserves the legitimate flood-fill core.
-            for fi in comp:
-                if not pre_hole_pocket[fi]:
-                    pocket[fi] = False
-            n_rejected += 1
-        elif pocket_area / cap_area < min_fold_ratio:
+        if cap_area <= 0 or pocket_area / cap_area < min_fold_ratio:
             for fi in comp:
                 pocket[fi] = False
             n_rejected += 1
