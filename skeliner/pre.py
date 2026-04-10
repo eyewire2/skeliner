@@ -3731,6 +3731,10 @@ def find_disconnected(
         Each element is a list of face indices for one disconnected
         component, sorted largest-first.
     """
+    if verbose:
+        print("[skeliner.pre] Finding disconnected components …")
+        _t0 = time.perf_counter()
+
     if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
@@ -3741,9 +3745,6 @@ def find_disconnected(
     if fusions:
         labels, main = _refine_components_with_fusions(mesh, labels, main, fusions)
     n_faces = len(mesh.faces)
-    if verbose:
-        n_total_comps = int(labels.max()) + 1 if len(labels) else 0
-        print(f"[skeliner.pre] Disconnected: {n_total_comps} total components")
 
     # Locate soma so we can exclude components inside it
     if soma is None:
@@ -3751,13 +3752,10 @@ def find_disconnected(
             mesh,
             organelles=organelles,
             mesh_stats=mesh_stats,
-            verbose=verbose,
         )
 
     # Build KD-tree of main-component face centroids + normals
     # for inside/outside classification
-    if verbose:
-        print("[skeliner.pre] Disconnected: building KDTree...")
     main_face_idx = np.where(labels == main)[0]
     main_centroids = mesh.triangles_center[main_face_idx]
     main_normals = mesh.face_normals[main_face_idx]
@@ -3773,13 +3771,7 @@ def find_disconnected(
             continue
         comp_faces.setdefault(cid, []).append(fi)
 
-    if verbose:
-        n_small = sum(1 for fis in comp_faces.values() if len(fis) < 7)
-        print(
-            f"[skeliner.pre] Disconnected: {len(comp_faces)} non-main "
-            f"components, {n_small} dropped by < 7 filter"
-        )
-
+    n_total_non_main = len(comp_faces)
     components = []
     n_soma_excluded = 0
     n_organelle_excluded = 0
@@ -3828,12 +3820,6 @@ def find_disconnected(
             # the inward side (dot < 0)
             if (dots < 0).sum() > len(dots) / 2:
                 n_enclosed_excluded += 1
-                if verbose:
-                    print(
-                        f"[skeliner.pre]   Excluded enclosed component "
-                        f"({len(fis):,} faces, "
-                        f"{(dots < 0).sum()}/{len(dots)} verts inside)"
-                    )
                 continue
 
         components.append((cid, fis))
@@ -3842,18 +3828,24 @@ def find_disconnected(
     components.sort(key=lambda x: -len(x[1]))
 
     if verbose:
+        dt = time.perf_counter() - _t0
         total = sum(len(fis) for _, fis in components)
         excluded = []
         if n_soma_excluded:
-            excluded.append(f"{n_soma_excluded} in soma")
+            excluded.append(f"{n_soma_excluded} soma")
         if n_organelle_excluded:
             excluded.append(f"{n_organelle_excluded} organelle")
         if n_enclosed_excluded:
             excluded.append(f"{n_enclosed_excluded} enclosed")
-        exc_msg = f", {', '.join(excluded)} excluded" if excluded else ""
+        exc_str = (
+            f"; excluded {'+'.join(excluded)}"
+            if excluded else ""
+        )
         print(
-            f"[skeliner.pre] Disconnected: {len(components)} components, "
-            f"{total:,} faces{exc_msg}"
+            f"[skeliner.pre] Disconnected: "
+            f"{len(components)} of {n_total_non_main} "
+            f"non-main components, {total:,} faces"
+            f"{exc_str} ({dt:.1f}s)"
         )
 
     return [fis for _, fis in components]
@@ -5570,25 +5562,17 @@ def _find_nonmanifold_fusions(
         return nb
 
     nm_edges = sum(1 for faces in edge_to_face.values() if len(faces) > 2)
-    if verbose:
-        print(
-            f"[skeliner.pre] Mesh: {len(mesh.faces):,} faces, "
-            f"{len(zero_faces)} zero-area, {nm_edges} non-manifold edges"
-        )
 
     if mesh_stats is not None and mesh_stats.outward_dots is not None:
         outward_dots = mesh_stats.outward_dots
     else:
-        if verbose:
-            print("[skeliner.pre] Computing outward dots ...")
         outward_dots = _outward_dot(
             mesh,
             radius
             if radius is not None
-            else radius_multiplier * float(np.median(mesh.edges_unique_length)),
+            else radius_multiplier
+            * float(np.median(mesh.edges_unique_length)),
         )
-        if verbose:
-            print("[skeliner.pre] Outward dots computed")
 
     # Signal 1: negative-dot faces at non-manifold edges
     nm_neg_faces: set[int] = set()
@@ -5627,8 +5611,6 @@ def _find_nonmanifold_fusions(
 
     fan_vertex_clusters: list[list[int]] = []
     n_verts = len(mesh.vertices)
-    if verbose:
-        print(f"[skeliner.pre] Scanning {n_verts:,} vertices for fan fusions ...")
     for vid in range(n_verts):
         fan = vert_to_face[vid]
         if len(fan) < 2:
@@ -5655,36 +5637,6 @@ def _find_nonmanifold_fusions(
                     q.append(nfi)
         if len(vis) < len(fan_set):
             fan_vertex_clusters.append(sorted(fan))
-            if verbose:
-                _vis2: set[int] = set()
-                _comp_sizes: list[int] = []
-                for _fi in fan:
-                    if _fi in _vis2:
-                        continue
-                    _sz = 0
-                    _q = deque([_fi])
-                    while _q:
-                        _c = _q.popleft()
-                        if _c in _vis2:
-                            continue
-                        _vis2.add(_c)
-                        _sz += 1
-                        for _nfi in fan_adj.get(_c, set()):
-                            if _nfi not in _vis2:
-                                _q.append(_nfi)
-                    _comp_sizes.append(_sz)
-                _comp_sizes.sort(reverse=True)
-                print(
-                    f"[skeliner.pre]   Fan vertex {vid}: "
-                    f"{len(_comp_sizes)} components, "
-                    f"sizes {_comp_sizes}"
-                )
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Fusions: scanned {n_verts:,} vertices, "
-            f"{len(fan_vertex_clusters)} fan fusions found"
-        )
 
     if not seed_faces and not fan_vertex_clusters:
         return []
@@ -5715,14 +5667,6 @@ def _find_nonmanifold_fusions(
                 if nfi not in visited:
                     queue.append(nfi)
         seed_clusters.append(cluster)
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Fusion seeds: {len(seed_clusters)} clusters, "
-            f"{len(seed_faces)} faces "
-            f"(nm_neg={len(nm_neg_faces)}, dupes={len(dupe_faces)}, "
-            f"fan_verts={len(fan_vertex_clusters)})"
-        )
 
     # Grow region & split per cluster
     def _manifold_components(region: set[int]) -> list[set[int]]:
@@ -5761,11 +5705,6 @@ def _find_nonmanifold_fusions(
 
     for ci, seed_cluster in enumerate(seed_clusters):
         region = set(seed_cluster)
-        if verbose:
-            print(
-                f"[skeliner.pre] Growing seed cluster "
-                f"{ci + 1}/{n_seed_clusters} ({len(seed_cluster)}f) ..."
-            )
         found = False
         for ring in range(1, grow_rings + 1):
             boundary: set[int] = set()
@@ -5776,12 +5715,6 @@ def _find_nonmanifold_fusions(
                 continue
             comps = _manifold_components(region)
             big = [c for c in comps if len(c) >= min_branch_size]
-            if verbose:
-                print(
-                    f"[skeliner.pre]   ring {ring}: "
-                    f"{len(region)}f, {len(comps)} comps "
-                    f"({len(big)} >= {min_branch_size}f)"
-                )
             if len(big) >= 2:
                 branch0 = big[0]
                 branch1 = big[1]
@@ -5793,20 +5726,7 @@ def _find_nonmanifold_fusions(
                             fusion_boundary.add(nfi)
                 result_clusters.append(sorted(fusion_boundary))
                 found = True
-                if verbose:
-                    print(
-                        f"[skeliner.pre]   Seed cluster ({len(seed_cluster)}f): "
-                        f"split at ring {ring}, region {len(region)}f, "
-                        f"branches {len(branch0)}+{len(branch1)}f, "
-                        f"boundary {len(fusion_boundary)}f"
-                    )
                 break
-        if not found and verbose:
-            print(
-                f"[skeliner.pre]   Seed cluster ({len(seed_cluster)}f): "
-                f"no split after {grow_rings} rings, "
-                f"region {len(region)}f"
-            )
 
     result_clusters.extend(fan_vertex_clusters)
     return result_clusters
@@ -5858,21 +5778,26 @@ def find_fusions(
     fusion detection is planned for the skeletonization refactoring
     (detect cycles in the pre-MST skeleton graph).
     """
+    if verbose:
+        print("[skeliner.pre] Finding fusions …")
+        _t0 = time.perf_counter()
+
     clusters = _find_nonmanifold_fusions(
         mesh,
         radius=radius,
         radius_multiplier=radius_multiplier,
         grow_rings=grow_rings,
         min_branch_size=min_branch_size,
-        verbose=verbose,
         mesh_stats=mesh_stats,
     )
     clusters.sort(key=len, reverse=True)
 
     if verbose:
+        dt = time.perf_counter() - _t0
+        n_faces = sum(len(c) for c in clusters)
         print(
             f"[skeliner.pre] Fusions: {len(clusters)} regions, "
-            f"{sum(len(c) for c in clusters)} boundary faces"
+            f"{n_faces:,} boundary faces ({dt:.1f}s)"
         )
 
     return clusters
@@ -6008,15 +5933,12 @@ def remove_fusions(
     trimesh.Trimesh
         Mesh with fusions removed and shared vertices split.
     """
+    if verbose:
+        print("[skeliner.pre] Removing fusions …")
+        _t0 = time.perf_counter()
+
     # Step 1: remove non-manifold fusion faces
-    if fusions is not None:
-        if verbose:
-            n = sum(len(c) for c in fusions)
-            print(
-                f"[skeliner.pre] Using provided fusion clusters "
-                f"({len(fusions)} regions, {n} faces)"
-            )
-    else:
+    if fusions is None:
         fusions = find_fusions(
             mesh,
             radius=radius,
@@ -6033,18 +5955,20 @@ def remove_fusions(
         for fi in all_fusions:
             keep[fi] = False
         mesh = _rebuild_mesh(mesh, keep)
-        if verbose:
-            print(
-                f"[skeliner.pre] Removed {len(all_fusions)} fusion faces "
-                f"({len(fusions)} regions)"
-            )
 
     # Step 2: split shared vertices
-    mesh = _split_fan_vertices(mesh, verbose=verbose)
+    n_verts_before = len(mesh.vertices)
+    mesh = _split_fan_vertices(mesh)
+    n_split = len(mesh.vertices) - n_verts_before
 
     if verbose:
+        dt = time.perf_counter() - _t0
+        parts = [f"removed {len(all_fusions):,}f"]
+        if n_split:
+            parts.append(f"split {n_split} fan vertices")
         print(
-            f"[skeliner.pre] Fusions: {len(all_fusions)} faces removed, vertices split"
+            f"[skeliner.pre] remove_fusions: "
+            f"{', '.join(parts)} ({dt:.1f}s)"
         )
 
     # Invalidate topology (components split at fan vertices)
