@@ -6404,6 +6404,10 @@ def find_parallel_patches(
 
     from scipy.spatial import cKDTree
 
+    if verbose:
+        print("[skeliner.pre] Finding parallel patches …")
+        _t0 = time.perf_counter()
+
     if boundaries is None:
         boundaries = find_chunk_boundaries(mesh)
 
@@ -6713,16 +6717,21 @@ def find_parallel_patches(
     results.sort(key=lambda r: (r["axis"], r["bval"], -len(r["faces"])))
 
     if verbose:
+        dt = time.perf_counter() - _t0
+        n_bnd = sum(len(bv) for bv in boundaries.values())
         n_faces = sum(len(r["faces"]) for r in results)
-        print(
-            f"[skeliner.pre] Parallel patches: {len(results)} patches, {n_faces} faces"
+        # Compact per-axis summary
+        from collections import Counter
+        ax_counts = Counter(r["axis"] for r in results)
+        ax_str = ", ".join(
+            f"{'XYZ'[a]}:{c}" for a, c in sorted(ax_counts.items())
         )
-        for r in results:
-            name = "XYZ"[r["axis"]]
-            print(
-                f"  {name}={r['bval']}: {len(r['faces'])}f "
-                f"(+{len(r['up_faces'])} / -{len(r['down_faces'])})"
-            )
+        print(
+            f"[skeliner.pre] Parallel patches: "
+            f"{len(results)} patches, {n_faces:,} faces "
+            f"({ax_str}) at {n_bnd} boundaries "
+            f"({dt:.1f}s)"
+        )
 
     return results
 
@@ -7281,7 +7290,7 @@ def _zip_vertex_loops(
     return best[1] if best is not None else []
 
 
-def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
+def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches):
     """Bridge gaps left by Mode B parallel-patch removal using
     per-sandwich rim tracing and contour zipping.
 
@@ -7347,8 +7356,6 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
         groups[(int(p["axis"]), int(p["bval"]))].append(p)
 
     if not groups:
-        if verbose:
-            print("[skeliner.pre] Stitch: no Mode-B sandwich groups")
         return mesh
 
     all_new_tris: list[tuple[int, int, int]] = []
@@ -7458,24 +7465,13 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches, verbose=False):
         n_skipped_loops += len(dn_info) - len(dn_used)
 
     if not all_new_tris:
-        if verbose:
-            print(
-                f"[skeliner.pre] Stitch: no contours zipped "
-                f"({n_skipped_loops} loops unpaired)"
-            )
         return mesh
 
     new_faces = np.array(all_new_tris, dtype=np.int64)
     combined = np.vstack([faces, new_faces])
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Stitch: {n_pairs} rim pairs zipped, "
-            f"{len(new_faces)} bridge faces"
-            + (f" ({n_skipped_loops} loops unpaired)" if n_skipped_loops else "")
-        )
-
-    return trimesh.Trimesh(vertices=verts, faces=combined, process=False)
+    return trimesh.Trimesh(
+        vertices=verts, faces=combined, process=False
+    )
 
 
 def remove_parallel_patches(
@@ -7514,12 +7510,14 @@ def remove_parallel_patches(
     """
     from collections import defaultdict
 
+    if verbose:
+        print("[skeliner.pre] Removing parallel patches …")
+        _t0 = time.perf_counter()
+
     if patches is None:
         patches = find_parallel_patches(mesh, boundaries=boundaries, verbose=verbose)
 
     if not patches:
-        if verbose:
-            print("[skeliner.pre] No parallel patches to remove")
         return mesh
 
     # ── Step 0: trim patches to overlap with opposing partner ─────
@@ -7531,14 +7529,7 @@ def remove_parallel_patches(
     n_faces_before_trim = sum(len(p["faces"]) for p in patches)
     patches = _trim_patches_to_overlap(mesh, patches)
     n_faces_after_trim = sum(len(p["faces"]) for p in patches)
-    if verbose and n_faces_after_trim != n_faces_before_trim:
-        print(
-            f"[skeliner.pre] Trimmed patches to overlap: "
-            f"{n_faces_before_trim} → {n_faces_after_trim} faces"
-        )
     if not patches:
-        if verbose:
-            print("[skeliner.pre] No patch-overlap regions to remove")
         return mesh
 
     faces = mesh.faces
@@ -7562,12 +7553,7 @@ def remove_parallel_patches(
             mode_b_faces.update(patch_set)
             n_b += 1
 
-    if verbose:
-        print(
-            f"[skeliner.pre] Parallel patches: "
-            f"{n_a} Mode A (fold), {n_b} Mode B (parallel)"
-        )
-        print(f"[skeliner.pre] Removing {len(all_removed)} patch faces")
+    n_trimmed = n_faces_before_trim - n_faces_after_trim
 
     # ── Step 2: remove all patch faces ────────────────────────────
     keep_mask = np.ones(len(faces), dtype=bool)
@@ -7637,23 +7623,11 @@ def remove_parallel_patches(
                 orphan_remove.update(int(fi) for fi in comp_face_idxs)
 
         if orphan_remove:
-            if verbose:
-                n_comps = len({int(labels_after[fi]) for fi in orphan_remove})
-                print(
-                    f"[skeliner.pre] Removing {len(orphan_remove)} orphan faces "
-                    f"({n_comps} components from Mode A removal)"
-                )
             keep_mask2 = np.ones(len(faces), dtype=bool)
             keep_mask2[list(all_removed)] = False
             keep_mask2[list(orphan_remove)] = False
             result = _rebuild_mesh(mesh, keep_mask2)
-        elif verbose:
-            print(
-                f"[skeliner.pre] Keeping {len(new_comp_ids)} new disconnected "
-                f"components (border Mode B, need stitching)"
-            )
-    elif verbose:
-        print("[skeliner.pre] No newly orphaned components from removal")
+    n_orphan = len(orphan_remove) if newly_disconnected else 0
 
     # ── Step 5: stitch Mode B gaps ───────────────────────────────
     n_before = len(result.faces)
@@ -7663,20 +7637,43 @@ def remove_parallel_patches(
             faces,
             mode_b_faces,
             patches,
-            verbose=verbose,
         )
+    n_stitched = len(result.faces) - n_before
 
     # Invalidate topology; pad outward_dots for appended stitch faces
     if mesh_stats is not None:
-        n_added = len(result.faces) - n_before
-        if n_added > 0 and mesh_stats.outward_dots is not None:
+        if n_stitched > 0 and mesh_stats.outward_dots is not None:
             mesh_stats.outward_dots = np.concatenate(
                 [
                     mesh_stats.outward_dots,
-                    np.ones(n_added, dtype=mesh_stats.outward_dots.dtype),
+                    np.ones(
+                        n_stitched,
+                        dtype=mesh_stats.outward_dots.dtype,
+                    ),
                 ]
             )
         mesh_stats.invalidate_topology()
+
+    if verbose:
+        parts = [
+            f"removed {len(all_removed):,}f "
+            f"({n_a} fold + {n_b} parallel)",
+        ]
+        if n_trimmed:
+            parts.append(
+                f"trimmed to overlap "
+                f"{n_faces_before_trim:,}→"
+                f"{n_faces_after_trim:,}f"
+            )
+        if n_orphan:
+            parts.append(f"+{n_orphan:,}f orphans removed")
+        if n_stitched:
+            parts.append(f"+{n_stitched:,}f stitched")
+        dt = time.perf_counter() - _t0
+        print(
+            f"[skeliner.pre] remove_parallel_patches: "
+            f"{'; '.join(parts)} ({dt:.1f}s)"
+        )
 
     return result
 
