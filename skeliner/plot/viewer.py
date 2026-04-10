@@ -1814,6 +1814,7 @@ def _create_app(
                 )
             total_faces += len(r["faces"])
 
+        mesh_state["parallel_patches"] = results
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         await broadcast({"type": "annotations_updated"})
         await _log(
@@ -1828,7 +1829,7 @@ def _create_app(
         )
 
     async def do_remove_parallel(request):
-        """Remove parallel-patch artifacts (Mode A only)."""
+        """Remove parallel-patch artifacts."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
@@ -1837,9 +1838,11 @@ def _create_app(
 
         mesh = mesh_state["mesh"]
         ms = mesh_state.get("mesh_stats")
+        patches = mesh_state.get("parallel_patches")
         n_before = len(mesh.faces)
         new_mesh = await _run_with_log(
-            remove_parallel_patches, mesh, verbose=True, mesh_stats=ms
+            remove_parallel_patches, mesh,
+            patches=patches, verbose=True, mesh_stats=ms,
         )
 
         # Clear only annotations whose faces were actually removed
