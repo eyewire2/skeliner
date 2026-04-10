@@ -7455,7 +7455,18 @@ def remove_parallel_patches(
         patch_set = set(patch["faces"])
         all_removed.update(patch_set)
 
-        if fold:
+        has_up = bool(patch.get("up_faces"))
+        has_down = bool(patch.get("down_faces"))
+        if has_up and has_down:
+            # Sandwich with both sides → always stitch (mode B).
+            # Fold faces within the patch don't disqualify it —
+            # they just mark local non-manifold edges that get
+            # removed along with the rest.
+            mode_b_faces.update(patch_set)
+            n_b += 1
+            if fold:
+                mode_a_faces.update(fold)
+        elif fold:
             mode_a_faces.update(patch_set)
             n_a += 1
         else:
