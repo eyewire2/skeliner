@@ -4658,20 +4658,14 @@ def compute_mesh_stats(
 
     Returns a :class:`~skeliner.dataclass.MeshStats`.
     """
+    if verbose:
+        print("[skeliner.pre] Computing mesh stats …")
+        _t0 = time.perf_counter()
+
     if radius is None:
         median_edge = float(np.median(mesh.edges_unique_length))
         radius = radius_multiplier * median_edge
-        if verbose:
-            print(
-                f"[skeliner.pre] Auto radius: {radius:.1f} "
-                f"({radius_multiplier}x median edge {median_edge:.1f})"
-            )
 
-    # Compute connected components using edge adjacency so that
-    # faces sharing only a vertex (not an edge) are correctly
-    # separated.  This matters after _rebuild_mesh where degenerate
-    # faces ([0,0,0]) share vertex 0 and removed patches leave
-    # shared boundary vertices.
     face_comp, main_ci = _face_edge_components(mesh)
     main_face_mask = face_comp == main_ci
 
@@ -4684,26 +4678,18 @@ def compute_mesh_stats(
         for v in mesh.faces[fi]:
             vert_comp[int(v)] = ci
 
-    if verbose:
-        n_comps = int(face_comp.max()) + 1 if len(face_comp) else 0
-        from collections import Counter
-
-        comp_sizes = Counter(
-            int(face_comp[fi]) for fi in range(len(face_comp)) if face_comp[fi] >= 0
-        )
-        n_structural = sum(1 for n in comp_sizes.values() if n >= 100)
-        print(
-            f"[skeliner.pre] Components: {n_comps} total, "
-            f"{n_structural} structural (>= 100 faces)"
-        )
-
     outward_dots = _outward_dot(mesh, radius, vert_comp=vert_comp)
 
     if verbose:
-        raw_count = int((outward_dots < 0).sum())
+        dt = time.perf_counter() - _t0
+        n_comps = int(face_comp.max()) + 1 if len(face_comp) else 0
+        raw_neg = int((outward_dots < 0).sum())
+        pct = 100 * raw_neg / len(mesh.faces)
         print(
-            f"[skeliner.pre] Raw internal faces: {raw_count:,} "
-            f"({100 * raw_count / len(mesh.faces):.1f}%)"
+            f"[skeliner.pre] Mesh stats: "
+            f"{n_comps} components, radius={radius:.0f}, "
+            f"raw internal={raw_neg:,} ({pct:.1f}%) "
+            f"({dt:.1f}s)"
         )
 
     return MeshStats(
@@ -4938,13 +4924,6 @@ def find_pocket_mouths(
 
         mouths.append(boundary_edges)
 
-    if verbose:
-        print(
-            f"[skeliner.pre] Rims: {len(mouths)} pockets "
-            f"(fold >= {min_fold_ratio}), "
-            f"{sum(len(mouth) for mouth in mouths):,} mouth edges"
-        )
-
     return mouths
 
 
@@ -5026,6 +5005,9 @@ def find_pocket_organelles(
     np.ndarray
         Boolean mask ``(nFaces,)`` — pocket organelle faces.
     """
+    if verbose:
+        print("[skeliner.pre] Finding pocket organelles …")
+        _t0 = time.perf_counter()
 
     if mesh_stats is not None and mesh_stats.outward_dots is not None:
         outward_dots = mesh_stats.outward_dots
@@ -5063,7 +5045,11 @@ def find_pocket_organelles(
 
     if not mouths:
         if verbose:
-            print("[skeliner.pre] No pockets found")
+            dt = time.perf_counter() - _t0
+            print(
+                f"[skeliner.pre] Pocket organelles: "
+                f"0 faces (no mouths) ({dt:.1f}s)"
+            )
         return np.zeros(n_faces, dtype=bool)
 
     # Collect all mouth edges and seed faces
@@ -5086,12 +5072,7 @@ def find_pocket_organelles(
             if fi not in seeds:
                 mouth_faces.add(fi)
 
-    if verbose:
-        print(
-            f"[skeliner.pre] Pockets: {len(mouths)}, "
-            f"pocket mouth edges: {len(mouth_edge_set):,}, "
-            f"seeds: {len(seeds):,}"
-        )
+    n_mouths = len(mouths)
 
     # Flood-fill from seeds, blocked by mouth faces and grow_threshold
     pocket = np.zeros(n_faces, dtype=bool)
@@ -5220,13 +5201,14 @@ def find_pocket_organelles(
             n_rejected += 1
 
     if verbose:
+        dt = time.perf_counter() - _t0
         print(
-            f"[skeliner.pre] Pocket organelles (>= {min_cluster_size}): "
-            f"{pocket.sum():,} faces "
-            f"(initial {initial_count:,}, "
-            f"bridged +{bridge_count:,}, "
+            f"[skeliner.pre] Pocket organelles: "
+            f"{pocket.sum():,} faces from {n_mouths} mouths "
+            f"(fill {initial_count:,}, "
+            f"bridge +{bridge_count:,}, "
             f"holes +{hole_count:,}, "
-            f"rejected {n_rejected})"
+            f"rejected {n_rejected}) ({dt:.1f}s)"
         )
     return pocket
 
@@ -5249,12 +5231,15 @@ def find_isolated_organelles(
     np.ndarray
         Boolean mask ``(nFaces,)`` — isolated organelle faces.
     """
+    if verbose:
+        print("[skeliner.pre] Finding isolated organelles …")
+        _t0 = time.perf_counter()
+
     if mesh_stats is None or mesh_stats.outward_dots is None:
         mesh_stats = compute_mesh_stats(
             mesh,
             radius,
             radius_multiplier,
-            verbose,
         )
     outward_dots = mesh_stats.outward_dots
     if mesh_stats.face_comp is not None:
@@ -5315,14 +5300,14 @@ def find_isolated_organelles(
             n_kept_frags += 1
 
     if verbose:
+        dt = time.perf_counter() - _t0
         print(
-            f"[skeliner.pre] Isolated: {n_via_dots:,} via outward_dots, "
-            f"{n_via_geo:,} via geometric fallback"
-        )
-        print(
-            f"[skeliner.pre] Isolated fragments: {n_internal_frags:,} "
-            f"({n_internal_frag_faces:,} faces), "
-            f"{n_kept_frags:,} external (kept)"
+            f"[skeliner.pre] Isolated organelles: "
+            f"{n_internal_frags:,} fragments, "
+            f"{n_internal_frag_faces:,} faces "
+            f"({n_kept_frags:,} external kept; "
+            f"{n_via_dots:,} by dots, {n_via_geo:,} by geometry) "
+            f"({dt:.1f}s)"
         )
     return isolated
 
@@ -5377,10 +5362,9 @@ def find_organelles(
     MeshStats
         Only returned when ``return_mesh_stats=True``.
     """
-    import time as _time
-
-    _p = "[skeliner.pre]"
-    t_total = _time.perf_counter()
+    if verbose:
+        print("[skeliner.pre] Finding organelles …")
+    t_total = time.perf_counter()
 
     # ── 1. Precompute outward dots and components ─────────────────
     if mesh_stats is None or mesh_stats.outward_dots is None:
@@ -5416,16 +5400,7 @@ def find_organelles(
         if non_iso_count >= min_cluster_size:
             structural_comps.append(int(ci))
 
-    if verbose and len(structural_comps) > 1:
-        other = [ci for ci in structural_comps if ci != main_ci]
-        sizes = sorted([int((face_comp == ci).sum()) for ci in other], reverse=True)
-        print(
-            f"{_p} Structural components: main + "
-            f"{len(other)} disconnected "
-            f"({', '.join(f'{s:,}f' for s in sizes[:5])}"
-            + ("..." if len(sizes) > 5 else "")
-            + ")"
-        )
+    n_structural = len(structural_comps)
 
     # ── 4. Run pocket detection on all structural components ──────
     #       Replace main_face_mask with structural_face_mask in the
@@ -5454,13 +5429,6 @@ def find_organelles(
         mesh_stats=precomputed_structural,
     )
 
-    if verbose and len(structural_comps) > 1:
-        main_pocket = int(pocket[face_comp == main_ci].sum())
-        other_pocket = int(pocket.sum()) - main_pocket
-        print(
-            f"{_p} Pocket organelles: {int(pocket.sum()):,} faces "
-            f"(main: {main_pocket:,}, other: {other_pocket:,})"
-        )
 
     # ── 5. Enclosure pass — find organelle interiors connected to
     #       the surface through a narrow neck (articulation face).
@@ -5589,16 +5557,19 @@ def find_organelles(
                     if nb not in _vis and _disc[nb] >= _d_u:
                         _q.append(nb)
 
-    if verbose and enclosed_count:
-        print(
-            f"{_p} Enclosed by pocket: +{enclosed_count:,} faces"
-        )
-
-    dt_total = _time.perf_counter() - t_total
+    dt_total = time.perf_counter() - t_total
     if verbose:
+        parts = [
+            f"pocket={int(pocket.sum()):,}",
+            f"isolated={int(isolated.sum()):,}",
+        ]
+        if n_structural > 1:
+            parts.append(f"{n_structural} structural components")
+        if enclosed_count:
+            parts.append(f"enclosed +{enclosed_count:,}")
         print(
-            f"{_p} find_organelles done: pocket={int(pocket.sum()):,}, "
-            f"isolated={int(isolated.sum()):,} ({dt_total:.1f}s)"
+            f"[skeliner.pre] find_organelles: "
+            f"{', '.join(parts)} ({dt_total:.1f}s)"
         )
 
     org = Organelles(
