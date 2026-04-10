@@ -1958,3 +1958,115 @@ def diagnose_components(
     axes[0].legend(fontsize=7, loc="upper right", markerscale=5)
     fig.tight_layout()
     return fig, axes
+
+
+def diagnose_discarded(
+    mesh: trimesh.Trimesh,
+    components: MeshComponents,
+    *,
+    min_faces: int = 1000,
+    planes: tuple[str, str, str] = ("xy", "xz", "zy"),
+    figsize: tuple[float, float] = (12, 4),
+) -> tuple[Figure, list[list[Axes]]]:
+    """Row-per-component view of discarded fragments.
+
+    Each discarded component with at least *min_faces* faces gets one
+    row of three orthogonal projections.  All mesh vertices are shown
+    in light gray; the discarded fragment is highlighted in red.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh (after preprocessing).
+    components : MeshComponents
+        Result of :func:`~skeliner.pre.break_up_mesh`.
+    min_faces : int, default 1000
+        Only show fragments with at least this many faces.
+    planes : tuple of str
+        Three plane codes for the panels.
+    figsize : tuple
+        Figure size per row.
+
+    Returns
+    -------
+    fig, axes : Figure, list[list[Axes]]
+        One sub-list of axes per discarded fragment row.
+    """
+    DISCARD_COLOR = (0.9, 0.2, 0.2)
+
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+    face_centroids = verts[faces].mean(axis=1)
+
+    big = [
+        (i, d)
+        for i, d in enumerate(components.discarded)
+        if len(d) >= min_faces
+    ]
+    if not big:
+        fig, ax = plt.subplots(1, 1, figsize=(4, 2))
+        ax.text(
+            0.5, 0.5,
+            f"No discarded fragments \u2265 {min_faces} faces",
+            ha="center", va="center",
+            transform=ax.transAxes,
+        )
+        ax.set_axis_off()
+        return fig, []
+
+    n_rows = len(big)
+    n_cols = len(planes)
+    fig, ax_grid = plt.subplots(
+        n_rows, n_cols,
+        figsize=(figsize[0], figsize[1] * n_rows),
+        squeeze=False,
+    )
+
+    all_axes = []
+    for row, (idx, d_faces) in enumerate(big):
+        row_axes = []
+        fc = face_centroids[d_faces]
+        center = fc.mean(axis=0)
+        span = fc.max(axis=0) - fc.min(axis=0)
+        pad = max(span) * 0.6 + 500
+
+        for col, plane in enumerate(planes):
+            ax = ax_grid[row, col]
+            row_axes.append(ax)
+            ix, iy = _PLANE_AXES[plane]
+            xlab, ylab = _plane_axes(plane)
+
+            ax.scatter(
+                verts[:, ix], verts[:, iy],
+                c="#dddddd", s=0.3, alpha=0.15,
+                rasterized=True, zorder=1,
+            )
+            ax.scatter(
+                fc[:, ix], fc[:, iy],
+                color=DISCARD_COLOR, s=0.8, alpha=0.6,
+                rasterized=True, zorder=2,
+            )
+
+            ax.set_xlim(
+                center[ix] - pad, center[ix] + pad,
+            )
+            ax.set_ylim(
+                center[iy] - pad, center[iy] + pad,
+            )
+            ax.set_aspect("equal")
+            ax.set_xlabel(xlab)
+            if col == 0:
+                ax.set_ylabel(
+                    f"discarded {idx}\n"
+                    f"({len(d_faces):,}f)\n\n{ylab}",
+                )
+            else:
+                ax.set_ylabel(ylab)
+            if row == 0:
+                ax.set_title(plane.upper())
+            ax.grid(True, alpha=0.15)
+
+        all_axes.append(row_axes)
+
+    fig.tight_layout()
+    return fig, all_axes
