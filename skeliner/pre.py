@@ -5860,6 +5860,7 @@ def find_fusions(
 
 def _split_fan_vertices(
     mesh: trimesh.Trimesh,
+    candidate_verts: set[int] | None = None,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Split vertices whose face fan is disconnected by face-edge adjacency.
@@ -5885,7 +5886,12 @@ def _split_fan_vertices(
     new_verts = list(verts)
     n_split = 0
 
-    for vid in range(len(verts)):
+    check = (
+        candidate_verts
+        if candidate_verts is not None
+        else range(len(verts))
+    )
+    for vid in check:
         fan = vert_to_face[vid]
         if len(fan) < 2:
             continue
@@ -6005,15 +6011,20 @@ def remove_fusions(
     for c in fusions:
         all_fusions.update(c)
 
+    candidate_verts: set[int] = set()
+    for fi in all_fusions:
+        for v in mesh.faces[fi]:
+            candidate_verts.add(int(v))
+
     if all_fusions:
         keep = np.ones(len(mesh.faces), dtype=bool)
         for fi in all_fusions:
             keep[fi] = False
         mesh = _rebuild_mesh(mesh, keep)
 
-    # Step 2: split shared vertices
+    # Step 2: split shared vertices near fusion sites
     n_verts_before = len(mesh.vertices)
-    mesh = _split_fan_vertices(mesh)
+    mesh = _split_fan_vertices(mesh, candidate_verts)
     n_split = len(mesh.vertices) - n_verts_before
 
     if verbose:
