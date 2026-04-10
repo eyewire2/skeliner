@@ -22,6 +22,7 @@ __all__ = [
     "z_section_grid",
     "diagnose_soma",
     "diagnose_components",
+    "diagnose_discarded",
 ]
 
 
@@ -1433,7 +1434,7 @@ def z_section(
     # clipped to the soma convex hull so it can't escape through the
     # open pocket mouth.
     if nucleus is not None and len(pts_xy) >= 10:
-        from shapely.geometry import Polygon, LineString
+        from shapely.geometry import LineString, Polygon
 
         slices = nucleus["slices"]
         dz = np.abs(slices[:, 0] - z)
@@ -2004,20 +2005,16 @@ def diagnose_discarded(
         if len(d) >= min_faces
     ]
     if not big:
-        fig, ax = plt.subplots(1, 1, figsize=(4, 2))
-        ax.text(
-            0.5, 0.5,
-            f"No discarded fragments \u2265 {min_faces} faces",
-            ha="center", va="center",
-            transform=ax.transAxes,
+        print(
+            f"No discarded fragments \u2265 {min_faces} faces"
         )
-        ax.set_axis_off()
-        return fig, []
+        return None
 
     n_rows = len(big)
     n_cols = len(planes)
     fig, ax_grid = plt.subplots(
-        n_rows, n_cols,
+        n_rows,
+        n_cols,
         figsize=(figsize[0], figsize[1] * n_rows),
         squeeze=False,
     )
@@ -2037,28 +2034,37 @@ def diagnose_discarded(
             xlab, ylab = _plane_axes(plane)
 
             ax.scatter(
-                verts[:, ix], verts[:, iy],
-                c="#dddddd", s=0.3, alpha=0.15,
-                rasterized=True, zorder=1,
+                verts[:, ix],
+                verts[:, iy],
+                c="#dddddd",
+                s=0.3,
+                alpha=0.15,
+                rasterized=True,
+                zorder=1,
             )
             ax.scatter(
-                fc[:, ix], fc[:, iy],
-                color=DISCARD_COLOR, s=0.8, alpha=0.6,
-                rasterized=True, zorder=2,
+                fc[:, ix],
+                fc[:, iy],
+                color=DISCARD_COLOR,
+                s=0.8,
+                alpha=0.6,
+                rasterized=True,
+                zorder=2,
             )
 
             ax.set_xlim(
-                center[ix] - pad, center[ix] + pad,
+                center[ix] - pad,
+                center[ix] + pad,
             )
             ax.set_ylim(
-                center[iy] - pad, center[iy] + pad,
+                center[iy] - pad,
+                center[iy] + pad,
             )
             ax.set_aspect("equal")
             ax.set_xlabel(xlab)
             if col == 0:
                 ax.set_ylabel(
-                    f"discarded {idx}\n"
-                    f"({len(d_faces):,}f)\n\n{ylab}",
+                    f"discarded {idx}\n({len(d_faces):,}f)\n\n{ylab}",
                 )
             else:
                 ax.set_ylabel(ylab)
