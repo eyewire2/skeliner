@@ -1967,31 +1967,32 @@ def find_soma_via_ring_cutoff(
         Fitted ellipsoidal soma, or *None* if no nucleus is found or
         too few indicators exist.
     """
+    if verbose:
+        print("[skeliner.pre] Finding soma …")
+        _t0 = time.perf_counter()
+
     if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
         labels, main = _face_edge_components(mesh)
 
     # ── 1. Find soma centre via nucleus detection ──────────────
-    nuc = find_nucleus_center(mesh, verbose=verbose)
+    nuc = find_nucleus_center(mesh)
     if nuc is None:
         if verbose:
-            print("[skeliner.pre] Soma: no nucleus found")
+            dt = time.perf_counter() - _t0
+            print(
+                f"[skeliner.pre] Soma: no nucleus found "
+                f"({dt:.1f}s)"
+            )
         return None
     center = nuc["center"]
-    if verbose:
-        print(
-            f"[skeliner.pre] Soma: nucleus center="
-            f"({center[0]:.0f}, {center[1]:.0f}, {center[2]:.0f})"
-        )
 
     # ── 1b. Organelle mask (for excluding from final soma) ──────
     if organelles is None:
-        organelles = find_organelles(mesh, verbose=verbose)
+        organelles = find_organelles(mesh)
 
     # ── 2. Build main-component vertex adjacency ─────────────────────
-    if verbose:
-        print("[skeliner.pre] Soma: building vertex adjacency...")
     main_fi = np.where(labels == main)[0]
     adj: dict[int, list[int]] = defaultdict(list)
     for fi in main_fi:
@@ -2006,8 +2007,6 @@ def find_soma_via_ring_cutoff(
     #       center Z-level (from find_nucleus_center).  These are
     #       outer-surface vertices, tilt-invariant, and form a
     #       symmetric band around the soma cross-section.
-    if verbose:
-        print("[skeliner.pre] Soma: BFS ring analysis...")
     all_main_verts = np.fromiter(adj.keys(), dtype=np.intp)
     main_set = set(adj.keys())
     seed_vi = nuc.get("soma_seed_vi", np.array([], dtype=np.intp))
@@ -2027,12 +2026,6 @@ def find_soma_via_ring_cutoff(
         ring_level[vi] = 0
         queue.append(vi)
         ring_verts[0].append(vi)
-    if verbose:
-        print(
-            f"[skeliner.pre] Soma: seed ring 0: "
-            f"{len(seed_verts)} verts (soma surface at mid-Z)"
-        )
-
     while queue:
         v = queue.popleft()
         lv = ring_level[v]
@@ -2103,19 +2096,7 @@ def find_soma_via_ring_cutoff(
     # Z-extent.  If it doesn't, extend the cutoff.
     min_cutoff = max(int(z_span / avg_edge), 1)
     if cutoff < min_cutoff:
-        if verbose:
-            print(
-                f"[skeliner.pre] Soma: cutoff {cutoff} < "
-                f"min_cutoff {min_cutoff} (z_span/avg_edge), extending"
-            )
         cutoff = min_cutoff
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Soma: peak ring {peak_ring}, "
-            f"cutoff ring {cutoff}/{max_ring} "
-            f"(peak search limit {search_end})"
-        )
 
     # ── 5. Fit ellipsoid from BFS ring vertices ────────────────────
     #       Include ring 0 (nucleus seed) in the soma vertex set.
@@ -2126,7 +2107,7 @@ def find_soma_via_ring_cutoff(
 
     initial_soma = Soma.fit(mesh.vertices[bfs_verts_arr])
 
-    soma = _assign_soma_verts(mesh, initial_soma, main_fi, adj, verbose=verbose)
+    soma = _assign_soma_verts(mesh, initial_soma, main_fi, adj)
 
     # ── 6. Prune neurite tubes from absorbed soma ─────────────────
     #       Pocket absorption may swallow neurite stubs.  Find
@@ -2245,13 +2226,6 @@ def find_soma_via_ring_cutoff(
 
             if neurite_prune:
                 soma_set -= neurite_prune
-                if verbose:
-                    print(
-                        f"[skeliner.pre]   soma prune: "
-                        f"{n_tubes} neurite stub(s), "
-                        f"removed {len(neurite_prune):,} → "
-                        f"{len(soma_set):,} verts"
-                    )
 
         # ── 6b. Per-exit stub erosion ─────────────────────────────
         #        For each neurite exit (cluster of boundary verts),
@@ -2358,13 +2332,6 @@ def find_soma_via_ring_cutoff(
             if all_stub and len(all_stub) < len(soma_main) * 0.5:
                 soma_set -= all_stub
                 soma_set |= non_main_soma
-                if verbose:
-                    print(
-                        f"[skeliner.pre]   soma prune: "
-                        f"eroded {len(all_stub):,} stub verts "
-                        f"from {n_exits_eroded} exit(s) → "
-                        f"{len(soma_set):,} verts"
-                    )
 
         # ── 6c. Drop small disconnected soma fragments ─────────────
         #        Axon sections inside the ellipsoid may form small
@@ -2392,12 +2359,6 @@ def find_soma_via_ring_cutoff(
         n_frag = len(main_soma_final) - len(largest_final)
         if n_frag > 0:
             soma_set = set(largest_final) | non_main_soma
-            if verbose:
-                print(
-                    f"[skeliner.pre]   soma prune: "
-                    f"dropped {n_frag:,} disconnected → "
-                    f"{len(soma_set):,} verts"
-                )
 
         # Refit ellipsoid to final pruned vertex set
         if len(soma_set) != len(soma.verts):
@@ -2429,22 +2390,17 @@ def find_soma_via_ring_cutoff(
                     soma.verts = sv
             else:
                 soma.verts = sv
-            if verbose:
-                print(
-                    f"[skeliner.pre] Soma: excluded "
-                    f"{n_removed:,} organelle verts → "
-                    f"{len(soma.verts):,}"
-                )
 
     if verbose:
+        dt = time.perf_counter() - _t0
         print(
-            f"[skeliner.pre] Soma: center=["
-            f"{soma.center[0]:.0f}, {soma.center[1]:.0f}, "
-            f"{soma.center[2]:.0f}], "
-            f"axes=[{soma.axes[0]:.0f}, {soma.axes[1]:.0f}, "
-            f"{soma.axes[2]:.0f}], "
-            f"{len(soma.verts):,} surface verts "
-            f"(cutoff ring {cutoff})"
+            f"[skeliner.pre] Soma: "
+            f"center=[{soma.center[0]:.0f}, "
+            f"{soma.center[1]:.0f}, {soma.center[2]:.0f}], "
+            f"axes=[{soma.axes[0]:.0f}, "
+            f"{soma.axes[1]:.0f}, {soma.axes[2]:.0f}], "
+            f"{len(soma.verts):,} verts, "
+            f"cutoff ring {cutoff}/{max_ring} ({dt:.1f}s)"
         )
 
     soma.nucleus = {
