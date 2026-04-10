@@ -2583,8 +2583,6 @@ def break_up_mesh(
     remain_fi = np.where(remain)[0]
 
     if len(remain_fi) == 0:
-        if verbose:
-            print("break_up_mesh: no remaining faces after exclusion")
         org_out = _build_org_output(organelles, organelles.mask)
         return MeshComponents(
             soma=soma,
@@ -2600,6 +2598,8 @@ def break_up_mesh(
     neurite_candidates: list[np.ndarray] = []
     extra_soma_vi: list[int] = []
     organelles_expanded = organelles.mask.copy()
+    n_trapped = 0
+    n_soma_absorbed = 0
 
     for comp in components:
         # Reachability: is any face in its mesh component's body?
@@ -2608,11 +2608,7 @@ def break_up_mesh(
         if not in_main:
             # trapped by organelles
             organelles_expanded[comp] = True
-            if verbose:
-                print(
-                    f"break_up_mesh: absorbed {len(comp)} faces "
-                    f"as missed organelle (trapped)"
-                )
+            n_trapped += len(comp)
             continue
 
         # Boundary analysis for soma detection (skipped without a soma)
@@ -2635,11 +2631,7 @@ def break_up_mesh(
             if soma_frac > 0.5:
                 comp_vi = np.unique(faces[comp])
                 extra_soma_vi.extend(comp_vi.tolist())
-                if verbose:
-                    print(
-                        f"break_up_mesh: absorbed {len(comp)} faces "
-                        f"({len(comp_vi)} verts) as missed soma"
-                    )
+                n_soma_absorbed += len(comp)
                 continue
 
         neurite_candidates.append(comp)
@@ -2666,17 +2658,20 @@ def break_up_mesh(
     discarded = neurite_candidates[split_idx:]
 
     if verbose:
+        dt = time.perf_counter() - _t0
         n_disc_faces = sum(len(c) for c in discarded)
-        thresh = len(neurites[-1]) if neurites else 0
-        soma_msg = (
-            f"soma {len(soma.verts):,} verts, " if soma is not None else "no soma, "
-        )
+        parts = [f"{len(neurites)} neurites"]
+        if discarded:
+            parts.append(
+                f"{len(discarded)} discarded ({n_disc_faces:,}f)"
+            )
+        if n_trapped:
+            parts.append(f"trapped +{n_trapped:,}f")
+        if n_soma_absorbed:
+            parts.append(f"soma +{n_soma_absorbed:,}f")
         print(
-            f"break_up_mesh: {len(neurites)} neurites, "
-            f"{len(discarded)} discarded ({n_disc_faces:,} faces, "
-            f"threshold ~{thresh} faces), "
-            f"{soma_msg}"
-            f"organelles {organelles_expanded.sum():,} faces"
+            f"[skeliner.pre] break_up_mesh: "
+            f"{', '.join(parts)} ({dt:.1f}s)"
         )
 
     org_out = _build_org_output(organelles, organelles_expanded)
