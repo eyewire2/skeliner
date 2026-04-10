@@ -1977,10 +1977,33 @@ def find_soma_via_ring_cutoff(
     if organelles is None:
         organelles = find_organelles(mesh)
 
-    # ── 2. Build main-component vertex adjacency ─────────────────────
-    main_fi = np.where(labels == main)[0]
+    # ── 2. Build soma-component vertex adjacency ─────────────────
+    #       The soma is on the component that contains the nucleus
+    #       seeds.  This may differ from the largest component when
+    #       the soma is disconnected from the main neurite surface
+    #       (a gap that remove_gaps would bridge later).
+    seed_vi = nuc.get("soma_seed_vi", np.array([], dtype=np.intp))
+
+    # Determine which component the nucleus seeds belong to
+    soma_ci = main
+    if len(seed_vi) > 0:
+        vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
+        for fi in range(len(mesh.faces)):
+            ci = int(labels[fi])
+            for v in mesh.faces[fi]:
+                vert_comp[int(v)] = ci
+        seed_comps = vert_comp[seed_vi]
+        valid = seed_comps >= 0
+        if valid.any():
+            from collections import Counter
+
+            soma_ci = Counter(
+                seed_comps[valid].tolist()
+            ).most_common(1)[0][0]
+
+    soma_fi = np.where(labels == soma_ci)[0]
     adj: dict[int, list[int]] = defaultdict(list)
-    for fi in main_fi:
+    for fi in soma_fi:
         v = mesh.faces[fi]
         for i in range(3):
             a, b = int(v[i]), int(v[(i + 1) % 3])
@@ -1992,15 +2015,20 @@ def find_soma_via_ring_cutoff(
     #       center Z-level (from find_nucleus_center).  These are
     #       outer-surface vertices, tilt-invariant, and form a
     #       symmetric band around the soma cross-section.
-    all_main_verts = np.fromiter(adj.keys(), dtype=np.intp)
-    main_set = set(adj.keys())
-    seed_vi = nuc.get("soma_seed_vi", np.array([], dtype=np.intp))
-    # Keep only seeds that are on the main component
-    seed_verts = np.array([v for v in seed_vi if v in main_set], dtype=np.intp)
+    all_soma_verts = np.fromiter(adj.keys(), dtype=np.intp)
+    soma_set = set(adj.keys())
+    # Keep only seeds that are on the soma component
+    seed_verts = np.array(
+        [v for v in seed_vi if v in soma_set], dtype=np.intp
+    )
     if len(seed_verts) == 0:
         # Fallback: single nearest vertex to nucleus center
-        seed_verts = all_main_verts[
-            np.argmin(np.linalg.norm(mesh.vertices[all_main_verts] - center, axis=1))
+        seed_verts = all_soma_verts[
+            np.argmin(
+                np.linalg.norm(
+                    mesh.vertices[all_soma_verts] - center, axis=1
+                )
+            )
         ].reshape(1)
 
     ring_level: dict[int, int] = {}
@@ -2092,7 +2120,7 @@ def find_soma_via_ring_cutoff(
 
     initial_soma = Soma.fit(mesh.vertices[bfs_verts_arr])
 
-    soma = _assign_soma_verts(mesh, initial_soma, main_fi, adj)
+    soma = _assign_soma_verts(mesh, initial_soma, soma_fi, adj)
 
     # ── 6. Prune neurite tubes from absorbed soma ─────────────────
     #       Pocket absorption may swallow neurite stubs.  Find
@@ -2129,9 +2157,9 @@ def find_soma_via_ring_cutoff(
             #        "Large" is determined by Otsu on non-soma CC
             #        sizes — fully data-driven, no hard thresholds.
 
-            # Find non-soma CCs on the main component
-            all_main_set = set(np.unique(mesh.faces[main_fi]).tolist())
-            non_soma = all_main_set - soma_set
+            # Find non-soma CCs on the soma component
+            all_comp_set = set(np.unique(mesh.faces[soma_fi]).tolist())
+            non_soma = all_comp_set - soma_set
             vis_ns: set[int] = set()
             neurite_tree: set[int] = set()
             ns_sizes: list[int] = []
@@ -2218,23 +2246,23 @@ def find_soma_via_ring_cutoff(
         #        start narrow (tube); stop when the ring widens into
         #        the soma body (Otsu).  Erode each exit separately so
         #        narrow tubes get deep erosion, wide junctions don't.
-        main_vert_set = set(adj.keys())
-        non_main_soma = soma_set - main_vert_set
-        all_main_set = set(np.unique(mesh.faces[main_fi]).tolist())
-        non_soma = all_main_set - soma_set
+        comp_vert_set = set(adj.keys())
+        non_comp_soma = soma_set - comp_vert_set
+        all_comp_set = set(np.unique(mesh.faces[soma_fi]).tolist())
+        non_soma = all_comp_set - soma_set
 
         # Find soma boundary verts adjacent to non-soma.
         # Only erode when step 6a pruned neurite chains.
         exit_verts: set[int] = set()
         if neurite_prune and non_soma:
-            for v in soma_set & main_vert_set:
+            for v in soma_set & comp_vert_set:
                 for nv in adj.get(v, []):
                     if nv in non_soma:
                         exit_verts.add(v)
                         break
 
         if exit_verts:
-            soma_main = soma_set & main_vert_set
+            soma_main = soma_set & comp_vert_set
 
             # Group exit verts into per-exit clusters
             vis_ex: set[int] = set()
@@ -2316,12 +2344,12 @@ def find_soma_via_ring_cutoff(
 
             if all_stub and len(all_stub) < len(soma_main) * 0.5:
                 soma_set -= all_stub
-                soma_set |= non_main_soma
+                soma_set |= non_comp_soma
 
         # ── 6c. Drop small disconnected soma fragments ─────────────
         #        Axon sections inside the ellipsoid may form small
         #        CCs disconnected from the main soma body.
-        main_soma_final = soma_set & main_vert_set
+        main_soma_final = soma_set & comp_vert_set
         vis_final: set[int] = set()
         largest_final: list[int] = []
         for cc_start in main_soma_final:
@@ -2343,7 +2371,7 @@ def find_soma_via_ring_cutoff(
 
         n_frag = len(main_soma_final) - len(largest_final)
         if n_frag > 0:
-            soma_set = set(largest_final) | non_main_soma
+            soma_set = set(largest_final) | non_comp_soma
 
         # Refit ellipsoid to final pruned vertex set
         if len(soma_set) != len(soma.verts):
