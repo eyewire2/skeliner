@@ -4843,7 +4843,31 @@ def find_pocket_mouths(
         pocket_area = float(area_arr[cluster].sum())
         opening_area = _rim_enclosed_area(boundary_edges, verts_arr)
         if opening_area <= 0:
-            continue  # no measurable opening = not a pocket entrance
+            # Boundary loops with non-manifold junctions (vertex
+            # shared by 4+ boundary edges) get discarded by
+            # _rim_enclosed_area.  Fall back to the convex hull of
+            # boundary vertices: hull_area >= true opening area, so
+            # pocket_area / hull_area is a *lower bound* on the true
+            # fold ratio — this can only recover missed mouths, never
+            # reject valid ones.
+            from scipy.spatial import ConvexHull
+
+            bverts = list(
+                {v for e in boundary_edges for v in e}
+            )
+            if len(bverts) >= 3:
+                pts = verts_arr[bverts]
+                centroid = pts.mean(axis=0)
+                centered = pts - centroid
+                _, _, vh = np.linalg.svd(centered)
+                pts_2d = centered @ vh[:2].T
+                try:
+                    hull = ConvexHull(pts_2d)
+                    opening_area = float(hull.volume)
+                except Exception:
+                    pass
+            if opening_area <= 0:
+                continue
         fold_ratio = pocket_area / opening_area
         if fold_ratio < min_fold_ratio:
             continue
