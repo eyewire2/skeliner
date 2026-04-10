@@ -4747,6 +4747,7 @@ def find_pocket_mouths(
     mesh_stats: MeshStats | None = None,
     _adj: dict[int, set[int]] | None = None,
     _edge_to_face: dict[tuple[int, int], list[int]] | None = None,
+    _non_main_mask: np.ndarray | None = None,
 ) -> list[list[tuple[int, int]]]:
     """Find mouth edges — boundaries of negative-dot face clusters.
 
@@ -4850,22 +4851,30 @@ def find_pocket_mouths(
             # pocket_area / hull_area is a *lower bound* on the true
             # fold ratio — this can only recover missed mouths, never
             # reject valid ones.
-            from scipy.spatial import ConvexHull
-
-            bverts = list(
-                {v for e in boundary_edges for v in e}
+            # Only apply on the main component — small disconnected
+            # components have degenerate boundary topology that
+            # produces false positives.
+            on_non_main = (
+                _non_main_mask is not None
+                and _non_main_mask[cluster[0]]
             )
-            if len(bverts) >= 3:
-                pts = verts_arr[bverts]
-                centroid = pts.mean(axis=0)
-                centered = pts - centroid
-                _, _, vh = np.linalg.svd(centered)
-                pts_2d = centered @ vh[:2].T
-                try:
-                    hull = ConvexHull(pts_2d)
-                    opening_area = float(hull.volume)
-                except Exception:
-                    pass
+            if not on_non_main:
+                from scipy.spatial import ConvexHull
+
+                bverts = list(
+                    {v for e in boundary_edges for v in e}
+                )
+                if len(bverts) >= 3:
+                    pts = verts_arr[bverts]
+                    centroid = pts.mean(axis=0)
+                    centered = pts - centroid
+                    _, _, vh = np.linalg.svd(centered)
+                    pts_2d = centered @ vh[:2].T
+                    try:
+                        hull = ConvexHull(pts_2d)
+                        opening_area = float(hull.volume)
+                    except Exception:
+                        pass
             if opening_area <= 0:
                 continue
         fold_ratio = pocket_area / opening_area
@@ -4908,6 +4917,7 @@ def find_pocket_organelles(
     min_cluster_size: int = 5,
     verbose: bool = False,
     mesh_stats: MeshStats | None = None,
+    _non_main_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Detect pocket organelles — membrane folds connected to the neuron surface.
 
@@ -4991,6 +5001,7 @@ def find_pocket_organelles(
         mesh_stats=mesh_stats,
         _adj=adj,
         _edge_to_face=edge_to_face,
+        _non_main_mask=_non_main_mask,
     )
 
     if not mouths:
@@ -5085,6 +5096,7 @@ def find_pocket_organelles(
         cluster: list[int] = []
         n_pocket_boundary = 0
         n_total_boundary = 0
+        adj_pocket_faces: set[int] = set()
         bfs_queue = deque([fi])
         while bfs_queue:
             curr = bfs_queue.popleft()
@@ -5099,15 +5111,25 @@ def find_pocket_organelles(
                     n_total_boundary += 1
                     if pocket[nfi]:
                         n_pocket_boundary += 1
+                        adj_pocket_faces.add(nfi)
         if len(cluster) == 0:
             continue
         enclosure = n_pocket_boundary / n_total_boundary if n_total_boundary else 0
         # Small holes: fill if enclosure meets threshold.
         # Large holes: only fill if fully entrapped (enclosure ~1.0)
         #   and not the main mesh body (< 5% of faces).
+        # On non-main structural components, a hole can't be bigger
+        # than the pocket membrane enclosing it — prevents swallowing
+        # entire small disconnected components.
         n_faces = len(pocket)
         is_small = len(cluster) <= max_hole_size
         is_entrapped = enclosure >= 0.99 and len(cluster) < n_faces * 0.05
+        if (
+            _non_main_mask is not None
+            and _non_main_mask[cluster[0]]
+            and len(cluster) > len(adj_pocket_faces)
+        ):
+            continue
         if (is_small and enclosure >= hole_enclosure_ratio) or is_entrapped:
             for c in cluster:
                 pocket[c] = True
@@ -5381,6 +5403,11 @@ def find_organelles(
         main_ci=0,
     )
 
+    non_main_mask = np.zeros(len(mesh.faces), dtype=bool)
+    for ci in structural_comps:
+        if ci != main_ci:
+            non_main_mask[face_comp == ci] = True
+
     pocket = find_pocket_organelles(
         mesh,
         radius=radius,
@@ -5388,6 +5415,7 @@ def find_organelles(
         min_cluster_size=min_cluster_size,
         verbose=verbose,
         mesh_stats=precomputed_structural,
+        _non_main_mask=non_main_mask,
     )
 
 
