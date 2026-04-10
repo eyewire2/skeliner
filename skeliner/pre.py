@@ -1384,8 +1384,6 @@ def _stitch_and_rebuild(
     mesh: trimesh.Trimesh,
     sel: set[int],
     loop_pairs: list[tuple[list[int], list[int]]],
-    *,
-    verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Remove *sel* faces, stitch each loop pair, rebuild mesh once."""
     # Vert-to-face for orientation (non-removed faces only)
@@ -1401,11 +1399,6 @@ def _stitch_and_rebuild(
     for loop_a, loop_b in loop_pairs:
         tris = _zipper_stitch(mesh, loop_a, loop_b, vert_to_faces, new_verts)
         all_stitch.extend(tris)
-        if verbose:
-            print(
-                f"[skeliner.pre]   Pair ({len(loop_a)}v + {len(loop_b)}v): "
-                f"{len(tris)} stitch faces"
-            )
 
     # Degenerate removed faces, append stitch faces at the end
     new_faces = mesh.faces.copy()
@@ -1422,19 +1415,11 @@ def _stitch_and_rebuild(
         stitch_faces = np.array(all_stitch, dtype=np.int64)
         new_faces = np.vstack([new_faces, stitch_faces])
 
-    result = trimesh.Trimesh(
+    return trimesh.Trimesh(
         vertices=all_vertices,
         faces=new_faces,
         process=False,
     )
-
-    if verbose:
-        print(
-            f"[skeliner.pre] Result: {len(result.faces):,} faces "
-            f"({len(sel)} removed, {len(all_stitch)} stitched)"
-        )
-
-    return result
 
 
 def merge_selected_faces(
@@ -1539,7 +1524,7 @@ def merge_selected_faces(
     if verbose:
         print(f"[skeliner.pre] Stitching {len(pairs)} loop pair(s) ...")
 
-    return _stitch_and_rebuild(mesh, sel, pairs, verbose=verbose)
+    return _stitch_and_rebuild(mesh, sel, pairs)
 
 
 def remove_selected_faces(
@@ -2516,6 +2501,10 @@ def break_up_mesh(
     -------
     MeshComponents
     """
+    if verbose:
+        print("[skeliner.pre] Breaking up mesh …")
+        _t0 = time.perf_counter()
+
     faces = np.asarray(mesh.faces)
     verts = mesh.vertices
     nF = len(faces)
@@ -3903,6 +3892,10 @@ def find_gaps(
         the gap, *disc_a* and *disc_b* are disconnected component indices
         (``-1`` for main), sorted by gap distance (smallest first).
     """
+    if verbose:
+        print("[skeliner.pre] Finding gaps …")
+        _t0 = time.perf_counter()
+
     if mesh_stats is not None and mesh_stats.face_comp is not None:
         labels, main = mesh_stats.face_comp, mesh_stats.main_ci
     else:
@@ -3921,17 +3914,19 @@ def find_gaps(
     else:
         disc = find_disconnected(
             mesh,
-            verbose=verbose,
             soma=soma,
             organelles=organelles,
             mesh_stats=mesh_stats,
             fusions=fusions,
         )
 
-    if verbose:
-        print(f"[skeliner.pre] Gaps: {len(disc)} disconnected components")
-
     if not disc:
+        if verbose:
+            dt = time.perf_counter() - _t0
+            print(
+                f"[skeliner.pre] Gaps: 0 gaps, "
+                f"no disconnected components ({dt:.1f}s)"
+            )
         return []
 
     # Build the set of vertices touched by any fusion-cluster face.
@@ -3963,12 +3958,6 @@ def find_gaps(
             if fusion_clearance is not None
             else 10.0 * median_edge
         )
-        if verbose:
-            print(
-                f"[skeliner.pre] Gaps: fusion clearance = {fusion_clear:.0f} nm "
-                f"(10 * median edge {median_edge:.0f})"
-            )
-
     def _component_verts(fis: np.ndarray) -> np.ndarray:
         verts = np.unique(mesh.faces[fis])
         if not fusion_vert_set:
@@ -4013,9 +4002,6 @@ def find_gaps(
             "fusion_dist": _attach_fusion_dists(coords),
         }
 
-    if verbose:
-        print(f"[skeliner.pre] Gaps: built KDTrees for {len(disc) + 1} components")
-
     # For each disconnected component, find its nearest neighbour.
     # Deduplicate: if A→B and B→A both exist, keep only one.
     gaps = []
@@ -4024,9 +4010,6 @@ def find_gaps(
     all_cids = [main] + disc_cids
 
     # Build face adjacency for BFS-based tip selection
-    if verbose:
-        print("[skeliner.pre] Gaps: building face adjacency...")
-
     non_degen = _non_degenerate(mesh.faces)
     edge_to_faces_gap: dict[tuple[int, int], list[int]] = defaultdict(list)
     for fi in range(len(mesh.faces)):
@@ -4133,9 +4116,6 @@ def find_gaps(
                 int(idxs[min_i]),  # idx into cid_b's coords
             )
 
-    if verbose:
-        print(f"[skeliner.pre] Gaps: computed {len(edge_info)} pairwise distances")
-
     # Prim's MST from main
     connected: set[int] = {main}
     remaining: set[int] = set(disc_cids)
@@ -4159,23 +4139,25 @@ def find_gaps(
         dist, ca, idx_a, cb, idx_b = edge_info[key]
         _add_gap(ca, cb, idx_a, idx_b, dist)
 
-    if verbose:
-        print(
-            f"[skeliner.pre] Gaps: MST connected {len(connected)} components, {len(gaps)} gaps found"
-        )
-
     # Sort by gap distance
     gaps.sort(key=lambda x: x[2])
 
     if verbose:
-        print(f"[skeliner.pre] Gaps: {len(gaps)} gaps found")
-        for i, (fa, fb, dist, da, db) in enumerate(gaps):
-            label_a = "main" if da == -1 else f"disc {da}"
-            label_b = "main" if db == -1 else f"disc {db}"
-            print(
-                f"  gap {i}: {label_a} ({len(fa)}f) ↔ {label_b} ({len(fb)}f), "
-                f"dist={dist:.0f}"
+        dt = time.perf_counter() - _t0
+        if gaps:
+            dists = [g[2] for g in gaps]
+            dist_str = (
+                f", dist {min(dists):.0f}–{max(dists):.0f}"
+                if len(dists) > 1
+                else f", dist {dists[0]:.0f}"
             )
+        else:
+            dist_str = ""
+        print(
+            f"[skeliner.pre] Gaps: {len(gaps)} gaps "
+            f"across {len(disc)} disconnected components"
+            f"{dist_str} ({dt:.1f}s)"
+        )
 
     return gaps
 
@@ -4214,9 +4196,11 @@ def remove_gaps(
     trimesh.Trimesh
         Mesh with gaps bridged.
     """
-    if gaps is not None:
-        gaps = gaps
-    else:
+    if verbose:
+        print("[skeliner.pre] Removing gaps …")
+        _t0 = time.perf_counter()
+
+    if gaps is None:
         gaps = find_gaps(
             mesh,
             verbose=verbose,
@@ -4227,15 +4211,16 @@ def remove_gaps(
 
     if not gaps:
         if verbose:
-            print("[skeliner.pre] No gaps to bridge")
+            dt = time.perf_counter() - _t0
+            print(
+                f"[skeliner.pre] remove_gaps: "
+                f"no gaps to bridge ({dt:.1f}s)"
+            )
         return mesh
 
     # Build edge / face adjacency once
     edge_to_faces = _edge_to_faces(mesh)
     face_adj = _face_adjacency(mesh, edge_to_faces)
-
-    if verbose:
-        print(f"[skeliner.pre] Bridging {len(gaps)} gaps")
 
     # For each gap, expand each side's tip until both rims are real
     # loops. The initial tip from find_gaps can produce a degenerate
@@ -4250,11 +4235,6 @@ def remove_gaps(
         sel_b, loop_b = _expand_tip_to_good_rim(mesh, faces_b, edge_to_faces, face_adj)
 
         if loop_a is None or loop_b is None:
-            if verbose:
-                print(
-                    f"[skeliner.pre]   Gap {gap_i} (dist={dist:.0f}): "
-                    f"could not trace rim loops on one side, skipping"
-                )
             n_skipped += 1
             continue
 
@@ -4263,50 +4243,50 @@ def remove_gaps(
         # introduce a fusion.
         reason = _validate_loop_pair(loop_a, loop_b)
         if reason is not None:
-            if verbose:
-                print(
-                    f"[skeliner.pre]   Gap {gap_i} (dist={dist:.0f}): "
-                    f"skipped after expansion ({reason})"
-                )
             n_skipped += 1
             continue
 
         loop_pairs.append((loop_a, loop_b))
         faces_to_remove |= sel_a | sel_b
 
-        if verbose:
-            extra = ""
-            if len(sel_a) != len(faces_a) or len(sel_b) != len(faces_b):
-                extra = (
-                    f" [expanded a:{len(faces_a)}->{len(sel_a)}f, "
-                    f"b:{len(faces_b)}->{len(sel_b)}f]"
-                )
-            print(
-                f"[skeliner.pre]   Gap {gap_i} (dist={dist:.0f}): "
-                f"{len(loop_a)}v + {len(loop_b)}v{extra}"
-            )
-
     if not loop_pairs:
         if verbose:
-            print("[skeliner.pre] No valid loop pairs; nothing to bridge")
+            dt = time.perf_counter() - _t0
+            print(
+                f"[skeliner.pre] remove_gaps: "
+                f"no valid loop pairs ({dt:.1f}s)"
+            )
         return mesh
 
-    if verbose:
-        print(f"[skeliner.pre] Removing {len(faces_to_remove)} tip faces")
-
-    result = _stitch_and_rebuild(mesh, faces_to_remove, loop_pairs, verbose=verbose)
+    result = _stitch_and_rebuild(mesh, faces_to_remove, loop_pairs)
 
     # Invalidate topology (components merged); pad outward_dots for appended faces
+    n_added = len(result.faces) - len(mesh.faces)
     if mesh_stats is not None:
-        n_added = len(result.faces) - len(mesh.faces)
         if n_added > 0 and mesh_stats.outward_dots is not None:
             mesh_stats.outward_dots = np.concatenate(
                 [
                     mesh_stats.outward_dots,
-                    np.ones(n_added, dtype=mesh_stats.outward_dots.dtype),
+                    np.ones(
+                        n_added,
+                        dtype=mesh_stats.outward_dots.dtype,
+                    ),
                 ]
             )
         mesh_stats.invalidate_topology()
+
+    if verbose:
+        dt = time.perf_counter() - _t0
+        parts = [f"bridged {len(loop_pairs)}/{len(gaps)} gaps"]
+        parts.append(f"removed {len(faces_to_remove):,}f")
+        if n_added > 0:
+            parts.append(f"stitched +{n_added:,}f")
+        if n_skipped:
+            parts.append(f"{n_skipped} skipped")
+        print(
+            f"[skeliner.pre] remove_gaps: "
+            f"{', '.join(parts)} ({dt:.1f}s)"
+        )
 
     return result
 
