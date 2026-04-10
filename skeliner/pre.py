@@ -1,7 +1,9 @@
 """skeliner.pre – mesh preprocessing utilities."""
 
+import time
 import warnings
 from collections import defaultdict, deque
+from contextlib import contextmanager
 
 import igraph as ig
 import numpy as np
@@ -40,6 +42,35 @@ __all__ = [
     "remove_organelles",
     "remove_parallel_patches",
 ]
+
+
+# ---------------------------------------------------------------------
+#  Verbose timing helper (same style as skeletonize._timed)
+# ---------------------------------------------------------------------
+
+
+@contextmanager
+def _timed(label: str, *, verbose: bool):
+    """Context manager printing ``↳  label … N.NN s``."""
+    if not verbose:
+        yield lambda *_: None
+        return
+
+    _PAD = 47
+    print(f" {label:<{_PAD}} …", end="", flush=True)
+    t0 = time.perf_counter()
+    _msgs: list[str] = []
+
+    def log(msg: str) -> None:
+        _msgs.append(str(msg))
+
+    try:
+        yield log
+    finally:
+        dt = time.perf_counter() - t0
+        print(f" {dt:.2f} s")
+        for m in _msgs:
+            print(f"      └─ {m}")
 
 
 def _non_degenerate(faces: np.ndarray) -> np.ndarray:
@@ -7805,53 +7836,93 @@ def preprocess(
     components : MeshComponents
         Classified pieces: soma, organelles, neurites, discarded.
     """
+    if verbose:
+        print(
+            f"[skeliner.pre] starting preprocessing "
+            f"({len(mesh.vertices):,} vertices, "
+            f"{len(mesh.faces):,} faces)"
+        )
+        _t0 = time.perf_counter()
+
     # 1. Parallel patches
-    patches = find_parallel_patches(mesh, verbose=verbose)
-    if patches:
-        mesh = remove_parallel_patches(mesh, patches=patches, verbose=verbose)
+    with _timed("↳  find & remove parallel patches", verbose=verbose):
+        patches = find_parallel_patches(mesh)
+        if patches:
+            mesh = remove_parallel_patches(mesh, patches=patches)
 
     # 2. Organelles (also yields mesh_stats for downstream stages)
-    org, mesh_stats = find_organelles(mesh, verbose=verbose, return_mesh_stats=True)
-
-    # 3. Soma
-    soma = find_soma_via_ring_cutoff(
-        mesh, organelles=org, mesh_stats=mesh_stats, verbose=verbose
-    )
-
-    # 4. Disconnected → gaps
-    fusions = find_fusions(mesh, mesh_stats=mesh_stats, verbose=verbose)
-    disconnected = find_disconnected(
-        mesh,
-        soma=soma,
-        organelles=org,
-        mesh_stats=mesh_stats,
-        fusions=fusions,
-        verbose=verbose,
-    )
-
-    gaps = find_gaps(
-        mesh,
-        soma=soma,
-        disconnected=disconnected,
-        mesh_stats=mesh_stats,
-        fusions=fusions,
-        verbose=verbose,
-    )
-    if gaps:
-        mesh = remove_gaps(mesh, gaps=gaps, mesh_stats=mesh_stats, verbose=verbose)
-
-    # 5. Fusions
-    if fusions:
-        mesh = remove_fusions(
-            mesh, fusions=fusions, mesh_stats=mesh_stats, verbose=verbose
+    with _timed("↳  find organelles", verbose=verbose) as log:
+        org, mesh_stats = find_organelles(
+            mesh, return_mesh_stats=True
+        )
+        log(
+            f"pocket={int(org.pocket.sum()):,}, "
+            f"isolated={int(org.isolated.sum()):,}"
         )
 
+    # 3. Soma
+    with _timed("↳  find soma", verbose=verbose) as log:
+        soma = find_soma_via_ring_cutoff(
+            mesh, organelles=org, mesh_stats=mesh_stats
+        )
+        if soma is not None:
+            log(f"center={soma.center.round(0).tolist()}")
+        else:
+            log("no soma detected")
+
+    # 4. Fusions → disconnected → gaps
+    with _timed("↳  find fusions", verbose=verbose) as log:
+        fusions = find_fusions(mesh, mesh_stats=mesh_stats)
+        log(f"{len(fusions)} fusions")
+
+    with _timed("↳  find disconnected", verbose=verbose):
+        disconnected = find_disconnected(
+            mesh,
+            soma=soma,
+            organelles=org,
+            mesh_stats=mesh_stats,
+            fusions=fusions,
+        )
+
+    with _timed("↳  find & remove gaps", verbose=verbose) as log:
+        gaps = find_gaps(
+            mesh,
+            soma=soma,
+            disconnected=disconnected,
+            mesh_stats=mesh_stats,
+            fusions=fusions,
+        )
+        log(f"{len(gaps)} gaps")
+        if gaps:
+            mesh = remove_gaps(
+                mesh, gaps=gaps, mesh_stats=mesh_stats
+            )
+
+    # 5. Fusions
+    with _timed("↳  remove fusions", verbose=verbose):
+        if fusions:
+            mesh = remove_fusions(
+                mesh, fusions=fusions, mesh_stats=mesh_stats
+            )
+
     # 6. Break up mesh
-    components = break_up_mesh(mesh, soma, org, verbose=verbose)
+    with _timed("↳  break up mesh", verbose=verbose) as log:
+        components = break_up_mesh(mesh, soma, org)
+        log(f"{len(components.neurites)} neurites")
 
     # 7. Compact (optional — remaps everything in MeshComponents)
     if compact:
-        mesh, components = compact_mesh(mesh, components=components, verbose=verbose)
+        with _timed("↳  compact mesh", verbose=verbose):
+            mesh, components = compact_mesh(
+                mesh, components=components
+            )
+
+    if verbose:
+        dt = time.perf_counter() - _t0
+        print(
+            f"[skeliner.pre] preprocessing done "
+            f"({len(mesh.faces):,} faces, {dt:.1f}s)"
+        )
 
     return mesh, components
 
