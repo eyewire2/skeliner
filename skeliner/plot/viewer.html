@@ -516,6 +516,7 @@
             <div>
                 <span class="label">Highlighted: </span><span class="value" id="hlCount">0</span>
                 <button id="hlClear" style="font-size: 11px; cursor: pointer">Clear</button>
+                <button id="hlRescue" style="font-size: 11px; cursor: pointer; display: none; margin-left: 6px">→ Neurite</button>
             </div>
             <div id="hlSaveRow" style="display: none; margin-top: 4px">
                 <input
@@ -725,7 +726,9 @@ let meshCentroid = [0, 0, 0];
                     manualHighlightFaces.clear();
                     rebuildManualHighlight();
                     syncManualHighlight();
+                    document.getElementById("hlRescue").style.display = "none";
                 });
+                document.getElementById("hlRescue").addEventListener("click", runRescueAsNeurite);
                 document.getElementById("hlSaveBtn").addEventListener("click", saveHighlightAsAnnotation);
                 document.getElementById("hlSaveName").addEventListener("keydown", (e) => {
                     if (e.key === "Enter") saveHighlightAsAnnotation();
@@ -1554,6 +1557,8 @@ let meshCentroid = [0, 0, 0];
                     const verb = allSelected ? "Deselected" : "Selected";
                     document.getElementById("selDetail").innerHTML =
                         `<div>${verb}: <b>${label}</b> (${manualHighlightFaces.size} faces total)</div>`;
+                    const isDiscarded = !allSelected && label.startsWith("discarded ");
+                    document.getElementById("hlRescue").style.display = isDiscarded ? "inline-block" : "none";
                     return;
                 }
             }
@@ -1787,6 +1792,23 @@ let meshCentroid = [0, 0, 0];
                 const data = await _runAction(
                     document.getElementById("hlRemove"),
                     () => fetch("/remove_selected", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),
+                    }),
+                );
+                if (data && data.ok) {
+                    manualHighlightFaces.clear();
+                    rebuildManualHighlight();
+                    syncManualHighlight();
+                }
+            }
+
+            async function runRescueAsNeurite() {
+                if (manualHighlightFaces.size === 0) return;
+                const data = await _runAction(
+                    document.getElementById("hlRescue"),
+                    () => fetch("/rescue_as_neurite", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ faces: Array.from(manualHighlightFaces) }),

@@ -2287,6 +2287,86 @@ def _create_app(
             }
         )
 
+    async def do_rescue_as_neurite(request):
+        """Move selected discarded faces to neurites."""
+        from skeliner.dataclass import Neurites, Discarded
+
+        body = await request.json()
+        sel_faces = set(body.get("faces", []))
+        if not sel_faces:
+            return JSONResponse(
+                {"ok": False, "error": "No faces selected"},
+                status_code=400,
+            )
+
+        discarded = mesh_state.get("discarded")
+        if discarded is None or len(discarded) == 0:
+            return JSONResponse(
+                {"ok": False, "error": "No discarded components"},
+                status_code=400,
+            )
+
+        neurites = list(mesh_state.get("neurites") or [])
+        keep_discarded = []
+        rescued = []
+
+        for d_arr in discarded:
+            d_set = set(d_arr.tolist())
+            if d_set & sel_faces:
+                neurites.append(d_arr)
+                rescued.append(d_arr)
+            else:
+                keep_discarded.append(d_arr)
+
+        if not rescued:
+            return JSONResponse(
+                {"ok": False, "error": "No discarded component "
+                 "matches the selection"},
+                status_code=400,
+            )
+
+        mesh_state["neurites"] = Neurites(neurites)
+        mesh_state["discarded"] = Discarded(keep_discarded)
+
+        # Update annotations: relabel rescued highlights
+        if annotations_path.exists():
+            ann = json.loads(
+                annotations_path.read_text(encoding="utf-8")
+            )
+            rescued_faces = set()
+            for r in rescued:
+                rescued_faces.update(r.tolist())
+            n_neurites = len(neurites)
+            for h in ann.get("highlights", []):
+                h_faces = set(h.get("faces", []))
+                if h_faces & rescued_faces:
+                    idx = n_neurites - len(rescued) + \
+                        next(
+                            j for j, r in enumerate(rescued)
+                            if set(r.tolist()) & h_faces
+                        )
+                    h["label"] = (
+                        f"neurite {idx} ({len(h['faces']):,}f)"
+                    )
+                    h["color"] = [0.2, 0.6, 1.0]
+            annotations_path.write_text(
+                json.dumps(ann), encoding="utf-8"
+            )
+            await broadcast({"type": "annotations_updated"})
+
+        n_rescued = sum(len(r) for r in rescued)
+        await _log(
+            f"Rescued {len(rescued)} discarded → neurite "
+            f"({n_rescued:,} faces)"
+        )
+        return JSONResponse({
+            "ok": True,
+            "nRescued": len(rescued),
+            "facesRescued": n_rescued,
+            "nNeurites": len(neurites),
+            "nDiscarded": len(keep_discarded),
+        })
+
     async def edit_vertices(request):
         """Apply vertex position edits from the transform gizmo."""
         if mesh_state["mesh"] is None:
@@ -3442,6 +3522,7 @@ def _create_app(
             Route("/fill_holes", do_fill_holes, methods=["POST"]),
             Route("/merge_selected", do_merge_selected, methods=["POST"]),
             Route("/remove_selected", do_remove_selected, methods=["POST"]),
+            Route("/rescue_as_neurite", do_rescue_as_neurite, methods=["POST"]),
             Route("/edit_vertices", edit_vertices, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/break_up_mesh", do_break_up_mesh, methods=["POST"]),
