@@ -2393,11 +2393,14 @@ def find_soma_via_ring_cutoff(
 
     if verbose:
         dt = time.perf_counter() - _t0
+        zlo, zhi = nuc["z_range"]
         print(
             f"[skeliner.pre] Soma: "
-            f"center=[{soma.center[0]:.0f}, "
-            f"{soma.center[1]:.0f}, {soma.center[2]:.0f}], "
-            f"axes=[{soma.axes[0]:.0f}, "
+            f"nucleus=[{center[0]:.0f}, "
+            f"{center[1]:.0f}, {center[2]:.0f}] "
+            f"r={nuc['peak_r']:.0f} "
+            f"z=[{zlo:.0f}–{zhi:.0f}]; "
+            f"ellipsoid axes=[{soma.axes[0]:.0f}, "
             f"{soma.axes[1]:.0f}, {soma.axes[2]:.0f}], "
             f"{len(soma.verts):,} verts, "
             f"cutoff ring {cutoff}/{max_ring} ({dt:.1f}s)"
@@ -7799,7 +7802,7 @@ def preprocess(
         fusions = find_fusions(mesh, mesh_stats=mesh_stats)
         log(f"{len(fusions)} fusions")
 
-    with _timed("↳  find disconnected", verbose=verbose):
+    with _timed("↳  find disconnected", verbose=verbose) as log:
         disconnected = find_disconnected(
             mesh,
             soma=soma,
@@ -7807,6 +7810,7 @@ def preprocess(
             mesh_stats=mesh_stats,
             fusions=fusions,
         )
+        log(f"{len(disconnected)} disconnected components")
 
     with _timed("↳  find & remove gaps", verbose=verbose) as log:
         gaps = find_gaps(
