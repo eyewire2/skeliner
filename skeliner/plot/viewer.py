@@ -2604,6 +2604,8 @@ def _create_app(
         mesh_state["mesh"] = clean
         mesh_state["soma"] = components.soma
         mesh_state["organelles"] = components.organelles
+        mesh_state["neurites"] = components.neurites
+        mesh_state["discarded"] = components.discarded
         mesh_state["mesh_stats"] = None
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None
