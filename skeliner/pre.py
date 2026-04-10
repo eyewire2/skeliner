@@ -5060,6 +5060,7 @@ def find_pocket_organelles(
         cluster: list[int] = []
         n_pocket_boundary = 0
         n_total_boundary = 0
+        adj_pocket_faces: set[int] = set()
         bfs_queue = deque([fi])
         while bfs_queue:
             curr = bfs_queue.popleft()
@@ -5074,15 +5075,25 @@ def find_pocket_organelles(
                     n_total_boundary += 1
                     if pocket[nfi]:
                         n_pocket_boundary += 1
+                        adj_pocket_faces.add(nfi)
         if len(cluster) == 0:
             continue
         enclosure = n_pocket_boundary / n_total_boundary if n_total_boundary else 0
         # Small holes: fill if enclosure meets threshold.
         # Large holes: only fill if fully entrapped (enclosure ~1.0)
         #   and not the main mesh body (< 5% of faces).
+        # Size guardrail: a hole can't be bigger than the pocket
+        # membrane that encloses it — otherwise it's the surface
+        # body, not a hole.  (Without this, hole-filling swallows
+        # entire small disconnected components, which then get
+        # rejected by the post-validation cap-area check.)
         n_faces = len(pocket)
         is_small = len(cluster) <= max_hole_size
-        is_entrapped = enclosure >= 0.99 and len(cluster) < n_faces * 0.05
+        is_entrapped = (
+            enclosure >= 0.99
+            and len(cluster) < n_faces * 0.05
+            and len(cluster) <= len(adj_pocket_faces)
+        )
         if (is_small and enclosure >= hole_enclosure_ratio) or is_entrapped:
             for c in cluster:
                 pocket[c] = True
