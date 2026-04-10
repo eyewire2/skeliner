@@ -5528,10 +5528,12 @@ def find_organelles(
                         sz = int(_sub_sz[u])
                         tb = int(_sub_tb[u])
                         pb = int(_sub_pb[u])
+                        _pocket_n = int(pocket.sum())
                         if (
                             tb > 0
                             and pb >= tb * 0.9
                             and sz >= min_cluster_size
+                            and sz <= _pocket_n
                         ):
                             _to_claim.append(
                                 (int(u), int(_disc[u]))
