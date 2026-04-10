@@ -203,6 +203,23 @@ class MeshComponents:
     neurites: Neurites
     discarded: Discarded
 
+    def rescue_discarded(
+        self, indices: int | list[int]
+    ) -> None:
+        """Move discarded fragments to neurites, in place.
+
+        Parameters
+        ----------
+        indices : int or list[int]
+            Index (or indices) into ``self.discarded`` to rescue.
+        """
+        if isinstance(indices, int):
+            indices = [indices]
+        for i in sorted(indices, reverse=True):
+            self.neurites.components.append(
+                self.discarded.components.pop(i)
+            )
+
     def to_npz(self, path: str | Path) -> None:
         from . import io
         io.save_components_npz(self, path)
