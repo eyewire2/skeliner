@@ -2801,11 +2801,20 @@ let meshCentroid = [0, 0, 0];
                         if (!srcGeo) continue;
                         const posAttr = srcGeo.getAttribute("position");
 
-                        const pos = new Float32Array(fi.length * 9);
+                        // Skip degenerate faces ([0,0,0]) left by
+                        // remove operations — they collapse to
+                        // vertex 0 and corrupt the bounding box.
+                        const tmp = [];
                         for (let j = 0; j < fi.length; j++) {
                             const base = fi[j] * 9;
-                            for (let k = 0; k < 9; k++) pos[j * 9 + k] = posAttr.array[base + k];
+                            const ax = posAttr.array[base], ay = posAttr.array[base+1], az = posAttr.array[base+2];
+                            const bx = posAttr.array[base+3], by = posAttr.array[base+4], bz = posAttr.array[base+5];
+                            const cx = posAttr.array[base+6], cy = posAttr.array[base+7], cz = posAttr.array[base+8];
+                            if (ax === bx && ay === by && az === bz && ax === cx && ay === cy && az === cz) continue;
+                            for (let k = 0; k < 9; k++) tmp.push(posAttr.array[base + k]);
                         }
+                        if (tmp.length === 0) continue;
+                        const pos = new Float32Array(tmp);
                         const geo = new THREE.BufferGeometry();
                         geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
                         geo.computeVertexNormals();
