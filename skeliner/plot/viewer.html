@@ -2790,7 +2790,7 @@ let meshCentroid = [0, 0, 0];
                 if (annotations.highlights) {
                     for (const group of annotations.highlights) {
                         const fi = group.faces || [];
-                        if (fi.length === 0) continue;
+                        if (fi.length === 0) { annotationMeshes.push(null); continue; }
                         const color = group.color || [1, 0, 0];
 
                         // Resolve source geometry (support meshKey for multi-mesh)
@@ -2798,7 +2798,7 @@ let meshCentroid = [0, 0, 0];
                         if (group.meshKey && group.meshKey !== "primary" && extraMeshObjs[group.meshKey]) {
                             srcGeo = extraMeshObjs[group.meshKey].geometry;
                         }
-                        if (!srcGeo) continue;
+                        if (!srcGeo) { annotationMeshes.push(null); continue; }
                         const posAttr = srcGeo.getAttribute("position");
 
                         // Skip degenerate faces ([0,0,0]) left by
@@ -2813,7 +2813,7 @@ let meshCentroid = [0, 0, 0];
                             if (ax === bx && ay === by && az === bz && ax === cx && ay === cy && az === cz) continue;
                             for (let k = 0; k < 9; k++) tmp.push(posAttr.array[base + k]);
                         }
-                        if (tmp.length === 0) continue;
+                        if (tmp.length === 0) { annotationMeshes.push(null); continue; }
                         const pos = new Float32Array(tmp);
                         const geo = new THREE.BufferGeometry();
                         geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
@@ -3317,8 +3317,8 @@ let meshCentroid = [0, 0, 0];
                     scene.remove(annotationMeshes[idx]);
                     annotationMeshes[idx].geometry.dispose();
                     annotationMeshes[idx].material.dispose();
-                    annotationMeshes.splice(idx, 1);
                 }
+                annotationMeshes.splice(idx, 1);
                 updateHighlightsPanel();
                 // Sync to server
                 fetch("/update_annotations", {
