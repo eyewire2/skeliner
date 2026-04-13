@@ -3970,12 +3970,17 @@ def find_gaps(
 
     # Fusion proximity check: candidate gaps with both endpoints inside
     # the fusion blast radius are kissing points, not real gaps.
+    # When the clearance-filtered distance exceeds the fallback
+    # threshold, the near-fusion connection is used instead — the
+    # component likely belongs at that fusion site.
     fusion_face_tree: KDTree | None = None
     fusion_clear: float = 0.0
+    median_edge = float(np.median(mesh.edges_unique_length))
+    # 6x median_edge ≈ 95th percentile of normal gap distances
+    fusion_fallback = 6.0 * median_edge
     if fusion_face_idx:
         fusion_centroids = mesh.triangles_center[fusion_face_idx]
         fusion_face_tree = KDTree(fusion_centroids)
-        median_edge = float(np.median(mesh.edges_unique_length))
         fusion_clear = (
             float(fusion_clearance)
             if fusion_clearance is not None
@@ -4103,9 +4108,17 @@ def find_gaps(
             da = comp_data[cid_a]
             db = comp_data[cid_b]
             dists, idxs = db["tree"].query(da["coords"])
-            # Mask candidate pairs whose endpoints lie within the fusion
-            # blast radius — those are kissing-point artifacts of the
-            # wrong fusion, not real gaps.  Both sides must be clear.
+            # Raw best match (before clearance masking).
+            raw_min_i = int(np.argmin(dists))
+            raw_dist = float(dists[raw_min_i])
+            # Mask candidate pairs whose endpoints lie within
+            # the fusion blast radius — those are kissing-point
+            # artifacts, not real gaps.  Both sides must be
+            # clear.  If the filtered distance exceeds the
+            # fallback threshold (6x median_edge ≈ 95th pctile
+            # of normal gaps), the near-fusion connection is
+            # kept instead — the component likely belongs at
+            # that fusion site.
             if (
                 fusion_face_tree is not None
                 and da["fusion_dist"] is not None
@@ -4115,21 +4128,44 @@ def find_gaps(
                 b_clear = db["fusion_dist"][idxs] > fusion_clear
                 valid = a_clear & b_clear
                 if not valid.any():
-                    cost = float("inf")
-                    min_i = int(np.argmin(dists))
-                    raw_dist = float(dists[min_i])
+                    # No candidates survive clearance — fall
+                    # back to raw match.
+                    min_i = raw_min_i
+                    cost = (
+                        float("inf")
+                        if raw_dist < 1.0
+                        else raw_dist
+                    )
                 else:
                     masked = np.where(valid, dists, np.inf)
-                    min_i = int(np.argmin(masked))
-                    raw_dist = float(dists[min_i])
-                    cost = float("inf") if raw_dist < 1.0 else raw_dist
+                    filt_min_i = int(np.argmin(masked))
+                    filt_dist = float(masked[filt_min_i])
+                    if (
+                        filt_dist > fusion_fallback
+                        and raw_dist >= 1.0
+                    ):
+                        # Filtered gap too far — the
+                        # near-fusion connection is the real
+                        # reconnection point.
+                        min_i = raw_min_i
+                        cost = raw_dist
+                    else:
+                        min_i = filt_min_i
+                        cost = (
+                            float("inf")
+                            if filt_dist < 1.0
+                            else filt_dist
+                        )
             else:
-                min_i = int(np.argmin(dists))
-                raw_dist = float(dists[min_i])
-                # Vertex-connected pairs are fusions (will be broken later),
-                # not real gaps — treat as infinite cost so the MST avoids
-                # them.
-                cost = float("inf") if raw_dist < 1.0 else raw_dist
+                min_i = raw_min_i
+                # Vertex-connected pairs are fusions (will be
+                # broken later), not real gaps — treat as
+                # infinite cost so the MST avoids them.
+                cost = (
+                    float("inf")
+                    if raw_dist < 1.0
+                    else raw_dist
+                )
             key = (min(cid_a, cid_b), max(cid_a, cid_b))
             edge_info[key] = (
                 cost,
