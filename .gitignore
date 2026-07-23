@@ -23,6 +23,7 @@ venv/
 .DS_Store
 
 # Editor directories and files
+.claude
 .idea/
 .vscode/
 *.swp
