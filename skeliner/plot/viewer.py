@@ -1613,6 +1613,11 @@ def _create_app(
 
         soma = mesh_state.get("soma")
         cached_gaps = mesh_state.get("gap_clusters")
+        # Capture the pre-bridge fusion clusters before _apply_new_mesh
+        # nulls the cache below.  remove_gaps preserves face/vertex indices
+        # (degenerate-in-place + append), so this list stays valid on the
+        # bridged mesh and is re-stored afterward — see the restore below.
+        cached_fusions = mesh_state.get("fusion_clusters")
 
         # Pass mesh_stats so remove_gaps can invalidate/pad it
         ms = mesh_state.get("mesh_stats")
@@ -1648,6 +1653,12 @@ def _create_app(
         _clear_annotations("gap ", "disconnected ")
         await _apply_new_mesh(new_mesh)
         mesh_state["gap_clusters"] = None
+        # Restore the pre-bridge fusion list (nulled by _apply_new_mesh) so a
+        # subsequent remove_fusions uses the same clusters preprocess()
+        # threads through, instead of re-detecting on the bridged mesh.
+        # Re-detection would flag the bridges' own non-manifold junctions and
+        # sever them — diverging from the pipeline.
+        mesh_state["fusion_clusters"] = cached_fusions
         await _log(f"Remove gaps: {n_after:,} faces after bridging")
 
         return JSONResponse(
