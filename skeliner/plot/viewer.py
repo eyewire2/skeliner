@@ -1177,7 +1177,6 @@ def _create_app(
             [1.0, 0.3, 1.0],
             [0.3, 1.0, 1.0],
         ]
-        mesh = mesh_state["mesh"]
         centroid = mesh_state["centroid"]
         for i, o in enumerate(offsets):
             dx, dy = o["offset"]
@@ -1228,7 +1227,7 @@ def _create_app(
         highlights = []
         nF = len(mesh.faces)
 
-        from skeliner.dataclass import MeshStats, Organelles
+        from skeliner.dataclass import Organelles
         from skeliner.pre import (
             compute_mesh_stats,
             find_isolated_organelles,
@@ -2100,12 +2099,6 @@ def _create_app(
 
         new_mesh = await _run_with_log(_do_remove)
 
-        n_after = (
-            n_before - int((new_mesh.faces == 0).all(axis=1).sum())
-            if len(new_mesh.faces) == n_before
-            else len(new_mesh.faces)
-        )
-
         _clear_annotations("organelle:")
         await _apply_new_mesh(new_mesh)
         n_degen = int(np.all(new_mesh.faces == 0, axis=1).sum())
@@ -2886,7 +2879,6 @@ def _create_app(
 
         from starlette.responses import Response
 
-        from skeliner.dataclass import Neurites
         from skeliner.io import save_neurites_npz
 
         neurites = mesh_state.get("neurites")
@@ -2914,7 +2906,6 @@ def _create_app(
 
         from starlette.responses import Response
 
-        from skeliner.dataclass import Discarded
         from skeliner.io import save_discarded_npz
 
         discarded = mesh_state.get("discarded")
@@ -3595,7 +3586,7 @@ def _launch_app(app, *, host: str, port: int, no_browser: bool):
 
     port_dir = _STATE_DIR / str(port)
     url = f"http://{host}:{port}"
-    print(f"\nSkeliner Viewer")
+    print("\nSkeliner Viewer")
     print(f"  URL:          {url}")
     print(f"  State file:   {port_dir / 'state.json'}")
     print(f"  Annotations:  {port_dir / 'annotations.json'}")
@@ -3618,7 +3609,7 @@ def _launch_app(app, *, host: str, port: int, no_browser: bool):
         _active_server = server
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
-        print(f"  Viewer running in background. Call sk.plot.stop_viewer() to stop.")
+        print("  Viewer running in background. Call sk.plot.stop_viewer() to stop.")
     else:
         uvicorn.run(app, host=host, port=port, log_level="warning")
 
@@ -3835,8 +3826,7 @@ def view_contacts(
         B_scaled.vertices = B.vertices * float(scale)
         centroid = centroid * float(scale)
 
-    # Buffers for A (primary) and B (extra)
-    buf_A = _mesh_to_buffers(A_scaled, centroid=centroid)
+    # Buffers for B (extra); A renders through the primary mesh_state
     buf_B = _mesh_to_buffers(B_scaled, centroid=centroid)
 
     extra_meshes = {

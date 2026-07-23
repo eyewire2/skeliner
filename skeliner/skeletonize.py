@@ -918,11 +918,6 @@ def _skeletonize_preproc(
         gsurf = _surface_graph(mesh)
 
     mesh_vertices = mesh.vertices.view(np.ndarray)
-    soma_verts_set = (
-        set(soma.verts.tolist())
-        if has_soma and soma.verts is not None
-        else set()
-    )
 
     with _timed(
         "↳  skeletonize neurites",

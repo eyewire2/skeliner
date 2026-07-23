@@ -275,7 +275,6 @@ def _resolve_swc_palette_from_skel_cmap(skel_cmap) -> np.ndarray:
       - dict {name|code: color, ...} with optional '__base__'
     Returns (8,4) RGBA array indexed by SWC code -1..6.
     """
-    overrides: dict[int, str | tuple | list] = {}
     if isinstance(skel_cmap, Mapping):
         base_arg = skel_cmap.get("__base__", "Pastel2")  # default fallback
         palette = _palette_from_base(base_arg)
@@ -1434,7 +1433,7 @@ def z_section(
     # clipped to the soma convex hull so it can't escape through the
     # open pocket mouth.
     if nucleus is not None and len(pts_xy) >= 10:
-        from shapely.geometry import LineString, Polygon
+        from shapely.geometry import Polygon
 
         slices = nucleus["slices"]
         dz = np.abs(slices[:, 0] - z)
@@ -1730,7 +1729,6 @@ def diagnose_soma(
             if 2 in (ix, iy):
                 z_lo, z_hi = nucleus["z_range"]
                 z_ax = ix if ix == 2 else iy
-                other_ax = iy if z_ax == ix else ix
                 for zv in (z_lo, z_hi):
                     if z_ax == ix:
                         ax.axvline(

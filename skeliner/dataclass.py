@@ -540,7 +540,7 @@ class Skeleton:
             if len(self.ntype) != N:
                 raise ValueError("ntype length must match number of nodes")
             self.ntype[0] = (
-                -1 if not (self.ntype[0] in [-1, 1]) else self.ntype[0]
+                -1 if self.ntype[0] not in [-1, 1] else self.ntype[0]
             )  # root must be "root" or "soma"
 
         if self.soma is not None:

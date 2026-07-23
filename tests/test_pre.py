@@ -10,7 +10,6 @@ import pytest
 import trimesh
 
 from skeliner import pre
-from skeliner.dataclass import Soma
 from skeliner.pre import _non_degenerate
 
 
@@ -348,6 +347,13 @@ class TestFindDisconnected:
 
 # ── find_gaps / remove_gaps ──────────────────────────────────────────
 
+# Disable the size-aware bridge cap so the gap-finding mechanics (MST,
+# tip selection, sorting, stitching) can be tested on the synthetic
+# cylinder fixtures, whose small pieces + large separations are exactly
+# the "floating fragment" case the cap is designed to drop.  The cap
+# itself is covered by test_size_cap_drops_far_fragment.
+NO_CAP = dict(max_bridge_ratio=float("inf"), max_bridge_dist=float("inf"))
+
 
 class TestFindGaps:
     def test_single_component_no_gaps(self):
@@ -357,7 +363,7 @@ class TestFindGaps:
 
     def test_two_cylinders_one_gap(self):
         mesh = _two_cylinders(separation=1500.0)
-        gaps = pre.find_gaps(mesh)
+        gaps = pre.find_gaps(mesh, **NO_CAP)
         assert len(gaps) == 1
         faces_a, faces_b, dist, *_ = gaps[0]
         assert len(faces_a) > 0
@@ -366,7 +372,7 @@ class TestFindGaps:
 
     def test_gap_distance_positive(self):
         mesh = _two_cylinders(separation=1500.0)
-        gaps = pre.find_gaps(mesh)
+        gaps = pre.find_gaps(mesh, **NO_CAP)
         assert len(gaps) == 1
         _, _, dist, *_ = gaps[0]
         assert dist > 100  # should be roughly the separation
@@ -385,10 +391,45 @@ class TestFindGaps:
         faces = np.vstack([c1.faces, c2.faces + n1, c3.faces + n2])
         mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-        gaps = pre.find_gaps(mesh)
+        gaps = pre.find_gaps(mesh, **NO_CAP)
         assert len(gaps) >= 2
         for i in range(len(gaps) - 1):
             assert gaps[i][2] <= gaps[i + 1][2]
+
+    def test_size_cap_drops_far_fragment(self):
+        # Small pieces far apart: gap (~1680) dwarfs each piece's bbox
+        # (~202), ratio ≈ 8 — a floating fragment, not a real break.
+        mesh = _two_cylinders(separation=1500.0)
+        # default caps drop it
+        assert pre.find_gaps(mesh) == []
+        # both caps disabled → the gap is found
+        assert len(pre.find_gaps(mesh, **NO_CAP)) == 1
+        # size-ratio gate (absolute ceiling lifted)
+        assert (
+            len(
+                pre.find_gaps(
+                    mesh, max_bridge_ratio=10.0, max_bridge_dist=float("inf")
+                )
+            )
+            == 1
+        )
+        assert (
+            pre.find_gaps(
+                mesh, max_bridge_ratio=1.0, max_bridge_dist=float("inf")
+            )
+            == []
+        )
+        # absolute ceiling gate (ratio lifted)
+        assert pre.find_gaps(mesh, max_bridge_ratio=float("inf")) == []
+        # small-gap floor forces a bridge regardless of ratio
+        assert (
+            len(
+                pre.find_gaps(
+                    mesh, min_bridge_gap=5000.0, max_bridge_dist=float("inf")
+                )
+            )
+            == 1
+        )
 
 
 class TestRemoveGaps:
@@ -403,7 +444,8 @@ class TestRemoveGaps:
         n_comps_before = len(set(labels_before) - {-2})
         assert n_comps_before == 2
 
-        result = pre.remove_gaps(mesh)
+        gaps = pre.find_gaps(mesh, **NO_CAP)
+        result = pre.remove_gaps(mesh, gaps=gaps)
         labels_after, _ = pre._face_edge_components(result)
         n_comps_after = len(set(labels_after) - {-2})
         # After bridging, should be a single connected component
@@ -411,7 +453,7 @@ class TestRemoveGaps:
 
     def test_precomputed_gaps(self):
         mesh = _two_cylinders(separation=1500.0)
-        gaps = pre.find_gaps(mesh)
+        gaps = pre.find_gaps(mesh, **NO_CAP)
         result = pre.remove_gaps(mesh, gaps=gaps)
         labels, _ = pre._face_edge_components(result)
         n_comps = len(set(labels) - {-2})

@@ -286,7 +286,7 @@ def save_skeleton_swc(
             zip(nodes[:, axis_order] * scale, radii * scale, parent, ntype), start=1
         ):
             fh.write(
-                f"{idx} {int(-1 if ((idx == 1) and not (t in [-1, 1])) else t)} "  # ensure soma has type -1 or +1
+                f"{idx} {int(-1 if ((idx == 1) and t not in [-1, 1]) else t)} "  # ensure soma has type -1 or +1
                 f"{coord[0]} {coord[1]} {coord[2]} {r} "
                 f"{(pa + 1) if pa != -1 else -1}\n"
             )
@@ -1040,7 +1040,8 @@ def load_contact_sites_npz(path: str | Path):
 
 
 def _deprecated_alias(old_name: str, new_func):
-    import functools, warnings
+    import functools
+    import warnings
 
     @functools.wraps(new_func)
     def wrapper(*args, **kwargs):

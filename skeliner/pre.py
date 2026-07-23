@@ -3874,6 +3874,9 @@ def find_gaps(
     mesh_stats: MeshStats | None = None,
     fusions: list[list[int]] | None = None,
     fusion_clearance: float | None = None,
+    max_bridge_ratio: float = 1.0,
+    min_bridge_gap: float | None = None,
+    max_bridge_dist: float | None = None,
 ) -> list[tuple[list[int], list[int], float]]:
     """Detect gaps between disconnected components and the main mesh.
 
@@ -3906,6 +3909,23 @@ def find_gaps(
         fusion-cluster face are dropped — they represent "kissing
         points" near fusion zones (artifacts of the wrong fusion),
         not real gaps to bridge.  Defaults to ``10 * median_edge``.
+    max_bridge_ratio : float, default 1.0
+        Size-aware cap.  A gap is only bridged if its distance is at
+        most ``max_bridge_ratio`` times the bounding-box diagonal of
+        the *smaller* of the two pieces.  A real neurite break leaves
+        the two ends close relative to the piece's own extent; a
+        fragment sitting far compared to its own size is debris, not a
+        break, and is left disconnected (later discarded, recoverable
+        via the viewer lasso).  Set to ``float("inf")`` to disable.
+    min_bridge_gap : float or None
+        Gaps at or below this distance are always bridged regardless of
+        the size ratio — small breaks on small fragments are real.
+        Defaults to ``8 * median_edge``.
+    max_bridge_dist : float or None
+        Absolute ceiling: no gap longer than this is ever bridged, even
+        for a large piece with a low size ratio (a straight tube across
+        that much empty space fabricates geometry).  Defaults to
+        ``75 * median_edge``.
 
     Returns
     -------
@@ -3978,6 +3998,20 @@ def find_gaps(
     median_edge = float(np.median(mesh.edges_unique_length))
     # 6x median_edge ≈ 95th percentile of normal gap distances
     fusion_fallback = 6.0 * median_edge
+    # Size-aware bridge caps: gaps below the floor always bridge (small
+    # breaks are real); above it, the gap must be small relative to the
+    # smaller piece's extent (max_bridge_ratio) and never exceed the
+    # absolute ceiling.
+    bridge_floor = (
+        float(min_bridge_gap)
+        if min_bridge_gap is not None
+        else 8.0 * median_edge
+    )
+    bridge_abs_cap = (
+        float(max_bridge_dist)
+        if max_bridge_dist is not None
+        else 75.0 * median_edge
+    )
     if fusion_face_idx:
         fusion_centroids = mesh.triangles_center[fusion_face_idx]
         fusion_face_tree = KDTree(fusion_centroids)
@@ -4005,6 +4039,11 @@ def find_gaps(
             return None
         return fusion_face_tree.query(coords)[0]
 
+    def _bbox_diag(coords: np.ndarray) -> float:
+        if len(coords) == 0:
+            return 0.0
+        return float(np.linalg.norm(coords.max(axis=0) - coords.min(axis=0)))
+
     # Main component
     main_fi = np.where(labels == main)[0]
     main_verts = _component_verts(main_fi)
@@ -4015,6 +4054,7 @@ def find_gaps(
         "coords": main_coords,
         "tree": KDTree(main_coords),
         "fusion_dist": _attach_fusion_dists(main_coords),
+        "bbox": _bbox_diag(main_coords),
     }
 
     # Disconnected components — identify by their label
@@ -4028,11 +4068,13 @@ def find_gaps(
             "coords": coords,
             "tree": KDTree(coords),
             "fusion_dist": _attach_fusion_dists(coords),
+            "bbox": _bbox_diag(coords),
         }
 
     # For each disconnected component, find its nearest neighbour.
     # Deduplicate: if A→B and B→A both exist, keep only one.
     gaps = []
+    n_capped = [0]  # gaps skipped by the size-aware bridge cap
     seen_pairs: set[tuple[int, int]] = set()
     disc_cids = [int(labels[fis[0]]) for fis in disc]
     all_cids = [main] + disc_cids
@@ -4086,6 +4128,20 @@ def find_gaps(
         seen_pairs.add(pair_key)
         if dist < 1.0:  # vertex-connected = fusion, not gap
             return
+        # Size-aware cap: a real break leaves the ends close relative to
+        # the smaller piece's own extent (and never longer than an
+        # absolute ceiling).  A gap that dwarfs its piece is a floating
+        # fragment, not a break — leave it disconnected.
+        smaller_bbox = min(
+            comp_data[cid_a]["bbox"], comp_data[cid_b]["bbox"]
+        )
+        bridge_cap = min(
+            bridge_abs_cap,
+            max(bridge_floor, max_bridge_ratio * smaller_bbox),
+        )
+        if dist > bridge_cap:
+            n_capped[0] += 1
+            return
         va = int(comp_data[cid_a]["verts"][idx_a])
         vb = int(comp_data[cid_b]["verts"][idx_b])
         fa = _tip_faces_bfs(comp_data[cid_a]["fi"], va)
@@ -4129,13 +4185,11 @@ def find_gaps(
                 valid = a_clear & b_clear
                 if not valid.any():
                     # No candidates survive clearance — fall
-                    # back to raw match.
+                    # back to raw match.  dist < 1.0 (shared vert =
+                    # already joined) keeps its real ~0 cost so the
+                    # MST uses the join and _add_gap emits no bridge.
                     min_i = raw_min_i
-                    cost = (
-                        float("inf")
-                        if raw_dist < 1.0
-                        else raw_dist
-                    )
+                    cost = raw_dist
                 else:
                     masked = np.where(valid, dists, np.inf)
                     filt_min_i = int(np.argmin(masked))
@@ -4151,21 +4205,20 @@ def find_gaps(
                         cost = raw_dist
                     else:
                         min_i = filt_min_i
-                        cost = (
-                            float("inf")
-                            if filt_dist < 1.0
-                            else filt_dist
-                        )
+                        # dist < 1.0 (shared vert) keeps its real ~0
+                        # cost — see the no-fusion branch below.
+                        cost = filt_dist
             else:
                 min_i = raw_min_i
-                # Vertex-connected pairs are fusions (will be
-                # broken later), not real gaps — treat as
-                # infinite cost so the MST avoids them.
-                cost = (
-                    float("inf")
-                    if raw_dist < 1.0
-                    else raw_dist
-                )
+                # dist < 1.0 means the two components share a vertex —
+                # they are already joined there (a double-layer, or a
+                # non-manifold edge that find_fusions did not report).
+                # Use the real (~0) distance as the cost so the MST
+                # satisfies the component via that join; _add_gap emits
+                # no bridge for dist < 1.0.  (Forcing inf here would
+                # push the component onto a far finite edge instead —
+                # the "stretched bridge across the cell" overshoot.)
+                cost = raw_dist
             key = (min(cid_a, cid_b), max(cid_a, cid_b))
             edge_info[key] = (
                 cost,
@@ -4212,10 +4265,13 @@ def find_gaps(
             )
         else:
             dist_str = ""
+        cap_str = (
+            f", {n_capped[0]} too-far dropped" if n_capped[0] else ""
+        )
         print(
             f"[skeliner.pre] Gaps: {len(gaps)} gaps "
             f"across {len(disc)} disconnected components"
-            f"{dist_str} ({dt:.1f}s)"
+            f"{dist_str}{cap_str} ({dt:.1f}s)"
         )
 
     return gaps
@@ -4657,7 +4713,6 @@ def compute_mesh_stats(
         radius = radius_multiplier * median_edge
 
     face_comp, main_ci = _face_edge_components(mesh)
-    main_face_mask = face_comp == main_ci
 
     # Vertex component labels (needed by _outward_dot for per-component COM)
     vert_comp = np.full(len(mesh.vertices), -1, dtype=np.intp)
@@ -5528,7 +5583,8 @@ def find_organelles(
         for _root in _np_arr:
             if _disc[_root] >= 0:
                 continue
-            _disc[_root] = _low[_root] = _tmr; _tmr += 1
+            _disc[_root] = _low[_root] = _tmr
+            _tmr += 1
             # stack: (node, parent, edge_cursor)
             _stk: list[tuple[int, int, int]] = [
                 (int(_root), -1, int(_off[_root]))
@@ -5651,8 +5707,6 @@ def _find_nonmanifold_fusions(
                 if nfi != fi:
                     nb.add(nfi)
         return nb
-
-    nm_edges = sum(1 for faces in edge_to_face.values() if len(faces) > 2)
 
     if mesh_stats is not None and mesh_stats.outward_dots is not None:
         outward_dots = mesh_stats.outward_dots
@@ -5792,11 +5846,9 @@ def _find_nonmanifold_fusions(
         return comps
 
     result_clusters: list[list[int]] = []
-    n_seed_clusters = len(seed_clusters)
 
     for ci, seed_cluster in enumerate(seed_clusters):
         region = set(seed_cluster)
-        found = False
         for ring in range(1, grow_rings + 1):
             boundary: set[int] = set()
             for fi in region:
@@ -5816,7 +5868,6 @@ def _find_nonmanifold_fusions(
                             fusion_boundary.add(fi)
                             fusion_boundary.add(nfi)
                 result_clusters.append(sorted(fusion_boundary))
-                found = True
                 break
 
     result_clusters.extend(fan_vertex_clusters)
@@ -6240,7 +6291,6 @@ def find_chunk_boundaries(
         # Chunk boundaries are sharp spikes: a single coordinate value
         # with many more vertices than its neighbors.  Detect as values
         # where count exceeds the local background by a large factor.
-        median_count = float(np.median(counts))
         # Spike ratio: each value's count vs mean of its ±5 neighbors
         n = len(counts)
         local_bg = np.empty(n, dtype=float)
@@ -6356,10 +6406,6 @@ def find_parallel_patches(
         Each entry: ``{"axis": int, "bval": int, "faces": list[int],
         "up_faces": list[int], "down_faces": list[int]}``.
     """
-    from collections import defaultdict, deque
-
-    from scipy.spatial import cKDTree
-
     if verbose:
         print("[skeliner.pre] Finding parallel patches …")
         _t0 = time.perf_counter()
@@ -7464,8 +7510,6 @@ def remove_parallel_patches(
     trimesh.Trimesh
         Mesh with patch artifacts and Mode A orphans removed.
     """
-    from collections import defaultdict
-
     if verbose:
         print("[skeliner.pre] Removing parallel patches …")
         _t0 = time.perf_counter()
