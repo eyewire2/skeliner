@@ -1322,6 +1322,18 @@ def _zipper_stitch(
                 best_j = j
         rb_ids = list(rb_ids[best_j:]) + list(rb_ids[:best_j])
 
+        if na_r == nb_r:
+            # Equal uniform rings (always the case here: every ring has
+            # n_ring_pts verts).  A plain quad split never folds — each
+            # vertical edge (ra[i], rb[i]) lands in exactly two triangles.
+            # The greedy walk below can re-emit an edge at closure on a very
+            # short (one-ring) tube, producing a non-manifold edge.
+            for i in range(na_r):
+                i2 = (i + 1) % na_r
+                triangles.append([ra_ids[i], ra_ids[i2], rb_ids[i]])
+                triangles.append([ra_ids[i2], rb_ids[i2], rb_ids[i]])
+            continue
+
         ia, ib, sa, sb = 0, 0, 0, 0
         while sa < na_r or sb < nb_r:
             ia_n = (ia + 1) % na_r
@@ -1343,16 +1355,50 @@ def _zipper_stitch(
                 sb += 1
 
     # ── Weld endpoint ring verts to boundary loop verts ──────────
-    # Replace each ring[0] / ring[-1] vertex ID in the triangles with
-    # the nearest boundary loop vertex.  This connects the tube to the
-    # existing mesh without creating cap faces across the opening.
+    # Replace each ring[0] / ring[-1] vertex ID in the triangles with a
+    # boundary loop vertex.  This connects the tube to the existing mesh
+    # without creating cap faces across the opening.
     def _build_weld_map(ring, loop):
-        """Map each ring vert to its nearest loop vert."""
+        """Order-preserving surjective weld of the uniform endpoint ring
+        onto the boundary loop.
+
+        Consecutive ring verts map to the same or the *next* loop vert
+        (cyclic step <= 1), so every welded seam edge coincides with an
+        actual boundary edge ``(loop_i, loop_{i+1})`` — never an interior
+        chord across the loop.  A nearest-neighbour weld can map two
+        adjacent ring verts onto non-adjacent loop verts, dropping the seam
+        triangle onto an existing two-face edge and creating a non-manifold
+        edge; this monotone walk cannot.  The ring is at least as long as
+        the loop (``n_ring_pts = max(len(la), len(lb))``), so exactly
+        ``m - 1`` advances distribute over the ``n - 1`` transitions and the
+        cyclic seam closes on a rim edge.
+        """
+        n, m = len(ring), len(loop)
         ring_pts = np.array([_vpos(v) for v in ring])
         loop_pts = np.array([_vpos(v) for v in loop])
-        tree = KDTree(loop_pts)
-        _, idxs = tree.query(ring_pts)
-        return {ring[i]: loop[int(idxs[i])] for i in range(len(ring))}
+        if m < 2 or n < m:
+            # Cannot guarantee step <= 1; fall back to nearest (tiny loops).
+            tree = KDTree(loop_pts)
+            _, idxs = tree.query(ring_pts)
+            return {ring[i]: loop[int(idxs[i])] for i in range(n)}
+        cur = int(np.argmin(np.linalg.norm(loop_pts - ring_pts[0], axis=1)))
+        wmap = {ring[0]: loop[cur]}
+        adv = 0
+        for j in range(n - 1):
+            remaining_dec = (n - 1) - j
+            remaining_adv = (m - 1) - adv
+            if remaining_adv > 0:
+                nxt = (cur + 1) % m
+                closer = float(
+                    np.linalg.norm(loop_pts[nxt] - ring_pts[j + 1])
+                ) < float(np.linalg.norm(loop_pts[cur] - ring_pts[j + 1]))
+                # Force an advance once we can no longer afford to stay, so
+                # all m-1 advances land and the seam covers every rim edge.
+                if remaining_adv >= remaining_dec or closer:
+                    cur = nxt
+                    adv += 1
+            wmap[ring[j + 1]] = loop[cur]
+        return wmap
 
     weld = {}
     weld.update(_build_weld_map(ring_ids[0], la))
