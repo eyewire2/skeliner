@@ -3923,6 +3923,8 @@ def find_gaps(
     max_bridge_ratio: float = 1.0,
     min_bridge_gap: float | None = None,
     max_bridge_dist: float | None = None,
+    kiss_radius: float = 6.0,
+    kiss_penalty: float = 10.0,
 ) -> list[tuple[list[int], list[int], float]]:
     """Detect gaps between disconnected components and the main mesh.
 
@@ -3972,15 +3974,29 @@ def find_gaps(
         for a large piece with a low size ratio (a straight tube across
         that much empty space fabricates geometry).  Defaults to
         ``75 * median_edge``.
+    kiss_radius : float, default 6.0
+        Radius (in median edges) of the local neighbourhood used to score
+        whether a candidate contact sits at a piece's end/cut (a real
+        break) or on its flank (a "kiss").
+    kiss_penalty : float, default 10.0
+        Weight of the kiss penalty on the MST edge cost: a candidate is
+        scored ``distance * (1 + kiss_penalty * flank)``, where ``flank``
+        is the smaller of the two sides' local two-sidedness (~0 at a
+        tip/cut, ~1 at a side-by-side crossing).  This makes a real break
+        outrank a closer kiss so a piece bridges at its tip, not where its
+        wall grazes another surface.  ``0`` disables it.
 
     Notes
     -----
-    The closest pair between two components can be a "kiss" — where a
-    branch's side wall passes near another surface rather than where the
-    two broken tube ends face each other.  A chosen candidate whose
-    bridge direction is nearly perpendicular to the local tube axis (a
-    kiss) is relocated to the closest candidate whose bridge is
-    end-to-end (tube axis aligned with the bridge direction).
+    The closest clear pair between two components can be a "kiss" — where
+    a branch's side wall grazes another surface — rather than a real break
+    where the two pieces END at the contact (tip-to-tip or a planar cut).
+    Each candidate's MST cost is multiplied by ``1 + kiss_penalty * flank``,
+    where ``flank`` (0…1) measures whether the pieces CONTINUE past the
+    contact (a kiss) or end there (a break), in a local ``kiss_radius``
+    neighbourhood so a piece's overall length/branchiness can't fool it.
+    A kiss is thus penalised and a real break outranks a closer kiss, so
+    the piece bridges at its tip instead of where its wall grazes.
 
     Returns
     -------
@@ -4118,15 +4134,6 @@ def find_gaps(
         fis_arr = np.asarray(fis)
         verts = _component_verts(fis_arr)
         coords = mesh.vertices[verts]
-        # Vertex → one incident face and the face set — used by the
-        # tube-axis (kiss) check to seed a local BFS in O(1) without
-        # scanning the whole component each call.  Only disc components
-        # get these (the smaller side is always a disc, never main).
-        v2f: dict[int, int] = {}
-        for f in fis_arr:
-            fi_int = int(f)
-            for v in mesh.faces[fi_int]:
-                v2f[int(v)] = fi_int
         comp_data[cid] = {
             "fi": fis_arr,
             "verts": verts,
@@ -4134,8 +4141,6 @@ def find_gaps(
             "tree": KDTree(coords),
             "fusion_dist": _attach_fusion_dists(coords),
             "bbox": _bbox_diag(coords),
-            "fset": set(int(f) for f in fis_arr),
-            "v2f": v2f,
         }
 
     # For each disconnected component, find its nearest neighbour.
@@ -4219,126 +4224,31 @@ def find_gaps(
             disc_idx_b = disc_cids.index(cid_b) if cid_b in disc_cids else -1
             gaps.append((fa, fb, dist, disc_idx_a, disc_idx_b))
 
-    # ── Kiss detection: side-by-side vs a real break ────────────────
-    # The closest clear pair can be a "kiss" — where a branch's side
-    # wall passes near another surface — rather than a real break.  A
-    # kiss has the local tube axis roughly PERPENDICULAR to the bridge
-    # direction (|dot| ≈ 0); a real break (even an oblique one on a
-    # stubby piece) has a non-trivial component.  Alignment is measured
-    # on the SMALLER piece's tube axis (PCA of a local face patch), so
-    # BFS never touches the huge main component.
-    #
-    # Only a nearly-perpendicular closest candidate triggers a search,
-    # and the replacement is chosen by dist / alignment — a CLOSE
-    # oblique break (small dist, modest align) beats a FAR
-    # coincidentally-aligned point (large dist, high align).  This keeps
-    # the search from dragging a real close break onto a distant surface
-    # that merely happens to line up with the piece's axis.
-    _KISS_ALIGN = 0.3  # below → near-perpendicular kiss → search
-
-    def _tip_axis(cid, tip_vert):
-        cd = comp_data[cid]
-        v2f = cd.get("v2f")
-        if v2f is None:
-            return None
-        seed = v2f.get(int(tip_vert))
-        if seed is None:
-            return None
-        fset = cd["fset"]
-        visited = {seed}
-        frontier = {seed}
-        for _ in range(12):
-            nxt: set[int] = set()
-            for f in frontier:
-                for nf in face_adj[f]:
-                    if nf not in visited and nf in fset:
-                        visited.add(nf)
-                        nxt.add(nf)
-            if not nxt:
-                break
-            frontier = nxt
-        if len(visited) < 3:
-            return None
-        pts = mesh.triangles_center[
-            np.fromiter(visited, dtype=np.int64, count=len(visited))
-        ]
-        pts = pts - pts.mean(axis=0)
-        try:
-            _, _, vh = np.linalg.svd(pts, full_matrices=False)
-        except np.linalg.LinAlgError:
-            return None
-        return vh[0]
-
-    def _pair_align(cid_a, ia, cid_b, ib):
-        pa = comp_data[cid_a]["coords"][ia]
-        pb = comp_data[cid_b]["coords"][ib]
-        conn = pb - pa
-        n = float(np.linalg.norm(conn))
-        if n < 1e-9:
-            return 1.0
-        conn = conn / n
-        # Smaller piece's axis suffices and avoids BFS on main.
-        if comp_data[cid_a]["bbox"] <= comp_data[cid_b]["bbox"]:
-            sc, sv = cid_a, int(comp_data[cid_a]["verts"][ia])
-        else:
-            sc, sv = cid_b, int(comp_data[cid_b]["verts"][ib])
-        ax = _tip_axis(sc, sv)
-        if ax is None:
-            return 1.0
-        return abs(float(np.dot(conn, ax)))
-
-    def _research_aligned(cid_a, cid_b, dists, idxs):
-        """Best clear candidate region by ``dist / alignment``, else None.
-
-        A kiss (align ≈ 0) has huge cost; a close real break beats a far
-        coincidentally-aligned point.  Returns ``(idx_into_a, dist)``.
-        """
-        da = comp_data[cid_a]
-        db = comp_data[cid_b]
-        window = min(bridge_abs_cap, float(dists.min()) + 40.0 * median_edge)
-        cand = np.where((dists >= 1.0) & (dists <= window))[0]
-        if len(cand) == 0:
-            return None
-        cand = cand[np.argsort(dists[cand])]
-        region_r = 25.0 * median_edge
-        regions: list[np.ndarray] = []
-        best_ai = None
-        best_cost = float("inf")
-        for ai in cand:
-            ai = int(ai)
-            bi = int(idxs[ai])
-            # Mirror the fusion-clearance masking.
-            if (
-                fusion_face_tree is not None
-                and da["fusion_dist"] is not None
-                and db["fusion_dist"] is not None
-                and not (
-                    da["fusion_dist"][ai] > fusion_clear
-                    and db["fusion_dist"][bi] > fusion_clear
-                )
-            ):
-                continue
-            pa = da["coords"][ai]
-            if any(float(np.linalg.norm(pa - r)) < region_r for r in regions):
-                continue
-            regions.append(pa)
-            al = _pair_align(cid_a, ai, cid_b, bi)
-            cost = float(dists[ai]) / max(al, 0.05)
-            if cost < best_cost:
-                best_cost = cost
-                best_ai = ai
-            if len(regions) >= 8:
-                break
-        if best_ai is None:
-            return None
-        return best_ai, float(dists[best_ai])
-
     # Precompute pairwise distances between all components (main + disc).
     # Then build an MST rooted at main so every disc component has a
     # bridge path back to main — no missing chain links, no duplicates.
     all_cids = [main] + disc_cids
-    # edge_info keyed by sorted pair
-    edge_info: dict[tuple[int, int], tuple[float, int, int, int, int]] = {}
+    # edge_info keyed by sorted pair: (mst_cost, real_dist, a, ia, b, ib)
+    edge_info: dict[
+        tuple[int, int], tuple[float, float, int, int, int, int]
+    ] = {}
+
+    kiss_R = kiss_radius * median_edge
+
+    def _flank(cid: int, idx: int) -> float:
+        """Local two-sidedness at a candidate contact: 0 = the piece ENDS at
+        the contact (tip/cut → real break), ~1 = the piece CONTINUES past it
+        (a side-by-side crossing → kiss).  Measured in a bounded neighborhood
+        so branch length can't inflate it."""
+        cd = comp_data[cid]
+        p = cd["coords"][idx]
+        nb = cd["tree"].query_ball_point(p, kiss_R)
+        if len(nb) < 6:
+            return 0.0
+        nbr = cd["coords"][nb]
+        _, _, vh = np.linalg.svd(nbr - nbr.mean(0), full_matrices=False)
+        t = (nbr - p) @ vh[0]
+        return 2.0 * min(float(np.mean(t > 0)), float(np.mean(t < 0)))
 
     for i, cid_a in enumerate(all_cids):
         for cid_b in all_cids[i + 1 :]:
@@ -4400,19 +4310,22 @@ def find_gaps(
                 # push the component onto a far finite edge instead —
                 # the "stretched bridge across the cell" overshoot.)
                 cost = raw_dist
-            # Relocate a "kiss" candidate (side-by-side surfaces) to the
-            # closest end-to-end candidate (broken tube ends facing).
-            if (
-                1.0 <= cost < bridge_abs_cap
-                and _pair_align(cid_a, min_i, cid_b, int(idxs[min_i]))
-                < _KISS_ALIGN
-            ):
-                relocated = _research_aligned(cid_a, cid_b, dists, idxs)
-                if relocated is not None:
-                    min_i, cost = relocated
+            # Penalize a "kiss" candidate — one where BOTH surfaces continue
+            # past the contact (a side-by-side crossing) — so a real break
+            # (tip-to-tip or a planar cut, where at least one side ENDS at the
+            # contact) outranks a closer kiss in the MST.  cost < 1.0 is a
+            # shared-vertex join, not a gap, and is never penalized.
+            mst_cost = cost
+            if cost >= 1.0:
+                flank = min(
+                    _flank(cid_a, min_i),
+                    _flank(cid_b, int(idxs[min_i])),
+                )
+                mst_cost = cost * (1.0 + kiss_penalty * flank)
             key = (min(cid_a, cid_b), max(cid_a, cid_b))
             edge_info[key] = (
-                cost,
+                mst_cost,  # MST selection cost (kiss-penalized)
+                cost,  # real bridge distance (for _add_gap)
                 cid_a,
                 min_i,  # idx into cid_a's coords
                 cid_b,
@@ -4439,7 +4352,7 @@ def find_gaps(
         connected.add(cid_r)
         remaining.discard(cid_r)
 
-        dist, ca, idx_a, cb, idx_b = edge_info[key]
+        _mst_cost, dist, ca, idx_a, cb, idx_b = edge_info[key]
         _add_gap(ca, cb, idx_a, idx_b, dist)
 
     # Sort by gap distance
