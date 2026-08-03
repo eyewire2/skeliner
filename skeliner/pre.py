@@ -6074,6 +6074,13 @@ def _split_fan_vertices(
 
     verts = mesh.vertices.copy()
     faces = mesh.faces.copy()
+    # Topology snapshot: splitting a vertex is a pure relabel that preserves
+    # face-edge adjacency, so the fan must be analysed on the ORIGINAL vertex
+    # ids.  Reading the partially-relabelled `faces` instead would query
+    # `edge_to_face` (built once, from the original ids) with edges that do not
+    # exist in it, silently returning no neighbours and splitting fans that are
+    # actually connected.
+    orig_faces = mesh.faces.copy()
     new_verts = list(verts)
     n_split = 0
 
@@ -6090,7 +6097,7 @@ def _split_fan_vertices(
         fan_set = set(fan)
         fan_adj: dict[int, set[int]] = defaultdict(set)
         for fi in fan:
-            f = faces[fi]
+            f = orig_faces[fi]
             for i in range(3):
                 a, b = int(f[i]), int(f[(i + 1) % 3])
                 e = (min(a, b), max(a, b))
