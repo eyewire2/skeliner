@@ -710,6 +710,23 @@ def _perpendicular_rebin(
         if degree[i] != 2
     )
 
+    # -- dissolve branch-point bins --
+    donated: dict[tuple[int, int], list[int]] = {}
+    for b in range(n_skel):
+        if degree[b] < 3:
+            continue
+        bv = np.asarray(node2verts[b], dtype=np.int64)
+        if len(bv) < 3:
+            continue
+        nbrs = sorted(adj[b])
+        dirs = nodes_arr[nbrs] - nodes_arr[b]
+        ln = np.linalg.norm(dirs, axis=1, keepdims=True)
+        dirs = np.divide(dirs, ln, out=np.zeros_like(dirs), where=ln > 1e-6)
+        proj = (mesh_vertices[bv] - nodes_arr[b]) @ dirs.T
+        best = np.argmax(proj, axis=1)
+        for k, nb in enumerate(nbrs):
+            donated[(b, nb)] = bv[best == k].tolist()
+
     # -- extract chains (degree-2 paths between anchors) --
     chains: list[list[int]] = []
     visited_edges: set[tuple[int, int]] = set()
@@ -748,10 +765,14 @@ def _perpendicular_rebin(
     for chain in chains:
         # Collect all vertices along the chain
         all_vids_set: set[int] = set()
-        for ni in chain:
-            all_vids_set.update(
-                int(v) for v in node2verts[ni]
-            )
+        for pos, ni in enumerate(chain):
+            key = None
+            if degree[ni] >= 3 and (pos == 0 or pos == len(chain) - 1):
+                key = (ni, chain[1] if pos == 0 else chain[-2])
+            if key is not None and key in donated:
+                all_vids_set.update(donated[key])
+            else:
+                all_vids_set.update(int(v) for v in node2verts[ni])
         all_vids = [
             v for v in all_vids_set if not assigned[v]
         ]
@@ -1028,6 +1049,26 @@ def _skeletonize_component(
             vert2node,
             n_mesh_verts=len(mesh.vertices),
         )
+
+        # A branch point has no well-defined cross-section: its bin spans
+        # the crotch and both daughters, so a radius estimated from that
+        # bin overstates the tube — measured ~1.2x the surrounding
+        # neighbourhood, consistently, on both a BC and a SAC.  Take the
+        # neighbourhood instead.  Only ``centerline`` is corrected; the
+        # legacy estimators keep their original meaning.
+        if edges_arr.size:
+            nbrs: list[list[int]] = [
+                [] for _ in range(len(nodes_arr))
+            ]
+            for a, b in edges_arr:
+                nbrs[int(a)].append(int(b))
+                nbrs[int(b)].append(int(a))
+            for i, nb in enumerate(nbrs):
+                if len(nb) < 3:
+                    continue
+                vals = [cl_radii[k] for k in nb if cl_radii[k] > 0]
+                if vals:
+                    cl_radii[i] = float(np.median(vals))
 
     return (
         nodes_arr,
