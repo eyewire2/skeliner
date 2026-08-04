@@ -1016,6 +1016,71 @@ def _skeletonize_component(
                     for vid in frag:
                         vid_to_ring[int(vid)] = best
 
+        # Arc-length assignment has no notion of the surface: a vertex
+        # whose projection lands near a node is claimed by it even when
+        # it is a micron away across the mesh.  That leaves bins in
+        # several disconnected pieces and drags the node's centroid into
+        # the empty space between them.  Keep each bin's largest
+        # connected piece and hand every stray piece to a bin it
+        # actually touches.  Connectivity is categorical — no threshold.
+        owner_of: dict[int, tuple[int, int]] = {}
+        for bi, band in enumerate(final_shells):
+            for ci, comp in enumerate(band):
+                for vid in comp:
+                    owner_of[int(vid)] = (bi, ci)
+
+        def _pieces(comp):
+            vset = set(int(v) for v in comp)
+            seen: set[int] = set()
+            out: list[list[int]] = []
+            for start in vset:
+                if start in seen:
+                    continue
+                queue = deque([start])
+                seen.add(start)
+                grp = [start]
+                while queue:
+                    u = queue.popleft()
+                    for e in gsurf.incident(u):
+                        src = gsurf.es[e].source
+                        tgt = gsurf.es[e].target
+                        nb = tgt if src == u else src
+                        if nb in vset and nb not in seen:
+                            seen.add(nb)
+                            queue.append(nb)
+                            grp.append(nb)
+                out.append(grp)
+            return sorted(out, key=len, reverse=True)
+
+        moved: dict[tuple[int, int], list[int]] = {}
+        for bi, band in enumerate(final_shells):
+            for ci, comp in enumerate(band):
+                if len(comp) < 2:
+                    continue
+                parts = _pieces(comp)
+                if len(parts) < 2:
+                    continue
+                band[ci] = np.asarray(parts[0], dtype=comp.dtype)
+                for stray in parts[1:]:
+                    votes: dict[tuple[int, int], int] = {}
+                    for vid in stray:
+                        for e in gsurf.incident(vid):
+                            src = gsurf.es[e].source
+                            tgt = gsurf.es[e].target
+                            nb = tgt if src == vid else src
+                            key = owner_of.get(nb)
+                            if key is not None and key != (bi, ci):
+                                votes[key] = votes.get(key, 0) + 1
+                    if votes:
+                        tgt_key = max(votes, key=lambda k: votes[k])
+                        moved.setdefault(tgt_key, []).extend(stray)
+                    else:
+                        moved.setdefault((bi, ci), []).extend(stray)
+        for (bi, ci), vids in moved.items():
+            final_shells[bi][ci] = np.concatenate(
+                [final_shells[bi][ci], np.asarray(vids, dtype=np.int64)]
+            )
+
         # Remake nodes and edges with centerline radii
         nodes_arr, radii_dict, node2verts, vert2node = (
             _make_nodes(
