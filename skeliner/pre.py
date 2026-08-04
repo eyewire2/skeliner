@@ -1010,6 +1010,23 @@ def _validate_loop_pair(
     return None
 
 
+def _removal_would_sever(
+    mesh: trimesh.Trimesh,
+    sel: set[int],
+    edge_to_faces: dict[tuple[int, int], list[int]],
+) -> bool:
+    """Would removing the connected patch *sel* cut its surface in two?
+
+    ``_expand_tip_to_good_rim`` grows a patch by BFS, so *sel* is always
+    connected and its border is a single closed curve when it sits at a
+    tube END (a cap).  Two or more border loops mean the patch is an
+    annulus that wraps the surface — removing it leaves the far side
+    disconnected, severing whatever lies beyond.
+    """
+    loops = _trace_border_loops(mesh, sel, edge_to_faces)
+    return sum(1 for lp in loops if len(lp) >= 3) >= 2
+
+
 def _expand_tip_to_good_rim(
     mesh: trimesh.Trimesh,
     tip: list[int],
@@ -3640,14 +3657,19 @@ def _refine_components_with_fusions(
     main: int,
     fusions: list[list[int]],
 ) -> tuple[np.ndarray, int]:
-    """Re-label the main component, treating fusion-cluster faces as walls.
+    """Re-label every component, treating fusion-cluster faces as walls.
 
     Two branches glued together by non-manifold fusion edges merge into
     one component in :func:`_face_edge_components` (BFS walks straight
     through the shared edge).  Treating the fusion-cluster faces as
-    breakpoints and re-running BFS over only the main component splits
-    the merged blob into separate logical branches without disturbing
-    any of the smaller components.
+    breakpoints and re-running BFS splits each merged blob into separate
+    logical branches.
+
+    This runs over *all* components, not just the main one.  A
+    disconnected component can carry a fusion internally; if it is left
+    whole, :func:`find_gaps` bridges it as a single unit and
+    :func:`remove_fusions` then splits it — orphaning whichever half did
+    not receive the bridge (together with anything chained behind it).
 
     Fusion-cluster faces are assigned the sentinel label ``-3`` so they
     are excluded from any reported component (and won't be picked up by
@@ -3667,27 +3689,28 @@ def _refine_components_with_fusions(
     Returns
     -------
     new_labels : np.ndarray
-        Refined labels.  Fusion faces in the main component are -3.
+        Refined labels.  Fusion faces are -3.
     new_main : int
-        Largest sub-component of the original main, or unchanged ``main``
-        if no fusion faces fell inside it.
+        Largest sub-component after refinement, or unchanged ``main`` if
+        nothing was relabelled.
     """
     fusion_faces: set[int] = set()
     for cluster in fusions:
         for f in cluster:
             fusion_faces.add(int(f))
 
-    main_face_idx = np.where(labels == main)[0]
-    main_set = set(int(i) for i in main_face_idx)
-    fusion_in_main = fusion_faces & main_set
+    # Every real component (skip the degenerate-face sentinel labels).
+    comp_face_idx = np.where(labels >= 0)[0]
+    comp_set = set(int(i) for i in comp_face_idx)
+    fusion_in_comps = fusion_faces & comp_set
 
-    # Edge bookkeeping over the WHOLE main component:
+    # Edge bookkeeping over the WHOLE mesh:
     # `edge_count` knows the total face uses (used to detect
     # non-manifold edges that must be severed).  `edge_to_faces` maps
-    # each edge to its non-fusion main faces (the BFS-walkable ones).
+    # each edge to its non-fusion faces (the BFS-walkable ones).
     edge_count: dict[tuple[int, int], int] = defaultdict(int)
     edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for fi in main_face_idx:
+    for fi in comp_face_idx:
         ifi = int(fi)
         face = mesh.faces[ifi]
         is_fusion = ifi in fusion_faces
@@ -3698,9 +3721,9 @@ def _refine_components_with_fusions(
             if not is_fusion:
                 edge_to_faces[e].append(ifi)
 
-    # BFS the main component.  Walls:
+    # BFS each component.  Walls:
     #   1. Fusion-cluster faces (skipped as seeds and as neighbors)
-    #   2. Non-manifold edges (face-count > 2 in the original main):
+    #   2. Non-manifold edges (face-count > 2 in the original mesh):
     #      these are the actual fusion structure; severing them is
     #      what splits the glued branches.
     #
@@ -3712,7 +3735,7 @@ def _refine_components_with_fusions(
     visited: set[int] = set()
     next_id = int(labels.max()) + 1
     sub_sizes: dict[int, int] = {}
-    for seed in main_face_idx:
+    for seed in comp_face_idx:
         seed = int(seed)
         if seed in visited or seed in fusion_faces:
             continue
@@ -3739,8 +3762,8 @@ def _refine_components_with_fusions(
                     stack.append(nb)
         sub_sizes[cid] = size
 
-    # Mark fusion faces in main with sentinel label -3.
-    for fi in fusion_in_main:
+    # Mark fusion faces with sentinel label -3.
+    for fi in fusion_in_comps:
         new_labels[fi] = -3
 
     new_main = max(sub_sizes, key=sub_sizes.get) if sub_sizes else main
@@ -4015,10 +4038,13 @@ def find_gaps(
     else:
         labels, main = _face_edge_components(mesh)
 
-    # When fusions are provided, refine the main component the same
-    # way find_disconnected does — otherwise the main label still
-    # spans both glued branches and we'd be querying nearest neighbors
-    # within a single merged blob.
+    # When fusions are provided, refine the components the same way
+    # find_disconnected does — otherwise a label still spans both glued
+    # branches and we'd be querying nearest neighbors within a single
+    # merged blob.  Keep the pre-refinement labels: two components that
+    # share one are *siblings* split apart by a fusion wall, and only
+    # those may be re-joined across the fusion (see `fusion_join`).
+    labels_pre_fusion = labels
     if fusions:
         labels, main = _refine_components_with_fusions(mesh, labels, main, fusions)
 
@@ -4193,12 +4219,17 @@ def find_gaps(
             frontier = next_frontier
         return sorted(visited)
 
-    def _add_gap(cid_a, cid_b, idx_a, idx_b, dist):
+    def _add_gap(cid_a, cid_b, idx_a, idx_b, dist, fusion_join=False):
         pair_key = (min(cid_a, cid_b), max(cid_a, cid_b))
         if pair_key in seen_pairs:
             return
         seen_pairs.add(pair_key)
-        if dist < 1.0:  # vertex-connected = fusion, not gap
+        # A sub-1nm contact normally means the two components already
+        # share a vertex (a double layer) and need no bridge.  That does
+        # NOT hold when the shared vertex sits on a fusion: the join is
+        # about to be deleted by :func:`remove_fusions`, so the pieces
+        # must be stitched across the fusion site instead.
+        if dist < 1.0 and not fusion_join:
             return
         # Size-aware cap: a real break leaves the ends close relative to
         # the smaller piece's own extent (and never longer than an
@@ -4228,12 +4259,21 @@ def find_gaps(
     # Then build an MST rooted at main so every disc component has a
     # bridge path back to main — no missing chain links, no duplicates.
     all_cids = [main] + disc_cids
-    # edge_info keyed by sorted pair: (mst_cost, real_dist, a, ia, b, ib)
+    # edge_info keyed by sorted pair:
+    #   (mst_cost, real_dist, a, ia, b, ib, fusion_join)
     edge_info: dict[
-        tuple[int, int], tuple[float, float, int, int, int, int]
+        tuple[int, int], tuple[float, float, int, int, int, int, bool]
     ] = {}
 
     kiss_R = kiss_radius * median_edge
+
+    def _orig_label(cid: int) -> int:
+        """Component's label *before* fusion-wall refinement.
+
+        Refinement only splits, so every face of a refined component
+        carries the same pre-refinement label; siblings share it.
+        """
+        return int(labels_pre_fusion[int(comp_data[cid]["fi"][0])])
 
     def _flank(cid: int, idx: int) -> float:
         """Local two-sidedness at a candidate contact: 0 = the piece ENDS at
@@ -4322,6 +4362,27 @@ def find_gaps(
                     _flank(cid_b, int(idxs[min_i])),
                 )
                 mst_cost = cost * (1.0 + kiss_penalty * flank)
+            # Is a sub-1nm contact a durable join, or a fusion that
+            # remove_fusions will delete?  Only the latter needs a
+            # bridge, and only between SIBLINGS — two halves that a
+            # fusion wall split out of one original component.  Any
+            # other pair merely touches at a fusion; bridging there
+            # would put a stitch on a tube's flank, and the tip removal
+            # that precedes the stitch can sever the tube.
+            fusion_join = False
+            if (
+                cost < 1.0
+                and da["fusion_dist"] is not None
+                and db["fusion_dist"] is not None
+                and _orig_label(cid_a) == _orig_label(cid_b)
+            ):
+                fusion_join = (
+                    min(
+                        float(da["fusion_dist"][min_i]),
+                        float(db["fusion_dist"][int(idxs[min_i])]),
+                    )
+                    <= fusion_clear
+                )
             key = (min(cid_a, cid_b), max(cid_a, cid_b))
             edge_info[key] = (
                 mst_cost,  # MST selection cost (kiss-penalized)
@@ -4330,6 +4391,7 @@ def find_gaps(
                 min_i,  # idx into cid_a's coords
                 cid_b,
                 int(idxs[min_i]),  # idx into cid_b's coords
+                fusion_join,  # bridge across a doomed fusion join
             )
 
     # Prim's MST from main
@@ -4352,8 +4414,8 @@ def find_gaps(
         connected.add(cid_r)
         remaining.discard(cid_r)
 
-        _mst_cost, dist, ca, idx_a, cb, idx_b = edge_info[key]
-        _add_gap(ca, cb, idx_a, idx_b, dist)
+        _mst_cost, dist, ca, idx_a, cb, idx_b, fj = edge_info[key]
+        _add_gap(ca, cb, idx_a, idx_b, dist, fusion_join=fj)
 
     # Sort by gap distance
     gaps.sort(key=lambda x: x[2])
@@ -4462,6 +4524,17 @@ def remove_gaps(
         # introduce a fusion.
         reason = _validate_loop_pair(loop_a, loop_b)
         if reason is not None:
+            n_skipped += 1
+            continue
+
+        # A fusion-join bridge (dist < 1) lands where two surfaces are
+        # glued — often a tube's FLANK rather than its end.  Peeling a
+        # rim there can wrap the circumference and sever everything
+        # distal, which costs far more than the piece being rescued.
+        if dist < 1.0 and (
+            _removal_would_sever(mesh, sel_a, edge_to_faces)
+            or _removal_would_sever(mesh, sel_b, edge_to_faces)
+        ):
             n_skipped += 1
             continue
 
