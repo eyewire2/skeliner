@@ -642,7 +642,21 @@ class Skeleton:
     # radius recommendation
     # ------------------------------------------------------------------
     def recommend_radius(self) -> Tuple[str, str, Dict[str, float]]:
-        """Heuristic choice among mean / trim / median with explanation."""
+        """Recommend the best available radius key.
+
+        Returns ``"centerline"`` when available (perpendicular
+        distance to the skeleton path from the second-pass
+        re-binning).  Falls back to the legacy heuristic among
+        mean / trim / median.
+        """
+        if "centerline" in self.radii:
+            return (
+                "centerline",
+                "Centerline radius from perpendicular re-binning.",
+                {},
+            )
+
+        # Legacy fallback
         mean = self.radii.get("mean")
         median = self.radii.get("median")
         if mean is None or median is None:
