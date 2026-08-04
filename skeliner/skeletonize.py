@@ -1052,34 +1052,47 @@ def _skeletonize_component(
                 out.append(grp)
             return sorted(out, key=len, reverse=True)
 
-        moved: dict[tuple[int, int], list[int]] = {}
-        for bi, band in enumerate(final_shells):
-            for ci, comp in enumerate(band):
-                if len(comp) < 2:
-                    continue
-                parts = _pieces(comp)
-                if len(parts) < 2:
-                    continue
-                band[ci] = np.asarray(parts[0], dtype=comp.dtype)
-                for stray in parts[1:]:
-                    votes: dict[tuple[int, int], int] = {}
-                    for vid in stray:
-                        for e in gsurf.incident(vid):
-                            src = gsurf.es[e].source
-                            tgt = gsurf.es[e].target
-                            nb = tgt if src == vid else src
-                            key = owner_of.get(nb)
-                            if key is not None and key != (bi, ci):
-                                votes[key] = votes.get(key, 0) + 1
-                    if votes:
-                        tgt_key = max(votes, key=lambda k: votes[k])
-                        moved.setdefault(tgt_key, []).extend(stray)
-                    else:
-                        moved.setdefault((bi, ci), []).extend(stray)
-        for (bi, ci), vids in moved.items():
-            final_shells[bi][ci] = np.concatenate(
-                [final_shells[bi][ci], np.asarray(vids, dtype=np.int64)]
-            )
+        # Donating a stray can disconnect the bin that receives it, so a
+        # single pass does not converge — repeat until every bin is one
+        # piece, refreshing ownership each round.
+        for _ in range(8):
+            changed = False
+            for bi, band in enumerate(final_shells):
+                for ci, comp in enumerate(band):
+                    if len(comp) < 2:
+                        continue
+                    parts = _pieces(comp)
+                    if len(parts) < 2:
+                        continue
+                    band[ci] = np.asarray(parts[0], dtype=comp.dtype)
+                    for vid in parts[0]:
+                        owner_of[int(vid)] = (bi, ci)
+                    for stray in parts[1:]:
+                        votes: dict[tuple[int, int], int] = {}
+                        for vid in stray:
+                            for e in gsurf.incident(vid):
+                                src = gsurf.es[e].source
+                                tgt = gsurf.es[e].target
+                                nb = tgt if src == vid else src
+                                key = owner_of.get(nb)
+                                if key is not None and key != (bi, ci):
+                                    votes[key] = votes.get(key, 0) + 1
+                        if not votes:
+                            band[ci] = np.concatenate(
+                                [band[ci],
+                                 np.asarray(stray, dtype=np.int64)]
+                            )
+                            continue
+                        tb, tc = max(votes, key=lambda k: votes[k])
+                        final_shells[tb][tc] = np.concatenate(
+                            [final_shells[tb][tc],
+                             np.asarray(stray, dtype=np.int64)]
+                        )
+                        for vid in stray:
+                            owner_of[int(vid)] = (tb, tc)
+                        changed = True
+            if not changed:
+                break
 
         # Remake nodes and edges with centerline radii
         nodes_arr, radii_dict, node2verts, vert2node = (
