@@ -198,6 +198,131 @@ def _split_comp_if_elongated(
             yield comp_idx[m]
 
 
+def _neighbour_groups(
+    comp_verts: np.ndarray,
+    gsurf: ig.Graph,
+    owner_of: dict[int, tuple[int, int]],
+    own: tuple[int, int],
+) -> list[list[int]]:
+    """Group the vertices of other bins that touch this one, by tube.
+
+    Like :func:`_is_ring`, but returns the groups instead of stopping at
+    two, and asks which *bin* a neighbour belongs to rather than whether
+    it is in the component's vertex set.  A cross-section has exactly two
+    groups, one on each side; more than two means the bin touches several
+    tubes at once.
+
+    Touching one bin along two separate patches is still one tube, so
+    patches are merged when they share a bin.  Without that, a bin that
+    merely dips into a neighbour twice looks like a branch point and gets
+    cut into slivers.
+    """
+    ext: set[int] = set()
+    for vid in comp_verts:
+        for e in gsurf.incident(int(vid)):
+            src, tgt = gsurf.es[e].source, gsurf.es[e].target
+            nbr = tgt if src == int(vid) else src
+            key = owner_of.get(nbr)
+            if key is not None and key != own:
+                ext.add(nbr)
+
+    patches: list[list[int]] = []
+    seen: set[int] = set()
+    for start in sorted(ext):
+        if start in seen:
+            continue
+        queue = deque([start])
+        seen.add(start)
+        grp = [start]
+        while queue:
+            u = queue.popleft()
+            for e in gsurf.incident(u):
+                src, tgt = gsurf.es[e].source, gsurf.es[e].target
+                nbr = tgt if src == u else src
+                if nbr in ext and nbr not in seen:
+                    seen.add(nbr)
+                    queue.append(nbr)
+                    grp.append(nbr)
+        patches.append(grp)
+
+    # union patches that touch the same neighbouring bin
+    parent = list(range(len(patches)))
+
+    def _find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first_seen: dict[tuple[int, int], int] = {}
+    for pi, grp in enumerate(patches):
+        for v in grp:
+            key = owner_of[v]
+            other = first_seen.setdefault(key, pi)
+            ra, rb = _find(pi), _find(other)
+            if ra != rb:
+                parent[rb] = ra
+
+    merged: dict[int, list[int]] = {}
+    for pi, grp in enumerate(patches):
+        merged.setdefault(_find(pi), []).extend(grp)
+    return [merged[k] for k in sorted(merged)]
+
+
+def _split_branch_band(
+    comp: np.ndarray,
+    groups: list[list[int]],
+    gsurf: ig.Graph,
+) -> list[np.ndarray]:
+    """Cut a band that spans a branch point into one piece per neighbour.
+
+    Grows a region from each neighbouring group simultaneously, so every
+    vertex joins the tube it is nearest to *across the surface*.  Each
+    piece then wraps a single tube and its centroid lands inside that
+    tube.  Vertices no group reaches stay with the largest piece.
+    """
+    vset = set(int(v) for v in comp)
+    label: dict[int, int] = {}
+    queue: deque[int] = deque()
+    for gi, grp in enumerate(groups):
+        for u in sorted(grp):
+            for e in gsurf.incident(u):
+                src, tgt = gsurf.es[e].source, gsurf.es[e].target
+                nbr = tgt if src == u else src
+                if nbr in vset and nbr not in label:
+                    label[nbr] = gi
+                    queue.append(nbr)
+
+    while queue:
+        u = queue.popleft()
+        gi = label[u]
+        for e in gsurf.incident(u):
+            src, tgt = gsurf.es[e].source, gsurf.es[e].target
+            nbr = tgt if src == u else src
+            if nbr in vset and nbr not in label:
+                label[nbr] = gi
+                queue.append(nbr)
+
+    parts: list[list[int]] = [[] for _ in groups]
+    orphans: list[int] = []
+    for v in comp:
+        gi = label.get(int(v))
+        if gi is None:
+            orphans.append(int(v))
+        else:
+            parts[gi].append(int(v))
+
+    out = [np.asarray(p, dtype=np.int64) for p in parts if p]
+    if not out:
+        return [np.asarray(comp, dtype=np.int64)]
+    if orphans:
+        big = max(range(len(out)), key=lambda i: len(out[i]))
+        out[big] = np.concatenate(
+            [out[big], np.asarray(orphans, dtype=np.int64)]
+        )
+    return out
+
+
 def _is_ring(
     comp_verts: np.ndarray,
     gsurf: ig.Graph,
@@ -1093,6 +1218,44 @@ def _skeletonize_component(
                         changed = True
             if not changed:
                 break
+
+        # A bin that touches three or more separate neighbourhoods is not
+        # a cross-section: it is the band wrapping a branch point, holding
+        # the parent tube and both children at once.  Averaging points on
+        # diverging tubes puts its node in the notch between them, on or
+        # past the surface.  Split it so each piece wraps one tube.  The
+        # number of neighbourhoods is a count, not a threshold.
+        # One pass, not a loop: the split already sends every vertex to the
+        # tube nearest it, so there is nothing left to cut.  Repeating it
+        # only shaves slivers off, because the pieces of a split are bins
+        # in their own right and each sibling then reads as another
+        # neighbourhood.  For the same reason every decision is made
+        # against a snapshot of ownership taken before any bin is cut, so
+        # the result does not depend on the order bins are visited.
+        snapshot = dict(owner_of)
+        planned: list[tuple[int, int, list[np.ndarray]]] = []
+        for bi, band in enumerate(final_shells):
+            for ci, comp in enumerate(band):
+                if len(comp) < 3:
+                    continue
+                groups = _neighbour_groups(
+                    comp, gsurf, snapshot, (bi, ci)
+                )
+                if len(groups) < 3:
+                    continue
+                parts = _split_branch_band(comp, groups, gsurf)
+                if len(parts) > 1:
+                    planned.append((bi, ci, parts))
+
+        for bi, ci, parts in planned:
+            band = final_shells[bi]
+            band[ci] = parts[0]
+            for vid in parts[0]:
+                owner_of[int(vid)] = (bi, ci)
+            for extra in parts[1:]:
+                band.append(extra)
+                for vid in extra:
+                    owner_of[int(vid)] = (bi, len(band) - 1)
 
         # Remake nodes and edges with centerline radii
         nodes_arr, radii_dict, node2verts, vert2node = (
