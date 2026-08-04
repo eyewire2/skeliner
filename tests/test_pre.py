@@ -111,6 +111,60 @@ def _two_cylinders(separation=200.0):
     return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
 
+def _cylinder_at(radius, height, z_center, sections):
+    """Cylinder along z, centred at ``z_center``."""
+    c = trimesh.creation.cylinder(
+        radius=radius, height=height, sections=sections
+    )
+    c.vertices[:, 2] += z_center
+    return c
+
+
+def _combine(parts):
+    verts, faces, n = [], [], 0
+    for p in parts:
+        verts.append(p.vertices)
+        faces.append(p.faces + n)
+        n += len(p.vertices)
+    return trimesh.Trimesh(
+        vertices=np.vstack(verts), faces=np.vstack(faces), process=False
+    )
+
+
+def _main_debris_piece():
+    """main — tiny debris — a real piece, collinear along z.
+
+    Distances: debris↔main 101, debris↔piece 43, piece↔main 200.
+    Bboxes:    main ~2000, piece ~603, debris ~61.
+
+    Prim's attaches the debris first, because 101 is the cheapest edge
+    in the graph — and the size-aware cap, which keys on the *smaller*
+    side's bbox, refuses it (101 > 61).  Nothing retries a refused tree
+    edge, so the debris is left with no bridge even though its 43 nm
+    edge to the piece is well inside the same cap.
+    """
+    return _combine([
+        _cylinder_at(20, 2000, 0, 48),      # main,   z -1000..1000
+        _cylinder_at(4, 60, 1130, 8),       # debris, z  1100..1160
+        _cylinder_at(20, 600, 1500, 32),    # piece,  z  1200..1800
+    ])
+
+
+def _main_relay_piece():
+    """main — small relay — a real piece, collinear along z.
+
+    Distances: relay↔main 100, piece↔relay 100, piece↔main 300.
+    The relay is 32 faces: two bridges land on it, and ``remove_gaps``
+    peels a tip patch off each end of every bridge, so it is erased and
+    the chain routed through it breaks.
+    """
+    return _combine([
+        _cylinder_at(20, 2000, 0, 48),      # main,  z -1000..1000
+        _cylinder_at(10, 100, 1150, 8),     # relay, z  1100..1200 (32f)
+        _cylinder_at(20, 600, 1600, 32),    # piece, z  1300..1900
+    ])
+
+
 def _sphere_with_internal():
     """Large sphere with a small inverted sphere inside.
 
@@ -354,6 +408,11 @@ class TestFindDisconnected:
 # itself is covered by test_size_cap_drops_far_fragment.
 NO_CAP = dict(max_bridge_ratio=float("inf"), max_bridge_dist=float("inf"))
 
+# Pin the bridge cap to the size-ratio term alone, so the fixtures below
+# depend only on their own bboxes and not on the mesh's median edge:
+#   bridge_cap(a, b) = min(bbox_a, bbox_b)
+PINNED_CAP = dict(min_bridge_gap=0.0, max_bridge_dist=5000.0)
+
 
 class TestFindGaps:
     def test_single_component_no_gaps(self):
@@ -430,6 +489,41 @@ class TestFindGaps:
             )
             == 1
         )
+
+    def test_stranded_piece_is_rebridged(self):
+        """A refused MST edge must not leave a component with no bridge.
+
+        The cheapest edge in the graph is the one Prim's picks for the
+        debris, and the cap refuses it.  Without the repair pass nothing
+        retries, and the debris is silently discarded downstream despite
+        having an acceptable edge to the piece.
+        """
+        mesh = _main_debris_piece()
+        gaps = pre.find_gaps(mesh, **PINNED_CAP)
+        pairs = {frozenset(g[3:5]) for g in gaps}
+        # disc0 = the 128f piece, disc1 = the 32f debris, -1 = main
+        assert frozenset((-1, 0)) in pairs, "piece must reach main"
+        assert frozenset((0, 1)) in pairs, "debris must be re-bridged"
+        assert {round(g[2]) for g in gaps} == {200, 40}
+
+    def test_chain_does_not_route_through_a_small_relay(self):
+        """A component too small to survive two bridges is not a relay.
+
+        ``remove_gaps`` peels a tip patch off each end of every bridge,
+        so a fragment used as an intermediate hop is erased and the chain
+        through it breaks.  The piece must bridge to main directly even
+        though the hop through the relay is shorter (100 vs 300).
+        """
+        mesh = _main_relay_piece()
+
+        # relay_min_faces=0 restores the old behaviour: chain through it
+        old = pre.find_gaps(mesh, relay_min_faces=0, **PINNED_CAP)
+        assert {(int(g[3]), int(g[4])) for g in old} == {(-1, 1), (0, 1)}
+
+        # default: the piece bridges straight to main
+        new = pre.find_gaps(mesh, **PINNED_CAP)
+        assert {(int(g[3]), int(g[4])) for g in new} == {(-1, 1), (-1, 0)}
+        assert any(round(g[2]) == 300 for g in new)
 
 
 class TestRemoveGaps:

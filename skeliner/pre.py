@@ -3948,6 +3948,8 @@ def find_gaps(
     max_bridge_dist: float | None = None,
     kiss_radius: float = 6.0,
     kiss_penalty: float = 10.0,
+    relay_min_faces: int = 100,
+    repair_stranded: bool = True,
 ) -> list[tuple[list[int], list[int], float]]:
     """Detect gaps between disconnected components and the main mesh.
 
@@ -4008,6 +4010,23 @@ def find_gaps(
         tip/cut, ~1 at a side-by-side crossing).  This makes a real break
         outrank a closer kiss so a piece bridges at its tip, not where its
         wall grazes another surface.  ``0`` disables it.
+    relay_min_faces : int, default 100
+        Smallest component allowed to carry a bridge chain onward.
+        :func:`remove_gaps` peels a tip patch off each end of every
+        bridge, so a fragment used as an intermediate hop loses two
+        patches and is erased — breaking the chain routed through it.
+        Components below this size may still be bridged, but only as
+        chain endpoints.  ``0`` disables the restriction.
+    repair_stranded : bool, default True
+        Retry a component whose MST tree edge ``_add_gap`` refused.
+        Prim's minimises the kiss-penalised cost without knowing which
+        edges are acceptable, and a refused edge is otherwise never
+        retried, so the component — and everything hanging off it —
+        loses its only path back to main.  The retry takes the cheapest
+        edge that *is* acceptable, and leaves a cluster with no
+        acceptable edge disconnected.  Set ``False`` to keep only the
+        bridges Prim's itself chose: fewer pieces are reconnected, and
+        pieces that should stay separate are less likely to be joined.
 
     Notes
     -----
@@ -4219,10 +4238,26 @@ def find_gaps(
             frontier = next_frontier
         return sorted(visited)
 
+    def _bridge_cap(cid_a, cid_b):
+        """Longest bridge allowed between two components.
+
+        A real break leaves the ends close relative to the smaller
+        piece's own extent (and never longer than an absolute ceiling).
+        A gap that dwarfs its piece is a floating fragment, not a break.
+        """
+        smaller_bbox = min(
+            comp_data[cid_a]["bbox"], comp_data[cid_b]["bbox"]
+        )
+        return min(
+            bridge_abs_cap,
+            max(bridge_floor, max_bridge_ratio * smaller_bbox),
+        )
+
     def _add_gap(cid_a, cid_b, idx_a, idx_b, dist, fusion_join=False):
+        """Emit a bridge for one component pair.  True if one was emitted."""
         pair_key = (min(cid_a, cid_b), max(cid_a, cid_b))
         if pair_key in seen_pairs:
-            return
+            return False
         seen_pairs.add(pair_key)
         # A sub-1nm contact normally means the two components already
         # share a vertex (a double layer) and need no bridge.  That does
@@ -4230,30 +4265,21 @@ def find_gaps(
         # about to be deleted by :func:`remove_fusions`, so the pieces
         # must be stitched across the fusion site instead.
         if dist < 1.0 and not fusion_join:
-            return
-        # Size-aware cap: a real break leaves the ends close relative to
-        # the smaller piece's own extent (and never longer than an
-        # absolute ceiling).  A gap that dwarfs its piece is a floating
-        # fragment, not a break — leave it disconnected.
-        smaller_bbox = min(
-            comp_data[cid_a]["bbox"], comp_data[cid_b]["bbox"]
-        )
-        bridge_cap = min(
-            bridge_abs_cap,
-            max(bridge_floor, max_bridge_ratio * smaller_bbox),
-        )
-        if dist > bridge_cap:
+            return False
+        if dist > _bridge_cap(cid_a, cid_b):
             n_capped[0] += 1
-            return
+            return False
         va = int(comp_data[cid_a]["verts"][idx_a])
         vb = int(comp_data[cid_b]["verts"][idx_b])
         fa = _tip_faces_bfs(comp_data[cid_a]["fi"], va)
         fb = _tip_faces_bfs(comp_data[cid_b]["fi"], vb)
-        if fa and fb:
-            # Map component IDs to disc indices (-1 for main)
-            disc_idx_a = disc_cids.index(cid_a) if cid_a in disc_cids else -1
-            disc_idx_b = disc_cids.index(cid_b) if cid_b in disc_cids else -1
-            gaps.append((fa, fb, dist, disc_idx_a, disc_idx_b))
+        if not (fa and fb):
+            return False
+        # Map component IDs to disc indices (-1 for main)
+        disc_idx_a = disc_cids.index(cid_a) if cid_a in disc_cids else -1
+        disc_idx_b = disc_cids.index(cid_b) if cid_b in disc_cids else -1
+        gaps.append((fa, fb, dist, disc_idx_a, disc_idx_b))
+        return True
 
     # Precompute pairwise distances between all components (main + disc).
     # Then build an MST rooted at main so every disc component has a
@@ -4394,6 +4420,40 @@ def find_gaps(
                 fusion_join,  # bridge across a doomed fusion join
             )
 
+    # Track which components the tree actually joined.  A tree edge is
+    # *satisfied* when it produced a bridge, or when it is a sub-1nm
+    # contact that already joins the two (no bridge needed).
+    joined: dict[int, int] = {cid: cid for cid in all_cids}
+
+    def _root(cid: int) -> int:
+        r = cid
+        while joined[r] != r:
+            r = joined[r]
+        while joined[cid] != r:
+            joined[cid], cid = r, joined[cid]
+        return r
+
+    def _join(cid_a: int, cid_b: int) -> None:
+        ra, rb = _root(cid_a), _root(cid_b)
+        if ra != rb:
+            joined[ra] = rb
+
+    # Sub-1nm contacts join their components wherever they occur, not
+    # only along tree edges — record them all so the repair below does
+    # not mistake an already-joined component for a stranded one.
+    for (ka, kb), info in edge_info.items():
+        if info[1] < 1.0 and not info[6]:
+            _join(ka, kb)
+
+    # A fragment cannot carry a chain onward: remove_gaps peels a tip
+    # patch off each end of every bridge, and two patches erase a small
+    # component outright — destroying the very chain routed through it.
+    # Such a component may still be bridged, but only as an endpoint.
+    relay_ok = {
+        cid: cid == main or len(comp_data[cid]["fi"]) >= relay_min_faces
+        for cid in all_cids
+    }
+
     # Prim's MST from main
     connected: set[int] = {main}
     remaining: set[int] = set(disc_cids)
@@ -4403,6 +4463,8 @@ def find_gaps(
         best_cost = float("inf")
         for cid_r in remaining:
             for cid_c in connected:
+                if not relay_ok[cid_c]:
+                    continue
                 key = (min(cid_r, cid_c), max(cid_r, cid_c))
                 cost = edge_info[key][0]
                 if cost < best_cost:
@@ -4415,7 +4477,52 @@ def find_gaps(
         remaining.discard(cid_r)
 
         _mst_cost, dist, ca, idx_a, cb, idx_b, fj = edge_info[key]
-        _add_gap(ca, cb, idx_a, idx_b, dist, fusion_join=fj)
+        if _add_gap(ca, cb, idx_a, idx_b, dist, fusion_join=fj):
+            _join(ca, cb)
+
+    # Prim's minimises the kiss-penalised cost without knowing which
+    # edges `_add_gap` will accept, and a refused edge is never retried —
+    # so a component whose one tree edge lands on a small fragment (whose
+    # bbox sets a tight cap) loses its only path back to main, taking
+    # everything hanging off it along.  Retry each stranded cluster with
+    # the cheapest edge `_add_gap` does accept; a cluster with no
+    # acceptable edge at all stays disconnected, as before.
+    n_repaired = 0
+    while repair_stranded:
+        main_root = _root(main)
+        stranded = [c for c in disc_cids if _root(c) != main_root]
+        if not stranded:
+            break
+        clusters: dict[int, list[int]] = defaultdict(list)
+        for cid in stranded:
+            clusters[_root(cid)].append(cid)
+        progress = False
+        for members in clusters.values():
+            inside = set(members)
+            best_key = None
+            best_cost = float("inf")
+            for cid_in in members:
+                for cid_out in all_cids:
+                    if cid_out in inside:
+                        continue
+                    key = (min(cid_in, cid_out), max(cid_in, cid_out))
+                    mst_cost, dist, ca, _ia, cb, _ib, fj = edge_info[key]
+                    if dist < 1.0 and not fj:
+                        continue
+                    if dist > _bridge_cap(ca, cb):
+                        continue
+                    if mst_cost < best_cost:
+                        best_cost = mst_cost
+                        best_key = key
+            if best_key is None:
+                continue
+            _mst_cost, dist, ca, idx_a, cb, idx_b, fj = edge_info[best_key]
+            if _add_gap(ca, cb, idx_a, idx_b, dist, fusion_join=fj):
+                _join(ca, cb)
+                n_repaired += 1
+                progress = True
+        if not progress:
+            break
 
     # Sort by gap distance
     gaps.sort(key=lambda x: x[2])
@@ -4434,10 +4541,13 @@ def find_gaps(
         cap_str = (
             f", {n_capped[0]} too-far dropped" if n_capped[0] else ""
         )
+        rep_str = (
+            f", {n_repaired} stranded re-bridged" if n_repaired else ""
+        )
         print(
             f"[skeliner.pre] Gaps: {len(gaps)} gaps "
             f"across {len(disc)} disconnected components"
-            f"{dist_str}{cap_str} ({dt:.1f}s)"
+            f"{dist_str}{cap_str}{rep_str} ({dt:.1f}s)"
         )
 
     return gaps
