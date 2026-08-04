@@ -1050,26 +1050,6 @@ def _skeletonize_component(
             n_mesh_verts=len(mesh.vertices),
         )
 
-        # A branch point has no well-defined cross-section: its bin spans
-        # the crotch and both daughters, so a radius estimated from that
-        # bin overstates the tube — measured ~1.2x the surrounding
-        # neighbourhood, consistently, on both a BC and a SAC.  Take the
-        # neighbourhood instead.  Only ``centerline`` is corrected; the
-        # legacy estimators keep their original meaning.
-        if edges_arr.size:
-            nbrs: list[list[int]] = [
-                [] for _ in range(len(nodes_arr))
-            ]
-            for a, b in edges_arr:
-                nbrs[int(a)].append(int(b))
-                nbrs[int(b)].append(int(a))
-            for i, nb in enumerate(nbrs):
-                if len(nb) < 3:
-                    continue
-                vals = [cl_radii[k] for k in nb if cl_radii[k] > 0]
-                if vals:
-                    cl_radii[i] = float(np.median(vals))
-
     return (
         nodes_arr,
         radii_dict,
