@@ -1871,6 +1871,13 @@ def skeletonize(
         back to *soma_init_guess_axis* / *soma_init_guess_mode*.
     verbose : bool, default ``False``
         Print per-stage timing.
+    second_pass : bool, default ``True``
+        Run the perpendicular re-binning pass: the first-pass bins
+        build a rough skeleton, then every degree-2 chain is re-binned
+        by projecting its vertices onto that path, and a ``centerline``
+        radius is recorded.  Roughly halves median bin tilt.
+        **Preprocessing track only** — ignored when ``components`` is
+        not given.
 
     Returns
     -------

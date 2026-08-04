@@ -1987,6 +1987,7 @@ let meshCentroid = [0, 0, 0];
 
             // ── Skeletonize ───────────────────────────────────────────────────
             const SKEL_DEFAULTS = {
+                second_pass: { value: true, type: "bool", label: "Perpendicular re-bin (2nd pass)" },
                 geodesic_shell_count: { value: 1000, type: "int", label: "Shell count" },
                 min_shell_vertices: { value: 6, type: "int", label: "Min shell vertices" },
                 max_shell_width_factor: { value: 50, type: "int", label: "Max shell width factor" },
