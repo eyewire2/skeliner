@@ -513,15 +513,24 @@ class TestFindGaps:
         so a fragment used as an intermediate hop is erased and the chain
         through it breaks.  The piece must bridge to main directly even
         though the hop through the relay is shorter (100 vs 300).
+
+        The kiss penalty is pinned off.  It is not what this test is
+        about, and the relay is short enough (100 long, radius 10) that a
+        ``kiss_radius`` neighbourhood spans its whole length and reads as
+        two-sided, so its flank score sits on a knife edge and moves with
+        the triangulation trimesh happens to generate.  That flipped the
+        control assertion on CI while passing locally.
         """
         mesh = _main_relay_piece()
 
         # relay_min_faces=0 restores the old behaviour: chain through it
-        old = pre.find_gaps(mesh, relay_min_faces=0, **PINNED_CAP)
+        old = pre.find_gaps(
+            mesh, relay_min_faces=0, kiss_penalty=0.0, **PINNED_CAP
+        )
         assert {(int(g[3]), int(g[4])) for g in old} == {(-1, 1), (0, 1)}
 
         # default: the piece bridges straight to main
-        new = pre.find_gaps(mesh, **PINNED_CAP)
+        new = pre.find_gaps(mesh, kiss_penalty=0.0, **PINNED_CAP)
         assert {(int(g[3]), int(g[4])) for g in new} == {(-1, 1), (-1, 0)}
         assert any(round(g[2]) == 300 for g in new)
 

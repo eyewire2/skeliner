@@ -4637,14 +4637,16 @@ def remove_gaps(
             n_skipped += 1
             continue
 
-        # A fusion-join bridge (dist < 1) lands where two surfaces are
-        # glued — often a tube's FLANK rather than its end.  Peeling a
-        # rim there can wrap the circumference and sever everything
-        # distal, which costs far more than the piece being rescued.
-        if dist < 1.0 and (
-            _removal_would_sever(mesh, sel_a, edge_to_faces)
-            or _removal_would_sever(mesh, sel_b, edge_to_faces)
-        ):
+        # A bridge that lands on a tube's FLANK rather than its end
+        # peels a rim that wraps the circumference, severing everything
+        # distal — which costs far more than the piece being rescued.
+        # This is not specific to the sub-1 nm fusion joins it was first
+        # seen on: on 564241053 a 21 nm gap rescues a 54 f fragment by
+        # cutting 13,438 f off the arbor.  Losing the fragment is always
+        # the cheaper error, so the check is not scoped by distance.
+        if _removal_would_sever(
+            mesh, sel_a, edge_to_faces
+        ) or _removal_would_sever(mesh, sel_b, edge_to_faces):
             n_skipped += 1
             continue
 
