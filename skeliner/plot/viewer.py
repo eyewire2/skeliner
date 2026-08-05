@@ -3609,10 +3609,109 @@ def _create_app(
         sstate["skeleton"] = pending["skeleton"]
         sstate["pending_bin_edit"] = None
         await _rebroadcast_skeletons()
-        note = ""
-        if summary["dropped"]:
-            note = f", {len(summary['dropped'])} node(s) dropped and renumbered"
-        await _log(f"Bin edit: {summary['moved']:,} verts → node {summary['to']}{note}")
+        if summary.get("split"):
+            await _log(
+                f"Split node {summary['parent']}: {summary['moved']:,} verts "
+                f"→ new node {summary['to']}"
+            )
+        else:
+            note = ""
+            if summary["dropped"]:
+                note = f", {len(summary['dropped'])} node(s) dropped and renumbered"
+            await _log(
+                f"Bin edit: {summary['moved']:,} verts → node {summary['to']}{note}"
+            )
+        return JSONResponse({"ok": True, **summary})
+
+    async def bin_split_preview(request):
+        """Work out what promoting part of a bin to its own node would do.
+
+        The third bin verb, and the one the move gesture cannot express,
+        because its destination does not exist yet.  Shares the pending slot
+        and the apply route with the other two — there is one skeleton, so
+        there is one pending edit.
+
+        The new node is joined to its parent and to nothing else; see
+        :func:`skeliner.post.split_node` for why its other edges are not
+        inferred.  ``supported`` reports whether even that one edge has
+        surface behind it, which it does not when the split cuts a bin that
+        was already in two patches.
+        """
+        import copy as _copy
+
+        from skeliner import dx, post
+
+        body = await request.json()
+        name, sstate, skel, err = _skel_edit_target(body)
+        if err is not None:
+            return err
+        mesh = mesh_state["mesh"]
+
+        node = body.get("splitFrom")
+        if node is None:
+            return JSONResponse(
+                {"ok": False, "error": "No bin to split"}, status_code=400
+            )
+        node = int(node)
+        if not 0 <= node < len(skel.nodes):
+            return JSONResponse(
+                {"ok": False, "error": "node id out of range"}, status_code=400
+            )
+
+        faces = np.asarray(body.get("faces") or [], dtype=np.int64)
+        if faces.size == 0:
+            return JSONResponse(
+                {"ok": False, "error": "No faces selected"}, status_code=400
+            )
+        if faces.min() < 0 or faces.max() >= len(mesh.faces):
+            return JSONResponse(
+                {"ok": False, "error": "face id out of range"}, status_code=400
+            )
+        picked = np.unique(np.asarray(mesh.faces)[faces])
+
+        before = dx._fragmented_bins(skel.node2verts, mesh)
+        after_skel = _copy.deepcopy(skel)
+        try:
+            result = post.split_node(after_skel, node, picked, mesh=mesh)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        after = dx._fragmented_bins(after_skel.node2verts, mesh)
+
+        new_id = result["node"]
+        broke = [
+            {"node": nid, "pieces": after.get(nid, 1)}
+            for nid in (node, new_id)
+            if after.get(nid, 1) > before.get(nid, 1)
+        ]
+        moved_faces = np.flatnonzero(
+            np.isin(np.asarray(mesh.faces), after_skel.node2verts[new_id]).sum(axis=1)
+            >= 2
+        )
+        summary = {
+            "split": True,
+            "to": new_id,
+            "parent": node,
+            "moved": result["moved"],
+            "ignoredNotOwned": result["ignored"],
+            "supported": result["supported"],
+            # Nothing is emptied and nothing is renumbered — the new node is
+            # appended — so these stay empty and the client's shared summary
+            # renderer says nothing about them.
+            "donors": [node],
+            "dropped": [],
+            "staleRadii": list(result["stale_radii"]),
+            "fragmented": broke,
+            "radiusBefore": float(skel.r[node]),
+            "radiusAfter": float(after_skel.r[node]),
+            "radiusNew": float(after_skel.r[new_id]),
+            "movedFaces": moved_faces.tolist(),
+        }
+        sstate["pending_bin_edit"] = {
+            "base": skel,
+            "mesh": mesh,
+            "skeleton": after_skel,
+            "summary": summary,
+        }
         return JSONResponse({"ok": True, **summary})
 
     async def bin_reassign_cancel(request):
@@ -4300,6 +4399,7 @@ def _create_app(
             Route("/bin", get_bin, methods=["POST"]),
             Route("/bin_reassign_preview", bin_reassign_preview, methods=["POST"]),
             Route("/bin_reassign_apply", bin_reassign_apply, methods=["POST"]),
+            Route("/bin_split_preview", bin_split_preview, methods=["POST"]),
             Route("/bin_reassign_cancel", bin_reassign_cancel, methods=["POST"]),
             Route("/edge_support", edge_support, methods=["POST"]),
             Route("/edge_edit_preview", edge_edit_preview, methods=["POST"]),

@@ -561,3 +561,112 @@ def test_absorbing_a_leaf_leaves_no_self_loop(bin_skel, bin_mesh):
     e2 = np.asarray(bin_skel.edges)
     assert not (e2[:, 0] == e2[:, 1]).any(), "contraction left a self-loop"
     assert len(np.unique(e2, axis=0)) == len(e2), "contraction left a duplicate edge"
+
+
+# ── split_node ───────────────────────────────────────────────────────
+#
+# The one bin verb whose destination does not exist yet.  The partition
+# is drawn, so nothing is invented about vertices; the interesting part
+# is what it does *not* do, which is guess the new node's other edges.
+
+
+def test_a_split_recomputes_both_halves_from_their_own_vertices(bin_skel, bin_mesh):
+    """A node *is* the vertices it owns, on both sides of the cut."""
+    node = 3
+    owned = np.asarray(bin_skel.node2verts[node])
+    assert len(owned) >= 4, "fixture bin is too small to split"
+
+    out = post.split_node(bin_skel, node, owned[: len(owned) // 2], mesh=bin_mesh)
+    new = out["node"]
+
+    for nid in (node, new):
+        pts = np.asarray(bin_mesh.vertices)[np.asarray(bin_skel.node2verts[nid])]
+        assert np.allclose(bin_skel.nodes[nid], pts.mean(axis=0))
+        for key, arr in bin_skel.radii.items():
+            if key in ("centerline", "calibrated"):
+                continue
+            assert np.isfinite(arr[nid])
+    assert dx.check_bins(bin_skel), "the split broke the partition"
+
+
+def test_a_split_appends_and_renumbers_nothing(bin_skel, bin_mesh):
+    """Unlike a merge, which drops a bin and shifts every id after it."""
+    before = bin_skel.nodes.copy()
+    owned = np.asarray(bin_skel.node2verts[3])
+
+    out = post.split_node(bin_skel, 3, owned[:2], mesh=bin_mesh)
+
+    assert out["node"] == len(before), "the new node is appended"
+    assert len(bin_skel.nodes) == len(before) + 1
+    untouched = [i for i in range(len(before)) if i != 3]
+    assert np.allclose(bin_skel.nodes[untouched], before[untouched])
+
+
+def test_a_split_joins_the_new_node_to_its_parent_and_nothing_else(bin_skel, bin_mesh):
+    """Surface adjacency does not imply tree adjacency — measured on a real
+    cell, where bins that touch are routinely far apart in the tree — so the
+    other edges are the user's to make, with `dx.edge_support` to guide them."""
+    node, nbrs = _a_node_between_two_others(bin_skel)
+    owned = np.asarray(bin_skel.node2verts[node])
+    if len(owned) < 4:
+        pytest.skip("fixture bin is too small to split")
+    before = _n_components(bin_skel)
+
+    out = post.split_node(bin_skel, node, owned[: len(owned) // 2], mesh=bin_mesh)
+    new = out["node"]
+
+    e = np.asarray(bin_skel.edges)
+    touching = set(np.unique(e[(e[:, 0] == new) | (e[:, 1] == new)]).tolist()) - {new}
+    assert touching == {node}, f"the split invented edges to {touching - {node}}"
+    assert _n_components(bin_skel) == before, "the split left a piece adrift"
+    assert dx.check_acyclicity(bin_skel), "the split closed a cycle"
+
+
+def test_a_split_reports_whether_the_halves_share_surface(bin_skel, bin_mesh):
+    """The one edge a split does make can still have nothing behind it, when
+    the bin was already in two patches."""
+    owned = np.asarray(bin_skel.node2verts[3])
+    out = post.split_node(bin_skel, 3, owned[: len(owned) // 2], mesh=bin_mesh)
+    assert out["supported"] is True
+
+    assert post._bins_touch(bin_mesh, owned[:1], owned[:1]) is False, (
+        "a vertex set does not touch itself"
+    )
+
+
+def test_a_split_ignores_vertices_the_bin_does_not_own(bin_skel, bin_mesh):
+    """The >=2-of-3 face rule means a surface selection routinely catches a
+    neighbour's vertex; that is not grounds for failing the edit."""
+    owned = np.asarray(bin_skel.node2verts[3])
+    other = np.asarray(bin_skel.node2verts[5])
+    out = post.split_node(
+        bin_skel, 3, np.concatenate([owned[:2], other[:3]]), mesh=bin_mesh
+    )
+    assert out["moved"] == 2
+    assert out["ignored"] == 3
+    assert len(bin_skel.node2verts[5]) == len(other), "a non-owner lost vertices"
+
+
+@pytest.mark.parametrize(
+    "node, verts, expected",
+    [
+        (0, [1, 2], "node 0 is the soma"),
+        (10**6, [1, 2], "out of range"),
+        (3, [], "No vertices given"),
+    ],
+)
+def test_split_rejects_bad_input(bin_skel, bin_mesh, node, verts, expected):
+    with pytest.raises(ValueError, match=expected):
+        post.split_node(bin_skel, node, verts, mesh=bin_mesh)
+
+
+def test_splitting_off_the_whole_bin_is_refused(bin_skel, bin_mesh):
+    """That renames a node rather than splitting it, and would leave the
+    parent owning nothing — which is not a node."""
+    with pytest.raises(ValueError, match="leave something behind"):
+        post.split_node(bin_skel, 3, bin_skel.node2verts[3], mesh=bin_mesh)
+
+
+def test_splitting_vertices_from_elsewhere_only_is_refused(bin_skel, bin_mesh):
+    with pytest.raises(ValueError, match="belong to node 3"):
+        post.split_node(bin_skel, 3, bin_skel.node2verts[5], mesh=bin_mesh)

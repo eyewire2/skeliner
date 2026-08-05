@@ -422,6 +422,121 @@ def reassign_verts(skel, verts: ArrayLike, to: int, *, mesh, verbose: bool = Fal
     }
 
 
+def _bins_touch(mesh, a: ArrayLike, b: ArrayLike) -> bool:
+    """Does any mesh edge run from a vertex of *a* to a vertex of *b*?
+
+    The local form of the question :func:`skeliner.dx.edge_support` answers
+    globally, without building the whole node-adjacency graph for it.
+    """
+    e = np.asarray(mesh.edges_unique, dtype=np.int64)
+    in_a = np.isin(e, np.asarray(a, dtype=np.int64))
+    in_b = np.isin(e, np.asarray(b, dtype=np.int64))
+    return bool(((in_a[:, 0] & in_b[:, 1]) | (in_a[:, 1] & in_b[:, 0])).any())
+
+
+def split_node(skel, node: int, verts: ArrayLike, *, mesh, verbose: bool = False):
+    """Promote part of bin *node* to a node of its own.
+
+    The remaining bin verb, and the only one whose destination does not exist
+    yet.  The *partition* needs no invention — the caller draws it — so this
+    is :func:`reassign_verts` into a node created for the purpose, and
+    position and radii for both halves follow from the vertices as always.
+
+    **The new node is attached to its parent and to nothing else**, which is
+    the only edge here that can be defended.  The tempting alternative is to
+    derive its edges from surface adjacency, giving ``a—k'—k—b`` where the
+    geometry says so — but surface adjacency does not imply tree adjacency.
+    Measured on 549190673, 147 of the 156 bin pairs that share surface while
+    three or more tree hops apart lie *within one branch*, with the two bins
+    overlapping in space: a densely packed axon tuft.  Deriving edges there
+    would wire the new node to whatever branch happens to be touching.  So the
+    split makes one honest edge and leaves the rest to :func:`graft` and
+    :func:`clip`, where ``dx.edge_support`` can say which joins the surface
+    actually backs.
+
+    Node ids are stable: the new node is appended, and nothing is dropped, so
+    no existing id changes.
+
+    Parameters
+    ----------
+    node
+        The bin to split.  Node 0 is refused, as everywhere — its "bin" is
+        ``soma.verts``.
+    verts
+        The subset to promote.  Vertices *node* does not own are ignored and
+        counted, because the ≥2-of-3 face rule means a selection drawn on the
+        surface routinely catches a neighbour's.  Taking the whole bin is
+        refused: that renames a node rather than splitting it.
+
+    Returns
+    -------
+    dict
+        ``node`` (the new id), ``parent``, ``moved``, ``ignored``,
+        ``supported`` — whether the two halves actually share surface, false
+        when the split cut a bin that was already in two patches — and
+        ``stale_radii``.
+    """
+    if skel.node2verts is None:
+        raise ValueError("Skeleton carries no node2verts; nothing to split.")
+    node = int(node)
+    if not 0 <= node < len(skel.nodes):
+        raise ValueError(f"node {node} out of range (0..{len(skel.nodes) - 1})")
+    if node == 0:
+        raise ValueError(
+            "node 0 is the soma, not a bin — its vertices are Soma.verts and "
+            "belong to the components. Edit them in the mesh editor."
+        )
+
+    owned = np.asarray(skel.node2verts[node], dtype=np.int64)
+    picked = np.unique(np.asarray(verts, dtype=np.int64).ravel())
+    if picked.size == 0:
+        raise ValueError("No vertices given.")
+    if picked.min() < 0 or picked.max() >= len(mesh.vertices):
+        raise ValueError("vertex ids must lie within the mesh")
+
+    moving = picked[np.isin(picked, owned)]
+    ignored = int(picked.size - moving.size)
+    if moving.size == 0:
+        raise ValueError(f"none of those vertices belong to node {node}")
+    if moving.size == len(owned):
+        raise ValueError(
+            f"that is all {len(owned):,} of node {node}'s vertices — a split "
+            "has to leave something behind"
+        )
+
+    # Extend every node-indexed array by one.  The values are placeholders
+    # that reassign_verts recomputes from the vertices; ntype is the exception
+    # and is inherited, there being nothing to compute it from.
+    new_id = len(skel.nodes)
+    skel.nodes = np.vstack([skel.nodes, skel.nodes[node][None, :]])
+    for key, arr in skel.radii.items():
+        skel.radii[key] = np.append(arr, arr[node])
+    if skel.ntype is not None:
+        skel.ntype = np.append(skel.ntype, skel.ntype[node])
+    skel.node2verts.append(np.empty(0, dtype=np.int64))
+    skel.edges = np.vstack([np.asarray(skel.edges, dtype=np.int64), [[node, new_id]]])
+
+    result = reassign_verts(skel, moving, new_id, mesh=mesh)
+    supported = _bins_touch(mesh, skel.node2verts[node], skel.node2verts[new_id])
+
+    if verbose:
+        print(
+            f"[skeliner.post] split_node: {moving.size:,} verts of node {node} "
+            f"→ new node {new_id}"
+        )
+        if not supported:
+            print("      └─ the two halves share no surface")
+
+    return {
+        "node": new_id,
+        "parent": node,
+        "moved": int(moving.size),
+        "ignored": ignored,
+        "supported": supported,
+        "stale_radii": result["stale_radii"],
+    }
+
+
 # -----------------------------------------------------------------------------
 # editing edges: graft / clip
 # -----------------------------------------------------------------------------

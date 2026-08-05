@@ -1239,3 +1239,138 @@ def test_a_bin_edit_landing_first_retires_the_edge_preview(bin_client):
     r = client.post("/edge_edit_apply", json={"name": name})
     assert r.status_code == 409
     assert "skeleton changed" in r.json()["error"]
+
+
+# ── /bin_split_preview ────────────────────────────────────────────────
+#
+# The third bin verb.  It shares the pending slot and the apply route with
+# the other two, and it deliberately makes only one edge.
+
+
+def _own_faces(client, name, node):
+    return client.post("/bin", json={"name": name, "node": node}).json()["faces"]
+
+
+def test_a_split_promotes_part_of_a_bin_to_its_own_node(bin_client):
+    client, name, _, skel = bin_client
+    n_before = len(skel.nodes)
+    faces = _own_faces(client, name, 3)
+    assert len(faces) >= 4, "fixture bin is too small to split"
+
+    r = client.post(
+        "/bin_split_preview",
+        json={"name": name, "splitFrom": 3, "faces": faces[: len(faces) // 2]},
+    )
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    assert body["split"] is True
+    assert body["parent"] == 3
+    assert body["to"] == n_before, "the new node is appended"
+    assert body["moved"] > 0
+    assert body["dropped"] == [], "a split empties nothing"
+    assert len(_skel_state_of(client.app, name)["skeleton"].nodes) == n_before
+
+
+def test_applying_a_split_installs_it_and_joins_only_the_parent(bin_client):
+    """The whole design rests on this: the other edges are the user's, made
+    with Edge, where the surface says which joins it backs."""
+    client, name, _, skel = bin_client
+    faces = _own_faces(client, name, 3)
+    preview = client.post(
+        "/bin_split_preview",
+        json={"name": name, "splitFrom": 3, "faces": faces[: len(faces) // 2]},
+    ).json()
+    assert client.post("/bin_reassign_apply", json={"name": name}).json()["ok"]
+
+    live = _skel_state_of(client.app, name)["skeleton"]
+    new = preview["to"]
+    assert len(live.nodes) == len(skel.nodes) + 1
+    e = np.asarray(live.edges)
+    touching = set(np.unique(e[(e[:, 0] == new) | (e[:, 1] == new)]).tolist()) - {new}
+    assert touching == {3}
+    assert _n_components_of(live) == _n_components_of(skel), "a piece went adrift"
+
+
+def test_after_a_split_the_surface_offers_the_re_route(bin_client):
+    """A split leaves the new node a leaf; putting it in the chain is a
+    restore, and `edge_support` is what tells the user so."""
+    client, name, mesh, skel = bin_client
+    node, nbrs = None, None
+    e = np.asarray(skel.edges)
+    for n in range(1, len(skel.nodes)):
+        nb = np.unique(e[(e[:, 0] == n) | (e[:, 1] == n)])
+        nb = [int(x) for x in nb if x != n and x != 0]
+        if len(nb) >= 2 and len(skel.node2verts[n]) >= 4:
+            node, nbrs = n, nb
+            break
+    if node is None:
+        pytest.skip("fixture has no splittable interior bin")
+
+    # the half of the bin nearest one neighbour, so the new node lands there
+    owned = np.asarray(skel.node2verts[node])
+    d = np.linalg.norm(np.asarray(mesh.vertices)[owned] - skel.nodes[nbrs[0]], axis=1)
+    near = set(owned[np.argsort(d)[: len(owned) // 2]].tolist())
+    faces = [
+        f
+        for f in _own_faces(client, name, node)
+        if sum(v in near for v in mesh.faces[f]) >= 2
+    ]
+    if not faces or len(faces) >= len(_own_faces(client, name, node)):
+        pytest.skip("cannot isolate one side of the fixture bin")
+
+    new = client.post(
+        "/bin_split_preview",
+        json={"name": name, "splitFrom": node, "faces": faces},
+    ).json()["to"]
+    client.post("/bin_reassign_apply", json={"name": name})
+
+    dropped = {
+        tuple(p)
+        for p in client.post("/edge_support", json={"name": name}).json()["dropped"]
+    }
+    assert any(new in p for p in dropped), (
+        "the split left no surface-backed join to re-route with"
+    )
+
+
+def test_a_split_and_an_edge_edit_share_one_pending_slot(bin_client):
+    """One skeleton, one pending edit — whichever landed second would be
+    refused by the identity check anyway."""
+    client, name, _, skel = bin_client
+    u, v = (int(x) for x in skel.edges[len(skel.edges) // 2])
+    client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v})
+
+    faces = _own_faces(client, name, 3)
+    client.post(
+        "/bin_split_preview",
+        json={"name": name, "splitFrom": 3, "faces": faces[:2]},
+    )
+    assert client.post("/bin_reassign_apply", json={"name": name}).json()["ok"]
+    assert client.post("/edge_edit_apply", json={"name": name}).status_code == 409
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ({"faces": [0]}, "No bin to split"),
+        ({"splitFrom": 3, "faces": []}, "No faces selected"),
+        ({"splitFrom": 3, "faces": [10**9]}, "face id out of range"),
+        ({"splitFrom": 10**6, "faces": [0]}, "node id out of range"),
+        ({"splitFrom": 0, "faces": [0]}, "node 0 is the soma"),
+    ],
+)
+def test_bin_split_rejects_bad_input(bin_client, body, expected):
+    client, name, _, _ = bin_client
+    r = client.post("/bin_split_preview", json={"name": name, **body})
+    assert r.status_code == 400
+    assert expected in r.json()["error"]
+
+
+def test_splitting_off_a_whole_bin_is_refused_by_the_route(bin_client):
+    client, name, _, _ = bin_client
+    faces = _own_faces(client, name, 3)
+    r = client.post(
+        "/bin_split_preview", json={"name": name, "splitFrom": 3, "faces": faces}
+    )
+    assert r.status_code == 400
+    assert "leave something behind" in r.json()["error"]

@@ -518,6 +518,14 @@
                     >
                         Move lassoed surface
                     </button>
+                    <button
+                        id="binSplitBtn"
+                        style="margin-left: 4px"
+                        disabled
+                        title="Shift-drag over part of the selected bin's own surface to promote it to a node of its own. The new node is joined to its parent and nothing else — use Edge to re-route from there."
+                    >
+                        Split off
+                    </button>
                     <span style="color: #888; margin-left: 12px">Edge:</span>
                     <button
                         id="edgeEditBtn"
@@ -987,6 +995,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("binShowBall").addEventListener("change", redrawBinBalls);
                 document.getElementById("binMoveBtn").addEventListener("click", runBinMove);
                 document.getElementById("binMergeBtn").addEventListener("click", runBinMerge);
+                document.getElementById("binSplitBtn").addEventListener("click", runBinSplit);
                 document.getElementById("edgeEditBtn").addEventListener("click", runEdgeEdit);
                 document.getElementById("skelApplyBtn").addEventListener("click", runSkelApply);
                 document.getElementById("skelCancelBtn").addEventListener("click", runSkelCancel);
@@ -2861,18 +2870,37 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
-            // Two verbs, and which one is available follows from the
-            // selection alone: clicking bins is a merge, and needs no lasso
-            // because the bins already *are* the selection; the lasso is only
-            // for naming part of a bin, which clicking cannot express.  Each
-            // button spells out what it would do, so "what merges into what"
-            // never has to be inferred from click order.
+            /**
+             * Split the lasso by who owns the surface under it.
+             *
+             * The same gesture means two things depending on where it was
+             * drawn: over a neighbour's surface it is a **move** into the
+             * selected bin, over the selected bin's own surface it is a
+             * **split** out of it.  Nothing has to arbitrate — each verb acts
+             * on its own share and the button says how big that share is.
+             */
+            function lassoShares() {
+                const dest = binDestination();
+                const own = new Set(dest ? dest.faces : []);
+                const mine = [], theirs = [];
+                for (const f of manualHighlightFaces)
+                    (own.has(f) ? mine : theirs).push(f);
+                return { split: mine, move: theirs };
+            }
+
+            // Three verbs, and which are available follows from the selection
+            // alone: clicking bins is a merge, and needs no lasso because the
+            // bins already *are* the selection; the lasso is for naming part
+            // of a bin, which clicking cannot express.  Each button spells out
+            // what it would do, so "what goes into what" never has to be
+            // inferred from click order.
             function refreshBinMoveRow() {
                 const merge = document.getElementById("binMergeBtn");
                 const move = document.getElementById("binMoveBtn");
+                const split = document.getElementById("binSplitBtn");
                 const dest = binDestination();
-                const nFaces = manualHighlightFaces.size;
                 const donors = selectedBins.slice(1);
+                const share = lassoShares();
 
                 merge.disabled =
                     !dest || !dest.editable || !donors.length ||
@@ -2881,10 +2909,19 @@ let meshCentroid = [0, 0, 0];
                     ? `Merge ${donors.map((b) => b.node).join(", ")} → node ${dest.node}`
                     : "Merge";
 
-                move.disabled = !dest || !dest.editable || nFaces === 0;
-                move.textContent = nFaces
-                    ? `Move ${nFaces.toLocaleString()} faces → node ${dest.node}`
+                move.disabled = !dest || !dest.editable || !share.move.length;
+                move.textContent = share.move.length
+                    ? `Move ${share.move.length.toLocaleString()} faces → node ${dest.node}`
                     : "Move lassoed surface";
+
+                // A split has to leave something behind, so lassoing the whole
+                // bin is a rename, not a split.
+                split.disabled =
+                    !dest || !dest.editable || !share.split.length ||
+                    share.split.length >= dest.faces.length;
+                split.textContent = share.split.length
+                    ? `Split ${share.split.length.toLocaleString()} faces off node ${dest.node}`
+                    : "Split off";
             }
 
             /**
@@ -2915,15 +2952,38 @@ let meshCentroid = [0, 0, 0];
 
             function renderBinEditSummary(d) {
                 const box = document.getElementById("skelEditSummary");
-                const lines = [
-                    `<div><b>${d.moved.toLocaleString()}</b> verts → ` +
-                        `<b>node ${d.to}</b></div>`,
-                    `<div style="color:#888">from ${d.donors.length} bin` +
-                        `${d.donors.length === 1 ? "" : "s"}: ` +
-                        `${d.donors.join(", ")}</div>`,
-                    `<div style="color:#888">r ${d.radiusBefore.toFixed(1)} → ` +
-                        `${d.radiusAfter.toFixed(1)}</div>`,
-                ];
+                const lines = d.split
+                    ? [
+                          `<div><b>${d.moved.toLocaleString()}</b> verts of ` +
+                              `node ${d.parent} → <b>new node ${d.to}</b></div>`,
+                          `<div style="color:#888">r ${d.radiusBefore.toFixed(1)} → ` +
+                              `${d.radiusAfter.toFixed(1)} and ` +
+                              `${d.radiusNew.toFixed(1)}</div>`,
+                          // The one edge a split can defend.  Everything else
+                          // is left to Edge, where the surface says which
+                          // joins it actually backs.
+                          `<div style="color:#888">joined to node ${d.parent} ` +
+                              `only — re-route with <b>Edge</b></div>`,
+                      ]
+                    : [
+                          `<div><b>${d.moved.toLocaleString()}</b> verts → ` +
+                              `<b>node ${d.to}</b></div>`,
+                          `<div style="color:#888">from ${d.donors.length} bin` +
+                              `${d.donors.length === 1 ? "" : "s"}: ` +
+                              `${d.donors.join(", ")}</div>`,
+                          `<div style="color:#888">r ${d.radiusBefore.toFixed(1)} → ` +
+                              `${d.radiusAfter.toFixed(1)}</div>`,
+                      ];
+                if (d.split && !d.supported)
+                    lines.push(
+                        `<div style="color:#e9a">the two halves share no ` +
+                            `surface — that edge has nothing behind it</div>`,
+                    );
+                if (d.ignoredNotOwned)
+                    lines.push(
+                        `<div style="color:#888">${d.ignoredNotOwned.toLocaleString()} ` +
+                            `verts ignored — not owned by node ${d.parent}</div>`,
+                    );
                 if (d.dropped.length)
                     lines.push(
                         `<div style="color:#e9a">${d.dropped.length} bin(s) emptied ` +
@@ -2956,18 +3016,21 @@ let meshCentroid = [0, 0, 0];
                 box.style.display = "block";
             }
 
-            async function previewBinEdit(btnId, payload) {
+            async function previewBinEdit(btnId, payload, route) {
                 const dest = binDestination();
                 if (!dest) return;
+                // A split names no destination — its node does not exist yet.
+                const base = route
+                    ? { name: document.getElementById("binSkelSel").value }
+                    : {
+                          name: document.getElementById("binSkelSel").value,
+                          to: dest.node,
+                      };
                 const data = await _runAction(document.getElementById(btnId), () =>
-                    fetch("/bin_reassign_preview", {
+                    fetch(route || "/bin_reassign_preview", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            name: document.getElementById("binSkelSel").value,
-                            to: dest.node,
-                            ...payload,
-                        }),
+                        body: JSON.stringify({ ...base, ...payload }),
                     }),
                 );
                 if (!data || !data.ok) {
@@ -2981,10 +3044,20 @@ let meshCentroid = [0, 0, 0];
             }
 
             function runBinMove() {
-                if (manualHighlightFaces.size === 0) return;
-                return previewBinEdit("binMoveBtn", {
-                    faces: Array.from(manualHighlightFaces),
-                });
+                const faces = lassoShares().move;
+                if (!faces.length) return;
+                return previewBinEdit("binMoveBtn", { faces });
+            }
+
+            function runBinSplit() {
+                const dest = binDestination();
+                const faces = lassoShares().split;
+                if (!dest || !faces.length) return;
+                return previewBinEdit(
+                    "binSplitBtn",
+                    { splitFrom: dest.node, faces },
+                    "/bin_split_preview",
+                );
             }
 
             function runBinMerge() {
