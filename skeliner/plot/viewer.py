@@ -305,6 +305,7 @@ def _create_app(
         "disconnected": None,  # cached from detect_disconnected
         "gap_clusters": None,  # cached from detect_gaps
         "hole_loops": None,  # cached from detect_holes
+        "pending_reassignment": None,  # previewed, not yet committed
     }
 
     def _organelle_mask(org) -> np.ndarray | None:
@@ -1342,6 +1343,9 @@ def _create_app(
             pocket=pocket,
             isolated=isolated,
             expanded=expanded,
+            # Detection re-runs against the same mesh, so face ids — and
+            # therefore any hand assignment made against them — still hold.
+            manual=None if cached is None else cached.manual,
         )
 
         ann = {}
@@ -1671,6 +1675,7 @@ def _create_app(
                 pocket=np.concatenate([org.pocket, pad]),
                 isolated=np.concatenate([org.isolated, pad]),
                 expanded=np.concatenate([org.expanded, pad]),
+                manual=np.concatenate([org.manual, pad]),
             )
 
         # ms was mutated in-place by remove_gaps (topology invalidated,
@@ -2057,6 +2062,10 @@ def _create_app(
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None
         mesh_state["hole_loops"] = None
+        # A preview names faces of the mesh it was computed against.  Face
+        # ids do not survive a mesh change, so applying it afterwards would
+        # reassign whatever now sits at those indices.
+        mesh_state["pending_reassignment"] = None
         # Keep the original centroid so the camera doesn't shift
         original_centroid = mesh_state["centroid"]
         buffers = _mesh_to_buffers(new_mesh, centroid=original_centroid)
@@ -2464,6 +2473,7 @@ def _create_app(
         prev_mesh = _undo_stack.pop()
         # Apply without pushing to undo stack
         mesh_state["mesh"] = prev_mesh
+        mesh_state["pending_reassignment"] = None
         buffers = _mesh_to_buffers(prev_mesh)
         mesh_state["buffers"] = buffers
         mesh_state["centroid"] = np.asarray(buffers["centroid"], dtype=np.float32)
@@ -2510,70 +2520,44 @@ def _create_app(
             }
         )
 
-    async def do_break_up_mesh(_request):
-        """Break mesh at soma: classify components, expand soma + organelles."""
-        if mesh_state["mesh"] is None:
-            return JSONResponse(
-                {"ok": False, "error": "No mesh loaded"}, status_code=400
-            )
-        soma = mesh_state.get("soma")
-        org = mesh_state.get("organelles")
-        if org is None:
-            return JSONResponse(
-                {"ok": False, "error": "Run organelle detection first"},
-                status_code=400,
-            )
+    def _publish_components(result):
+        """Install a MeshComponents into mesh_state and redraw its annotations.
 
-        from skeliner.pre import break_up_mesh
-
-        mesh = mesh_state["mesh"]
-
-        def _run():
-            return break_up_mesh(mesh, soma, org, verbose=True)
-
-        result = await _run_with_log(_run)
+        Shared by ``break_up_mesh`` and by committing a reassignment, so the
+        two cannot drift into showing the same components differently.
+        """
+        from skeliner.pre import soma_face_mask
 
         mesh_state["soma"] = result.soma
         mesh_state["organelles"] = result.organelles
         mesh_state["neurites"] = result.neurites
         mesh_state["discarded"] = result.discarded
 
-        # Build annotations
         centroid = mesh_state["centroid"]
-        faces = mesh.faces
+        faces = mesh_state["mesh"].faces
         new_soma = result.soma
         new_org = result.organelles.mask
 
-        if new_soma is not None:
-            soma_vset = set(int(v) for v in new_soma.verts)
-            soma_face_mask = np.array(
-                [
-                    sum(1 for v in faces[fi] if int(v) in soma_vset) >= 2
-                    for fi in range(len(faces))
-                ],
-                dtype=bool,
-            )
-            soma_faces = np.where(soma_face_mask)[0].tolist()
-        else:
-            soma_face_mask = np.zeros(len(faces), dtype=bool)
-            soma_faces = []
+        soma_mask = soma_face_mask(
+            faces, new_soma.verts if new_soma is not None else None
+        )
 
         ann = {}
         if annotations_path.exists():
             ann = json.loads(annotations_path.read_text(encoding="utf-8"))
 
-        # Replace all highlights and ellipsoids with break_up_mesh results
+        # Replace all highlights and ellipsoids with the component results
         highlights = []
         if new_soma is not None:
             highlights.append(
                 {
-                    "faces": soma_faces,
+                    "faces": np.where(soma_mask)[0].tolist(),
                     "color": [0.9, 0.5, 0.9],
                     "label": "soma",
                 }
             )
 
-        org_only = new_org & ~soma_face_mask
+        org_only = new_org & ~soma_mask
         highlights.append(
             {
                 "faces": np.where(org_only)[0].tolist(),
@@ -2623,15 +2607,127 @@ def _create_app(
 
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
 
+        return {
+            "nNeurites": len(result.neurites),
+            "nDiscarded": len(result.discarded),
+            "somaVerts": (len(new_soma.verts) if new_soma is not None else 0),
+            "orgFaces": int(new_org.sum()),
+        }
+
+    async def do_break_up_mesh(_request):
+        """Break mesh at soma: classify components, expand soma + organelles."""
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        soma = mesh_state.get("soma")
+        org = mesh_state.get("organelles")
+        if org is None:
+            return JSONResponse(
+                {"ok": False, "error": "Run organelle detection first"},
+                status_code=400,
+            )
+
+        from skeliner.pre import break_up_mesh
+
+        mesh = mesh_state["mesh"]
+
+        def _run():
+            return break_up_mesh(mesh, soma, org, verbose=True)
+
+        result = await _run_with_log(_run)
+        # Breaking up redefines the components a pending reassignment was
+        # previewed against, so that preview no longer means anything.
+        mesh_state["pending_reassignment"] = None
+        return JSONResponse({"ok": True, **_publish_components(result)})
+
+    def _current_components():
+        """A MeshComponents view of what the viewer currently holds."""
+        from skeliner.dataclass import Discarded, MeshComponents, Neurites
+
+        return MeshComponents(
+            soma=mesh_state.get("soma"),
+            organelles=mesh_state["organelles"],
+            neurites=mesh_state.get("neurites") or Neurites([]),
+            discarded=mesh_state.get("discarded") or Discarded([]),
+        )
+
+    async def reassign_preview(request):
+        """Preview handing the selected faces to soma / organelle / arbor."""
+        from skeliner.pre import preview_reassignment
+
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        if mesh_state.get("organelles") is None:
+            return JSONResponse(
+                {"ok": False, "error": "Run organelle detection first"},
+                status_code=400,
+            )
+        if not mesh_state.get("neurites"):
+            return JSONResponse(
+                {"ok": False, "error": "Run break_up_mesh first"},
+                status_code=400,
+            )
+
+        body = await request.json()
+        sel = body.get("faces") or []
+        target = body.get("to")
+        if not sel:
+            return JSONResponse(
+                {"ok": False, "error": "No faces selected"}, status_code=400
+            )
+
+        mesh = mesh_state["mesh"]
+        components = _current_components()
+
+        def _run():
+            return preview_reassignment(mesh, components, sel, to=target, verbose=True)
+
+        try:
+            r = await _run_with_log(_run)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+        mesh_state["pending_reassignment"] = r
+        await _log(f"Preview: {r.summary}")
         return JSONResponse(
             {
                 "ok": True,
-                "nNeurites": len(result.neurites),
-                "nDiscarded": len(result.discarded),
-                "somaVerts": (len(new_soma.verts) if new_soma is not None else 0),
-                "orgFaces": int(new_org.sum()),
+                "target": r.target,
+                "summary": r.summary,
+                "effects": [list(e) for e in r.effects],
+                "nSelected": len(r.selected),
+                "leaving": r.leaving.tolist(),
+                "entering": r.entering.tolist(),
+                "nNeurites": len(r.components.neurites),
+                "nDiscarded": len(r.components.discarded),
             }
         )
+
+    async def reassign_apply(_request):
+        """Commit the pending reassignment preview."""
+        from skeliner.pre import apply_reassignment
+
+        r = mesh_state.get("pending_reassignment")
+        if r is None:
+            return JSONResponse(
+                {"ok": False, "error": "Nothing to apply — preview first"},
+                status_code=400,
+            )
+
+        components = _current_components()
+        apply_reassignment(components, r)
+        mesh_state["pending_reassignment"] = None
+        out = _publish_components(components)
+        await _log(f"Applied: {r.summary}")
+        return JSONResponse({"ok": True, **out})
+
+    async def reassign_cancel(_request):
+        """Drop the pending reassignment preview."""
+        mesh_state["pending_reassignment"] = None
+        return JSONResponse({"ok": True})
 
     async def do_compact_mesh(_request):
         """Compact mesh: remove degenerate faces, reindex vertices, remap annotations."""
@@ -2724,6 +2820,9 @@ def _create_app(
         mesh_state["disconnected"] = None
         mesh_state["gap_clusters"] = None
         mesh_state["hole_loops"] = None
+        # Compacting reindexes every face, so a preview's face ids now name
+        # different triangles.  Applying it would reassign the wrong ones.
+        mesh_state["pending_reassignment"] = None
 
         mesh_state["buffers"] = buffers
         mesh_state["centroid"] = new_centroid
@@ -3554,6 +3653,9 @@ def _create_app(
             Route("/edit_vertices", edit_vertices, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/break_up_mesh", do_break_up_mesh, methods=["POST"]),
+            Route("/reassign_preview", reassign_preview, methods=["POST"]),
+            Route("/reassign_apply", reassign_apply, methods=["POST"]),
+            Route("/reassign_cancel", reassign_cancel, methods=["POST"]),
             Route("/compact_mesh", do_compact_mesh, methods=["POST"]),
             Route("/export_mesh", export_mesh, methods=["GET"]),
             Route("/export_skeleton", export_skeleton, methods=["GET"]),

@@ -249,6 +249,32 @@
             #detect-panel button[data-state="error"] {
                 border-color: #a44 !important;
             }
+            /* Mode selector — which stage of the workflow the panel is for.
+               A mode that can be entered without noticing is worse than no
+               mode, because the same lasso gesture then means two things. */
+            #detect-panel button.mode-btn[data-active="1"] {
+                background: #3a2a4a !important;
+                border-color: #d98cd9 !important;
+                color: #fff;
+            }
+            /* Scope chips — which components a lasso is allowed to touch. */
+            #scopeChips button {
+                padding: 2px 8px;
+                margin-left: 4px;
+                opacity: 0.4;
+            }
+            #scopeChips button[data-on="1"] {
+                opacity: 1;
+                border-color: #7af;
+            }
+            #scopeChips .chip-swatch {
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                margin-right: 5px;
+                border-radius: 2px;
+                vertical-align: middle;
+            }
             #saveBtn {
                 background: #1a3a2a !important;
                 border-color: #4a8 !important;
@@ -335,47 +361,94 @@
         </div>
 
         <div id="detect-panel">
-            <div style="white-space: nowrap">
-                <span style="color: #888">Detect:</span>
-                <button id="detectParallelBtn" style="margin-left:4px">Parallel</button>
-                <button id="detectOrganellesBtn" style="margin-left: 4px">Organelles</button>
-                <button id="detectFusionsBtn" style="margin-left: 4px">Fusions</button>
-                <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
-
-                <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
-                <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
-                <span style="color: #888; margin-left: 12px">Skeleton:</span>
-                <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
-                <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
-            </div>
+            <!-- Always visible: the mode, plus what is not stage-specific. -->
             <div
                 style="
                     white-space: nowrap;
-                    margin-top: 4px;
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
                 "
             >
                 <span>
-                    <span style="color: #888">Remove:</span>
-                    <button id="removeParallelBtn" style="margin-left: 4px">Parallel</button>
-                    <button id="removeOrganellesBtn" style="margin-left: 4px">Organelles</button>
-                    <button id="removeFusionsBtn" style="margin-left: 4px">Fusions</button>
-                    <button id="removeGapsBtn" style="margin-left: 4px">Gaps</button>
+                    <span style="color: #888">Mode:</span>
+                    <button
+                        id="modePreprocessBtn"
+                        class="mode-btn"
+                        style="margin-left: 4px"
+                        data-active="1"
+                        title="Run the automatic pipeline"
+                    >
+                        Preprocess
+                    </button>
+                    <button
+                        id="modeEditBtn"
+                        class="mode-btn"
+                        style="margin-left: 4px"
+                        title="Hand faces between components — needs Break first"
+                    >
+                        Edit Mesh
+                    </button>
                     <span style="color: #888; margin-left: 12px">Path:</span>
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
-                    <span style="color: #888; margin-left: 12px">Mesh:</span>
-                    <button id="hlMerge" style="margin-left: 4px">Merge</button>
-                    <button id="hlRemove" style="margin-left: 4px">Remove</button>
-                    <button id="breakUpMeshBtn" style="margin-left: 4px">Break</button>
-                    <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
                 </span>
                 <span style="margin-left: 12px">
                     <button id="undoBtn" style="margin-right: 4px">Undo</button>
                     <button id="saveBtn">Save</button>
                 </span>
+            </div>
+
+            <div id="preprocess-rows">
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <span style="color: #888">Detect:</span>
+                    <button id="detectParallelBtn" style="margin-left:4px">Parallel</button>
+                    <button id="detectOrganellesBtn" style="margin-left: 4px">Organelles</button>
+                    <button id="detectFusionsBtn" style="margin-left: 4px">Fusions</button>
+                    <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
+                    <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
+                    <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
+                    <span style="color: #888; margin-left: 12px">Skeleton:</span>
+                    <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
+                    <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
+                </div>
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <span style="color: #888">Remove:</span>
+                    <button id="removeParallelBtn" style="margin-left: 4px">Parallel</button>
+                    <button id="removeOrganellesBtn" style="margin-left: 4px">Organelles</button>
+                    <button id="removeFusionsBtn" style="margin-left: 4px">Fusions</button>
+                    <button id="removeGapsBtn" style="margin-left: 4px">Gaps</button>
+                    <span style="color: #888; margin-left: 12px">Mesh:</span>
+                    <button id="hlMerge" style="margin-left: 4px">Merge</button>
+                    <button id="hlRemove" style="margin-left: 4px">Remove</button>
+                    <button id="breakUpMeshBtn" style="margin-left: 4px">Break</button>
+                    <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
+                </div>
+            </div>
+
+            <div id="editmesh-rows" style="display: none">
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <span style="color: #888" title="Only faces of a lit component can be picked">Scope:</span>
+                    <span id="scopeChips"></span>
+                    <button id="scopeAllBtn" style="margin-left: 10px">All</button>
+                    <button id="scopeNoneBtn" style="margin-left: 4px">None</button>
+                </div>
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <span style="color: #888">Reassign selection to:</span>
+                    <button id="reassignSomaBtn" style="margin-left: 4px">Soma</button>
+                    <button id="reassignOrganelleBtn" style="margin-left: 4px">Organelle</button>
+                    <button
+                        id="reassignRemainderBtn"
+                        style="margin-left: 4px"
+                        title="Release from soma and organelles — connectivity decides which neurite it joins"
+                    >
+                        Arbor
+                    </button>
+                    <span id="reassignPending" style="display: none; margin-left: 12px">
+                        <button id="reassignApplyBtn">Apply</button>
+                        <button id="reassignCancelBtn" style="margin-left: 4px">Cancel</button>
+                    </span>
+                </div>
             </div>
         </div>
 
@@ -518,6 +591,20 @@
                 <button id="hlClear" style="font-size: 11px; cursor: pointer">Clear</button>
                 <button id="hlRescue" style="font-size: 11px; cursor: pointer; display: none; margin-left: 6px">→ Neurite</button>
             </div>
+            <div
+                id="reassignSummary"
+                style="
+                    display: none;
+                    margin-top: 4px;
+                    padding: 4px 6px;
+                    border-left: 2px solid #d98cd9;
+                    background: #2a222a;
+                    font-size: 11px;
+                    line-height: 1.5;
+                    max-width: 320px;
+                    white-space: normal;
+                "
+            ></div>
             <div id="hlSaveRow" style="display: none; margin-top: 4px">
                 <input
                     id="hlSaveName"
@@ -767,6 +854,27 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("hlRemove").addEventListener("click", runRemoveSelected);
                 document.getElementById("breakUpMeshBtn").addEventListener("click", runBreakUpMesh);
                 document.getElementById("compactMeshBtn").addEventListener("click", runCompactMesh);
+                document
+                    .getElementById("reassignSomaBtn")
+                    .addEventListener("click", () => runReassign("soma", "reassignSomaBtn"));
+                document
+                    .getElementById("reassignOrganelleBtn")
+                    .addEventListener("click", () =>
+                        runReassign("organelle", "reassignOrganelleBtn"),
+                    );
+                document
+                    .getElementById("reassignRemainderBtn")
+                    .addEventListener("click", () =>
+                        runReassign("remainder", "reassignRemainderBtn"),
+                    );
+                document.getElementById("reassignApplyBtn").addEventListener("click", applyReassign);
+                document.getElementById("reassignCancelBtn").addEventListener("click", cancelReassign);
+                document
+                    .getElementById("modePreprocessBtn")
+                    .addEventListener("click", () => setMode(false));
+                document.getElementById("modeEditBtn").addEventListener("click", () => setMode(true));
+                document.getElementById("scopeAllBtn").addEventListener("click", () => setScopeAll(true));
+                document.getElementById("scopeNoneBtn").addEventListener("click", () => setScopeAll(false));
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
                 document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
                 document
@@ -1497,8 +1605,11 @@ let meshCentroid = [0, 0, 0];
                 const faceIndex = hit.faceIndex;
                 const point = hit.point;
                 if (event.shiftKey) {
+                    // Deselecting is always allowed; only adding is scoped, so
+                    // a narrowed scope can never trap faces in the selection.
                     if (manualHighlightFaces.has(faceIndex)) manualHighlightFaces.delete(faceIndex);
-                    else manualHighlightFaces.add(faceIndex);
+                    else if (inScope(faceIndex)) manualHighlightFaces.add(faceIndex);
+                    else return;
                     rebuildManualHighlight();
                     syncManualHighlight();
                     return;
@@ -1549,7 +1660,7 @@ let meshCentroid = [0, 0, 0];
                     if (allSelected) {
                         for (const fi of annFaces) manualHighlightFaces.delete(fi);
                     } else {
-                        for (const fi of annFaces) manualHighlightFaces.add(fi);
+                        for (const fi of annFaces) if (inScope(fi)) manualHighlightFaces.add(fi);
                     }
                     rebuildManualHighlight();
                     syncManualHighlight();
@@ -1625,6 +1736,12 @@ let meshCentroid = [0, 0, 0];
                     manualHighlightMesh.material.dispose();
                     manualHighlightMesh = null;
                 }
+                // A preview belongs to the selection it was computed from, so
+                // touching the selection retires it — here rather than in each
+                // caller, since every path that changes it lands in this
+                // function.
+                if (reassignOverlays.length) cancelReassign();
+
                 const faces = Array.from(manualHighlightFaces);
                 document.getElementById("hlCount").textContent = faces.length;
                 document.getElementById("hlSaveRow").style.display = faces.length > 0 ? "block" : "none";
@@ -1685,13 +1802,6 @@ let meshCentroid = [0, 0, 0];
                 await _runAction(
                     document.getElementById("detectFusionsBtn"),
                     () => fetch("/detect_fusions", { method: "POST" }),
-                );
-            }
-
-            async function runDetectRims() {
-                await _runAction(
-                    document.getElementById("detectRimsBtn"),
-                    () => fetch("/detect_rims", { method: "POST" }),
                 );
             }
 
@@ -1768,6 +1878,260 @@ let meshCentroid = [0, 0, 0];
                     document.getElementById("compactMeshBtn"),
                     () => fetch("/compact_mesh", { method: "POST" }),
                 );
+            }
+
+            // ── Edit Mesh mode ───────────────────────────────────────────
+            // The two panels are different activities — run the automatic
+            // steps in order, versus select/assign/commit — and separating
+            // them is what keeps a lasso from meaning two things.
+            let editMode = false;
+
+            function setMode(edit) {
+                editMode = edit;
+                document.getElementById("preprocess-rows").style.display = edit
+                    ? "none"
+                    : "block";
+                document.getElementById("editmesh-rows").style.display = edit
+                    ? "block"
+                    : "none";
+                document.getElementById("modePreprocessBtn").dataset.active = edit
+                    ? "0"
+                    : "1";
+                document.getElementById("modeEditBtn").dataset.active = edit ? "1" : "0";
+                // Scoping is an Edit Mesh notion; leaving a mask applied on the
+                // way out would silently narrow selection in a panel with no
+                // scope UI to explain it.  rebuildScopeMask reads editMode.
+                rebuildScopeMask();
+                if (edit) renderScopeChips();
+                else cancelReassign();
+            }
+
+            // ── Selection scope ──────────────────────────────────────────
+            // Near the soma several components sit within a few pixels of
+            // each other, so an unscoped lasso grabs soma faces and
+            // neighbouring dendrites along with the band that was wanted.
+            // Scoping lets the user draw roughly instead of carefully.
+            //
+            // scopeOn is an allow-list of indices into
+            // currentAnnotations.highlights.  `null` means "not chosen yet",
+            // which shows every chip lit and behaves like Preprocess does; an
+            // *empty* set is a deliberate choice that nothing is pickable.
+            // Keeping those two apart is what lets "All" and "None" be
+            // different buttons rather than two ways to say the same thing.
+            //
+            // The mask is a face-length Uint8Array rather than a Set because
+            // the lookup is the lasso's inner loop, over every face.
+            let scopeMask = null; // null → unscoped, everything pickable
+            let scopeOn = null;
+
+            function componentHighlights() {
+                if (!currentAnnotations || !currentAnnotations.highlights) return [];
+                return currentAnnotations.highlights
+                    .map((g, i) => ({ g, i }))
+                    .filter(({ g }) => (g.faces || []).length > 0);
+            }
+
+            function scopeHas(i) {
+                return scopeOn === null || scopeOn.has(i);
+            }
+
+            function rebuildScopeMask() {
+                if (!editMode || scopeOn === null || !meshGeometry) {
+                    scopeMask = null;
+                    return;
+                }
+                const nFaces = meshGeometry.getAttribute("position").count / 3;
+                scopeMask = new Uint8Array(nFaces);
+                for (const { g, i } of componentHighlights()) {
+                    if (!scopeOn.has(i)) continue;
+                    for (const f of g.faces) if (f < nFaces) scopeMask[f] = 1;
+                }
+            }
+
+            function inScope(faceIndex) {
+                return scopeMask === null || scopeMask[faceIndex] === 1;
+            }
+
+            function renderScopeChips() {
+                const host = document.getElementById("scopeChips");
+                host.innerHTML = "";
+                const groups = componentHighlights();
+                if (!groups.length) {
+                    host.innerHTML =
+                        "<span style='color:#a86'>run Break first — no components yet</span>";
+                    return;
+                }
+
+                for (const { g, i } of groups) {
+                    const c = g.color || [1, 1, 1];
+                    const btn = document.createElement("button");
+                    btn.dataset.on = scopeHas(i) ? "1" : "0";
+                    btn.title = "click to toggle, double-click for this one alone";
+                    const sw = document.createElement("span");
+                    sw.className = "chip-swatch";
+                    sw.style.background = `rgb(${Math.round(c[0] * 255)},${Math.round(
+                        c[1] * 255,
+                    )},${Math.round(c[2] * 255)})`;
+                    btn.appendChild(sw);
+                    btn.appendChild(
+                        document.createTextNode((g.label || `group ${i}`).split(" (")[0]),
+                    );
+                    btn.addEventListener("click", () => {
+                        // First click materialises the implicit "everything",
+                        // so toggling one chip off leaves the rest lit.
+                        if (scopeOn === null) scopeOn = new Set(groups.map((x) => x.i));
+                        if (scopeOn.has(i)) scopeOn.delete(i);
+                        else scopeOn.add(i);
+                        rebuildScopeMask();
+                        renderScopeChips();
+                    });
+                    btn.addEventListener("dblclick", () => {
+                        scopeOn = new Set([i]);
+                        rebuildScopeMask();
+                        renderScopeChips();
+                    });
+                    host.appendChild(btn);
+                }
+
+                const lit = scopeOn === null ? groups.length : scopeOn.size;
+                const note = document.createElement("span");
+                note.style.cssText = `color:${lit ? "#888" : "#a86"};margin-left:10px`;
+                note.textContent = lit
+                    ? `${lit} of ${groups.length} pickable`
+                    : "nothing pickable — light a component";
+                host.appendChild(note);
+            }
+
+            function setScopeAll(on) {
+                scopeOn = on ? null : new Set();
+                rebuildScopeMask();
+                renderScopeChips();
+            }
+
+            function resetScope() {
+                // Component ids are positions in a list re-sorted by size on
+                // every re-derive, so a scope kept across one would name
+                // different components than the user lit.
+                scopeOn = null;
+                rebuildScopeMask();
+                if (editMode) renderScopeChips();
+            }
+
+            // ── Reassign faces between components ────────────────────────
+            // Preview then apply, like every other pair in this panel.  The
+            // preview re-derives on the server, so what is drawn here is
+            // what commits — not a guess at it.
+            let reassignOverlays = [];
+
+            function clearReassignOverlay() {
+                for (const m of reassignOverlays) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                reassignOverlays = [];
+            }
+
+            function drawReassignOverlay(faces, color) {
+                if (!faces.length || !meshGeometry) return;
+                const posAttr = meshGeometry.getAttribute("position");
+                const positions = new Float32Array(faces.length * 9);
+                for (let j = 0; j < faces.length; j++) {
+                    const base = faces[j] * 9;
+                    for (let k = 0; k < 9; k++)
+                        positions[j * 9 + k] = posAttr.array[base + k];
+                }
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+                geo.computeVertexNormals();
+                const m = new THREE.Mesh(
+                    geo,
+                    new THREE.MeshPhongMaterial({
+                        color: new THREE.Color(...color),
+                        side: THREE.DoubleSide,
+                        clippingPlanes: [clipPlane],
+                        transparent: true,
+                        opacity: 0.95,
+                        polygonOffset: true,
+                        polygonOffsetFactor: -3,
+                    }),
+                );
+                scene.add(m);
+                reassignOverlays.push(m);
+            }
+
+            function setPendingReassign(on) {
+                document.getElementById("reassignPending").style.display = on
+                    ? "inline"
+                    : "none";
+            }
+
+            async function runReassign(target, btn) {
+                if (manualHighlightFaces.size === 0) return;
+                clearReassignOverlay();
+                const data = await _runAction(document.getElementById(btn), () =>
+                    fetch("/reassign_preview", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            faces: Array.from(manualHighlightFaces),
+                            to: target,
+                        }),
+                    }),
+                );
+                const box = document.getElementById("reassignSummary");
+                if (!data || !data.ok) {
+                    box.style.display = "block";
+                    box.innerHTML = `<b style="color:#f88">${
+                        (data && data.error) || "preview failed"
+                    }</b>`;
+                    setPendingReassign(false);
+                    return;
+                }
+
+                // Leaving the arbor and joining it are opposite moves; colour
+                // them so the majority-rule fringe is visible as the part of
+                // the change nobody drew.
+                drawReassignOverlay(data.leaving, [0.9, 0.3, 0.9]);
+                drawReassignOverlay(data.entering, [0.2, 1.0, 0.6]);
+
+                const effects = data.effects.length
+                    ? data.effects
+                          .map(([name, eff]) => `<div>• ${name} <b>${eff}</b></div>`)
+                          .join("")
+                    : "<div style='color:#888'>no component changes</div>";
+                box.style.display = "block";
+                box.innerHTML =
+                    `<div><b>${data.nSelected.toLocaleString()}</b> selected → ` +
+                    `<b>${data.target}</b></div>` +
+                    `<div style="color:#888">${data.leaving.length.toLocaleString()} leave, ` +
+                    `${data.entering.length.toLocaleString()} join the arbor</div>` +
+                    effects +
+                    `<div style="color:#888">→ ${data.nNeurites} neurites, ` +
+                    `${data.nDiscarded} discarded</div>`;
+                setPendingReassign(true);
+            }
+
+            async function applyReassign() {
+                const data = await _runAction(
+                    document.getElementById("reassignApplyBtn"),
+                    () => fetch("/reassign_apply", { method: "POST" }),
+                );
+                if (!data || !data.ok) return;
+                clearReassignOverlay();
+                setPendingReassign(false);
+                document.getElementById("reassignSummary").style.display = "none";
+                manualHighlightFaces.clear();
+                rebuildManualHighlight();
+                syncManualHighlight();
+                fetchAnnotations();
+            }
+
+            async function cancelReassign() {
+                await fetch("/reassign_cancel", { method: "POST" }).catch(() => {});
+                clearReassignOverlay();
+                setPendingReassign(false);
+                document.getElementById("reassignSummary").style.display = "none";
             }
 
             async function runMergeSelected() {
@@ -2621,6 +2985,7 @@ let meshCentroid = [0, 0, 0];
                         const sy = (-vp.y * 0.5 + 0.5) * window.innerHeight;
 
                         if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && vp.z >= 0 && vp.z <= 1) {
+                            if (!inScope(i)) continue;
                             manualHighlightFaces.add(i);
                             count++;
                         }
@@ -2786,6 +3151,7 @@ let meshCentroid = [0, 0, 0];
                 edgeGroupMeshes = [];
                 currentAnnotations = annotations;
                 updateHighlightsPanel();
+                resetScope();
                 if (!annotations) return;
                 // Face highlights
                 if (annotations.highlights) {

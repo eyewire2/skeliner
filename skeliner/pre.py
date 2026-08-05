@@ -1,5 +1,6 @@
 """skeliner.pre – mesh preprocessing utilities."""
 
+import copy
 import time
 import warnings
 from collections import Counter, defaultdict, deque
@@ -16,10 +17,12 @@ from skeliner.dataclass import (
     MeshStats,
     Neurites,
     Organelles,
+    Reassignment,
     Soma,
 )
 
 __all__ = [
+    "apply_reassignment",
     "break_up_mesh",
     "compact_mesh",
     "compute_mesh_stats",
@@ -34,6 +37,7 @@ __all__ = [
     "find_parallel_patches",
     "find_soma_via_ring_cutoff",
     "preprocess",
+    "preview_reassignment",
     "remove_fins",
     "remove_fragments",
     "remove_fusions",
@@ -41,6 +45,7 @@ __all__ = [
     "remove_islands",
     "remove_organelles",
     "remove_parallel_patches",
+    "soma_face_mask",
 ]
 
 
@@ -2582,6 +2587,83 @@ def _build_edge_to_faces(faces, mask):
     return result
 
 
+def _face_adjacency_pairs(faces: np.ndarray, fi: np.ndarray) -> np.ndarray:
+    """``(m, 2)`` pairs of edge-sharing faces drawn from *fi*.
+
+    Same notion of adjacency as :func:`_face_components`, non-manifold
+    edges included: every face on an edge links to the first face on
+    that edge, which spans the same connected components as the full
+    clique would at a fraction of the pairs.
+    """
+    fi = np.asarray(fi, dtype=np.intp)
+    if len(fi) == 0:
+        return np.empty((0, 2), dtype=np.intp)
+
+    gf = np.asarray(faces)[fi]
+    e = np.sort(
+        np.concatenate([gf[:, [0, 1]], gf[:, [1, 2]], gf[:, [0, 2]]], axis=0),
+        axis=1,
+    )
+    owner = np.concatenate([fi, fi, fi])
+
+    order = np.lexsort((e[:, 1], e[:, 0]))
+    e, owner = e[order], owner[order]
+
+    first = np.ones(len(e), dtype=bool)
+    first[1:] = (e[1:] != e[:-1]).any(axis=1)
+    root = owner[np.flatnonzero(first)][np.cumsum(first) - 1]
+
+    rest = ~first
+    return np.column_stack([root[rest], owner[rest]])
+
+
+def _label_face_components(faces: np.ndarray, fi: np.ndarray) -> np.ndarray:
+    """Connected-component label per entry of *fi*, by edge adjacency."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    fi = np.asarray(fi, dtype=np.intp)
+    if len(fi) == 0:
+        return np.empty(0, dtype=np.intp)
+
+    local = np.full(int(fi.max()) + 1, -1, dtype=np.intp)
+    local[fi] = np.arange(len(fi))
+    pairs = _face_adjacency_pairs(faces, fi)
+    graph = coo_matrix(
+        (
+            np.ones(len(pairs), dtype=np.int8),
+            (local[pairs[:, 0]], local[pairs[:, 1]]),
+        ),
+        shape=(len(fi), len(fi)),
+    )
+    _, labels = connected_components(graph, directed=False)
+    return labels
+
+
+def _face_components_fast(faces, face_indices) -> list[np.ndarray]:
+    """Connected components of *face_indices*, largest first.
+
+    Vectorised equivalent of :func:`_face_components`, which walks the
+    mesh in Python and dominates :func:`break_up_mesh`'s runtime.
+
+    Order matters, because callers index the result: neurite ids come
+    from this position.  :func:`_face_components` discovers components
+    by BFS from the lowest unvisited face, so they arrive in ascending
+    order of their smallest face id, and its stable sort by size leaves
+    equal-sized ones in that order.  Sorting on ``(-size, min face id)``
+    reproduces it without relying on the labeller's numbering.
+    """
+    fi = np.asarray(face_indices, dtype=np.intp)
+    labels = _label_face_components(faces, fi)
+    if len(labels) == 0:
+        return []
+    order = np.argsort(labels, kind="stable")
+    bounds = np.flatnonzero(np.diff(labels[order])) + 1
+    comps = np.split(fi[order], bounds)
+    comps.sort(key=lambda c: (-len(c), int(c.min())))
+    return comps
+
+
 def _face_components(faces, edge_to_faces, face_indices):
     """BFS connected components on a subset of faces."""
     fi_set = (
@@ -2614,15 +2696,55 @@ def _face_components(faces, edge_to_faces, face_indices):
     return components
 
 
+def _usable_face_mask(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Faces :func:`break_up_mesh` will consider: 3 distinct verts, non-zero area."""
+    faces = np.asarray(mesh.faces)
+    verts = mesh.vertices
+    v0, v1, v2 = verts[faces[:, 0]], verts[faces[:, 1]], verts[faces[:, 2]]
+    nonzero_area = np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1) > 0
+    return _non_degenerate(faces) & nonzero_area
+
+
+def soma_face_mask(
+    faces: np.ndarray,
+    soma_verts: np.ndarray | None,
+) -> np.ndarray:
+    """Faces the soma owns: those with at least 2 of 3 soma vertices.
+
+    Soma membership is stored per *vertex*
+    (:attr:`~skeliner.dataclass.Soma.verts`); this majority rule is what
+    turns it into the face set that :func:`break_up_mesh` cuts the mesh
+    along.  A face straddling the boundary with exactly one soma vertex
+    stays with the neurite.
+
+    Parameters
+    ----------
+    faces : (nFaces, 3) int
+    soma_verts : (n,) int or None
+        Vertex ids belonging to the soma.  ``None`` or empty yields an
+        all-False mask, which is the no-soma case.
+
+    Returns
+    -------
+    (nFaces,) bool
+    """
+    faces = np.asarray(faces)
+    if soma_verts is None or len(soma_verts) == 0:
+        return np.zeros(len(faces), dtype=bool)
+    return np.isin(faces, np.asarray(soma_verts)).sum(axis=1) >= 2
+
+
 def _build_org_output(
     organelles: Organelles,
     expanded_mask: np.ndarray,
 ) -> Organelles:
     """Build an Organelles dataclass from break_up_mesh results."""
+    detected = organelles.pocket | organelles.isolated | organelles.manual
     return Organelles(
         pocket=organelles.pocket,
         isolated=organelles.isolated,
-        expanded=expanded_mask & ~(organelles.pocket | organelles.isolated),
+        expanded=expanded_mask & ~detected,
+        manual=organelles.manual,
     )
 
 
@@ -2686,26 +2808,11 @@ def break_up_mesh(
             pocket=np.concatenate([organelles.pocket, pad]),
             isolated=np.concatenate([organelles.isolated, pad]),
             expanded=np.concatenate([organelles.expanded, pad]),
+            manual=np.concatenate([organelles.manual, pad]),
         )
 
-    good = _non_degenerate(faces)
-    v0 = verts[faces[:, 0]]
-    v1 = verts[faces[:, 1]]
-    v2 = verts[faces[:, 2]]
-    nonzero_area = np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1) > 0
-    usable = good & nonzero_area
-
-    # --- soma face mask: face is soma if >=2 of 3 verts are soma ---
-    soma_face = np.zeros(nF, dtype=bool)
-    if soma is not None:
-        soma_set = set(soma.verts.tolist())
-        for fi in range(nF):
-            s = 0
-            for v in faces[fi]:
-                if int(v) in soma_set:
-                    s += 1
-            if s >= 2:
-                soma_face[fi] = True
+    usable = _usable_face_mask(mesh)
+    soma_face = soma_face_mask(faces, soma.verts if soma is not None else None)
 
     # --- Phase 1: reachability without crossing organelles ---
     # For each mesh component, find its largest non-organelle body.
@@ -2713,9 +2820,8 @@ def break_up_mesh(
     # This is per-component so disconnected neurite fragments are
     # handled correctly (each has its own reachable body).
     non_org = usable & ~organelles.mask
-    ef_non_org = _build_edge_to_faces(faces, non_org)
     non_org_fi = np.where(non_org)[0]
-    non_org_comps = _face_components(faces, ef_non_org, non_org_fi)
+    non_org_comps = _face_components_fast(faces, non_org_fi)
 
     # Label every non-org face with its non-org component id.
     # The largest non-org component within each mesh component is
@@ -2726,9 +2832,8 @@ def break_up_mesh(
 
     # For each mesh component, find its largest non-org sub-component.
     # Use usable-face edge components as the mesh components.
-    ef_usable = _build_edge_to_faces(faces, usable)
     usable_fi = np.where(usable)[0]
-    mesh_comps = _face_components(faces, ef_usable, usable_fi)
+    mesh_comps = _face_components_fast(faces, usable_fi)
 
     body_labels: set[int] = set()
     for mc in mesh_comps:
@@ -2758,8 +2863,10 @@ def break_up_mesh(
             discarded=Discarded([]),
         )
 
+    components = _face_components_fast(faces, remain_fi)
+    # Still needed below, to count how much of each component's boundary
+    # is soma.  That is the only remaining use of the edge map.
     ef_all = _build_edge_to_faces(faces, usable)
-    components = _face_components(faces, ef_all, remain_fi)
 
     # --- classify ---
     neurite_candidates: list[np.ndarray] = []
@@ -2847,6 +2954,247 @@ def break_up_mesh(
 
 # Keep old name as alias
 break_at_soma = break_up_mesh
+
+
+# ---------------------------------------------------------------------
+#  Manual component reassignment
+# ---------------------------------------------------------------------
+
+
+def _cleared(mask, fi):
+    out = mask.copy()
+    out[fi] = False
+    return out
+
+
+def _component_effects(
+    before: MeshComponents,
+    after: MeshComponents,
+    n_faces: int,
+) -> list[tuple[str, str]]:
+    """Cross-tabulate two component sets over the same mesh.
+
+    Both sides index the same faces, so correspondence is exact: label
+    every face with the component owning it on each side and read the
+    mapping off.  One before-component reaching several after-components
+    is a split; several reaching one is a merge.
+
+    Pure renumbering is not reported.  ``break_up_mesh`` sorts by
+    descending size, so ids shift whenever anything changes size and
+    saying so every time would bury the real news.  A component crossing
+    between neurites and discarded *is* reported — that is a verdict, not
+    a position.
+    """
+    b_comps = list(before.neurites) + list(before.discarded)
+    a_comps = list(after.neurites) + list(after.discarded)
+    b_kinds = ["neurite"] * len(before.neurites) + ["discarded"] * len(before.discarded)
+    a_kinds = ["neurite"] * len(after.neurites) + ["discarded"] * len(after.discarded)
+    b_names = [f"{k} {i}" for k, i in _numbered(b_kinds)]
+    a_names = [f"{k} {i}" for k, i in _numbered(a_kinds)]
+
+    b_owner = np.full(n_faces, -1, dtype=np.intp)
+    for i, arr in enumerate(b_comps):
+        b_owner[arr] = i
+    a_owner = np.full(n_faces, -1, dtype=np.intp)
+    for i, arr in enumerate(a_comps):
+        a_owner[arr] = i
+
+    effects: list[tuple[str, str]] = []
+    for i, arr in enumerate(b_comps):
+        landed = a_owner[arr]
+        landed = np.unique(landed[landed >= 0])
+        if len(landed) == 0:
+            effects.append((b_names[i], "dissolved into soma/organelles"))
+            continue
+        if len(landed) > 1:
+            effects.append((b_names[i], f"split into {len(landed)}"))
+            continue
+
+        j = int(landed[0])
+        fed = b_owner[a_comps[j]]
+        fed = set(np.unique(fed[fed >= 0]).tolist())
+        if len(fed) > 1:
+            others = ", ".join(b_names[k] for k in sorted(fed - {i}))
+            effects.append((b_names[i], f"merged with {others}"))
+            continue
+
+        delta = len(a_comps[j]) - len(arr)
+        if b_kinds[i] != a_kinds[j]:
+            note = f"reclassified as {a_names[j]}"
+            if delta:
+                note += f" ({delta:+,}f)"
+            effects.append((b_names[i], note))
+        elif delta > 0:
+            effects.append((b_names[i], f"grown +{delta:,}f"))
+        elif delta < 0:
+            effects.append((b_names[i], f"shrunk {delta:,}f"))
+
+    for j, arr in enumerate(a_comps):
+        fed = b_owner[arr]
+        if not (fed >= 0).any():
+            effects.append((a_names[j], f"new ({len(arr):,}f)"))
+
+    return effects
+
+
+def _numbered(kinds: list[str]):
+    """``['neurite', 'neurite', 'discarded'] -> [(neurite,0), (neurite,1), ...]``."""
+    seen: dict[str, int] = {}
+    for k in kinds:
+        yield k, seen.get(k, 0)
+        seen[k] = seen.get(k, 0) + 1
+
+
+def preview_reassignment(
+    mesh: trimesh.Trimesh,
+    components: MeshComponents,
+    faces,
+    *,
+    to: str,
+    verbose: bool = False,
+) -> Reassignment:
+    """Work out what assigning *faces* to *to* would do, without doing it.
+
+    Only two things are stored: which vertices are soma, and which faces
+    are organelles.  Neurites and discarded fragments are *derived* from
+    those by :func:`break_up_mesh`, so every reassignment is expressed as
+    a change to the soma vertex set or to an organelle mask, and the
+    components follow.
+
+    That is also why ``to='remainder'`` rather than a named neurite: the
+    faces are released from the soma and organelle masks, and which
+    neurite they join is decided by what they touch.
+
+    The preview runs the real :func:`break_up_mesh` on the edited state
+    rather than modelling it.  That matters — connectivity is only its
+    second phase.  It also decides what is topologically trapped behind
+    organelle faces, absorbs any component whose boundary is more than
+    half soma back *into* the soma, and re-infers the neurite/discarded
+    size threshold.  Cutting a band near the soma leaves crumbs that the
+    absorption pass reclaims, so a connectivity-only forecast reports a
+    split into eight where the answer is two.
+
+    Because soma membership is per vertex under a >=2-of-3 majority rule
+    (:func:`soma_face_mask`), the faces that actually change hands are
+    the selection plus a fringe of neighbours sharing two of its
+    vertices.  *entering* and *leaving* report that effective set;
+    showing it is what keeps the difference between what was drawn and
+    what moved from being a mystery.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+    components : MeshComponents
+        Current state, from :func:`break_up_mesh`.
+    faces : array-like of int
+        Face ids to reassign.
+    to : {'soma', 'organelle', 'remainder'}
+        ``'soma'`` adds the faces' vertices to the soma; ``'organelle'``
+        sets them in :attr:`~skeliner.dataclass.Organelles.manual`;
+        ``'remainder'`` releases them from both, back to the arbor.
+    verbose : bool
+        Passed to :func:`break_up_mesh`.
+
+    Returns
+    -------
+    Reassignment
+
+    See Also
+    --------
+    apply_reassignment : commit the result.
+    """
+    if to not in ("soma", "organelle", "remainder"):
+        raise ValueError(f"to must be 'soma', 'organelle' or 'remainder', got {to!r}")
+
+    mesh_faces = np.asarray(mesh.faces)
+    sel = np.unique(np.asarray(faces, dtype=np.intp))
+    if len(sel) == 0:
+        raise ValueError("no faces selected")
+    if sel[0] < 0 or sel[-1] >= len(mesh_faces):
+        raise ValueError(
+            f"face ids must lie in [0, {len(mesh_faces)}), got [{sel[0]}, {sel[-1]}]"
+        )
+
+    soma = components.soma
+    org = components.organelles
+    if to == "soma" and soma is None:
+        raise ValueError("no soma on these components to assign faces to")
+
+    old_soma_verts = soma.verts if soma is not None else None
+    sel_verts = np.unique(mesh_faces[sel])
+
+    # --- the state change: soma vertices and/or organelle masks ---
+    if to == "soma":
+        new_soma_verts = np.union1d(old_soma_verts, sel_verts)
+        new_org = org
+    elif to == "organelle":
+        manual = org.manual.copy()
+        manual[sel] = True
+        new_soma_verts = old_soma_verts
+        new_org = Organelles(
+            pocket=org.pocket,
+            isolated=org.isolated,
+            expanded=org.expanded,
+            manual=manual,
+        )
+    else:
+        # Release: drop every vertex of the selection from the soma, and
+        # clear the selection from all organelle masks — including the
+        # detected ones, which the user is overriding on purpose.
+        new_soma_verts = (
+            None if old_soma_verts is None else np.setdiff1d(old_soma_verts, sel_verts)
+        )
+        new_org = Organelles(
+            pocket=_cleared(org.pocket, sel),
+            isolated=_cleared(org.isolated, sel),
+            expanded=_cleared(org.expanded, sel),
+            manual=_cleared(org.manual, sel),
+        )
+
+    new_soma = None
+    if soma is not None:
+        new_soma = copy.copy(soma)
+        new_soma.verts = new_soma_verts
+
+    # --- what actually changes hands, fringe included ---
+    usable = _usable_face_mask(mesh)
+    before_arbor = usable & ~soma_face_mask(mesh_faces, old_soma_verts) & ~org.mask
+    after_arbor = usable & ~soma_face_mask(mesh_faces, new_soma_verts) & ~new_org.mask
+    leaving = np.flatnonzero(before_arbor & ~after_arbor)
+    entering = np.flatnonzero(~before_arbor & after_arbor)
+
+    after = break_up_mesh(mesh, new_soma, new_org, verbose=verbose)
+
+    return Reassignment(
+        target=to,
+        selected=sel,
+        entering=entering,
+        leaving=leaving,
+        components=after,
+        effects=_component_effects(components, after, len(mesh_faces)),
+    )
+
+
+def apply_reassignment(
+    components: MeshComponents,
+    reassignment: Reassignment,
+) -> None:
+    """Commit a :class:`Reassignment` to *components*, in place.
+
+    The preview already ran :func:`break_up_mesh`, so this only installs
+    the result — soma, organelle masks and the re-derived components all
+    come from that one run and cannot disagree with what was shown.
+
+    Note that ``break_up_mesh`` refits the soma ellipsoid when its
+    absorption pass pulls extra vertices in, so ``center``/``axes``/``R``
+    can move.  A reassignment that absorbs nothing leaves the model
+    untouched and changes only ``verts``.
+    """
+    after = reassignment.components
+    components.soma = after.soma
+    components.organelles = after.organelles
+    components.neurites = after.neurites
+    components.discarded = after.discarded
 
 
 def find_soma_via_neurite_exclusion(
@@ -8092,6 +8440,7 @@ def compact_mesh(
         pocket=organelles.pocket[good],
         isolated=organelles.isolated[good],
         expanded=organelles.expanded[good],
+        manual=organelles.manual[good],
     )
 
     remapped = MeshComponents(

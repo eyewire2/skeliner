@@ -585,6 +585,7 @@ def save_organelles_npz(
         "pocket": np.asarray(organelles.pocket, dtype=bool),
         "isolated": np.asarray(organelles.isolated, dtype=bool),
         "expanded": np.asarray(organelles.expanded, dtype=bool),
+        "manual": np.asarray(organelles.manual, dtype=bool),
     }
 
     save_fn = np.savez_compressed if compress else np.savez
@@ -597,6 +598,8 @@ def load_organelles_npz(path: str | Path) -> Organelles:
     Older files that bundled ``outward_dots``/``face_comp``/``main_ci``
     are still readable — those fields are silently ignored.  Use
     :func:`load_mesh_stats_npz` if you need the cached mesh statistics.
+    Files written before ``expanded``/``manual`` existed load with those
+    masks all False.
     """
     path = Path(path)
     with np.load(path, allow_pickle=False) as z:
@@ -607,6 +610,7 @@ def load_organelles_npz(path: str | Path) -> Organelles:
             expanded=z["expanded"].astype(bool)
             if "expanded" in z
             else np.zeros_like(pocket),
+            manual=z["manual"].astype(bool) if "manual" in z else np.zeros_like(pocket),
         )
 
 
@@ -782,6 +786,7 @@ def save_components_npz(
     payload["organelles_pocket"] = np.asarray(organelles.pocket, dtype=bool)
     payload["organelles_isolated"] = np.asarray(organelles.isolated, dtype=bool)
     payload["organelles_expanded"] = np.asarray(organelles.expanded, dtype=bool)
+    payload["organelles_manual"] = np.asarray(organelles.manual, dtype=bool)
 
     # Neurites
     payload["n_neurites"] = np.array(len(components.neurites.components))
@@ -826,6 +831,9 @@ def load_components_npz(path: str | Path) -> MeshComponents:
             pocket=z["organelles_pocket"].astype(bool),
             isolated=z["organelles_isolated"].astype(bool),
             expanded=z["organelles_expanded"].astype(bool),
+            manual=z["organelles_manual"].astype(bool)
+            if "organelles_manual" in z
+            else None,
         )
 
         # Neurites

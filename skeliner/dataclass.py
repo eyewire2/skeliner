@@ -121,16 +121,28 @@ class Organelles:
         Isolated (disconnected) organelle faces.
     expanded : (nFaces,) bool
         Faces added by :func:`~skeliner.pre.break_up_mesh`.
+    manual : (nFaces,) bool, optional
+        Faces assigned to the organelles by hand.  Kept apart from the
+        detected masks because those are all recomputed:
+        :func:`~skeliner.pre.break_up_mesh` rebuilds *expanded* from
+        scratch every run, so a manual assignment stored there would be
+        erased by the same re-derive meant to apply it.  Defaults to all
+        False.
     """
 
     pocket: np.ndarray
     isolated: np.ndarray
     expanded: np.ndarray
+    manual: np.ndarray = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.manual is None:
+            self.manual = np.zeros(len(self.pocket), dtype=bool)
 
     @property
     def mask(self) -> np.ndarray:
-        """Combined bool mask (pocket | isolated | expanded)."""
-        return self.pocket | self.isolated | self.expanded
+        """Combined bool mask (pocket | isolated | expanded | manual)."""
+        return self.pocket | self.isolated | self.expanded | self.manual
 
 
 # -----------------------------------------------------------------------------
@@ -230,6 +242,55 @@ class MeshComponents:
         from . import io
 
         return io.load_components_npz(path)
+
+
+@dataclass(slots=True)
+class Reassignment:
+    """A previewed hand reassignment of faces between components.
+
+    Produced by :func:`~skeliner.pre.preview_reassignment` and applied by
+    :func:`~skeliner.pre.apply_reassignment`.  Holds the exact components
+    the edit produces, so what is shown before committing and what lands
+    afterwards are the same object rather than a forecast and a result.
+
+    Parameters
+    ----------
+    target : {'soma', 'organelle', 'remainder'}
+        Where the selected faces go.
+    selected : (n,) int
+        The faces picked by the user.
+    entering, leaving : (k,) int
+        Faces joining and leaving the arbor — the unnamed remainder that
+        neurites are derived from.  These are the *effective* face sets,
+        so they include the one-ring fringe the ≥2-of-3 soma rule drags
+        along with the selection.
+    components : MeshComponents
+        The mesh components after the edit.
+    effects : list of (str, str)
+        Per affected component, its label before the edit and what
+        becomes of it: ``grown``, ``shrunk``, ``split into N``,
+        ``merged with …``, ``dissolved …``, ``reclassified as …`` or
+        ``new``.  Empty when no component changed.  Pure renumbering is
+        not listed — every re-derive re-sorts by size, so ids shift
+        routinely and reporting that would drown the real changes.
+    """
+
+    target: str
+    selected: np.ndarray
+    entering: np.ndarray
+    leaving: np.ndarray
+    components: "MeshComponents"
+    effects: list[tuple[str, str]]
+
+    @property
+    def summary(self) -> str:
+        """One line: the size of the move and what it does to components."""
+        moved = f"{len(self.selected):,} selected → {self.target}"
+        net = f"-{len(self.leaving):,}/+{len(self.entering):,} arbor faces"
+        if not self.effects:
+            return f"{moved} ({net}, no component change)"
+        what = "; ".join(f"{name} {eff}" for name, eff in self.effects)
+        return f"{moved} ({net}): {what}"
 
 
 # -----------------------------------------------------------------------------

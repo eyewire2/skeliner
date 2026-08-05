@@ -12,6 +12,13 @@ import pytest
 import trimesh
 
 from skeliner import pre
+from skeliner.dataclass import (
+    Discarded,
+    MeshComponents,
+    Neurites,
+    Organelles,
+    Soma,
+)
 from skeliner.pre import _non_degenerate
 
 
@@ -865,6 +872,282 @@ class TestFilterSmallClusters:
         mask = np.ones(len(mesh.faces), dtype=bool)
         filtered = pre._filter_small_clusters(mesh, mask, min_cluster_size=3)
         assert filtered.sum() == len(mesh.faces)
+
+
+# ── soma_face_mask ───────────────────────────────────────────────────
+
+
+class TestSomaFaceMask:
+    def test_majority_rule(self):
+        # one triangle per row; soma verts are {0, 1}
+        faces = np.array([[0, 1, 2], [0, 2, 3], [2, 3, 4], [1, 0, 5]])
+        mask = pre.soma_face_mask(faces, np.array([0, 1]))
+        # 2 of 3 → soma; 1 of 3 → not; 0 of 3 → not
+        assert mask.tolist() == [True, False, False, True]
+
+    def test_no_soma(self):
+        faces = np.array([[0, 1, 2], [0, 2, 3]])
+        assert not pre.soma_face_mask(faces, None).any()
+        assert not pre.soma_face_mask(faces, np.array([], dtype=int)).any()
+
+    def test_matches_reference_loop(self):
+        mesh = _icosphere()
+        rng = np.random.default_rng(0)
+        soma_verts = rng.choice(len(mesh.vertices), size=60, replace=False)
+        soma_set = set(soma_verts.tolist())
+        want = np.array(
+            [
+                sum(1 for v in f if int(v) in soma_set) >= 2
+                for f in np.asarray(mesh.faces)
+            ],
+            dtype=bool,
+        )
+        got = pre.soma_face_mask(mesh.faces, soma_verts)
+        assert np.array_equal(got, want)
+        assert want.any(), "fixture should produce some soma faces"
+
+
+# ── _face_components_fast ────────────────────────────────────────────
+
+
+def _slow_components(mesh, fi):
+    mask = np.zeros(len(mesh.faces), dtype=bool)
+    mask[fi] = True
+    ef = pre._build_edge_to_faces(np.asarray(mesh.faces), mask)
+    return pre._face_components(np.asarray(mesh.faces), ef, np.asarray(fi))
+
+
+class TestFaceComponentsFast:
+    def test_matches_slow_on_island_mesh(self):
+        mesh = _mesh_with_island(n_island_faces=2)
+        fi = np.arange(len(mesh.faces))
+        fast = pre._face_components_fast(mesh.faces, fi)
+        slow = _slow_components(mesh, fi)
+        assert len(fast) == len(slow)
+        for a, b in zip(fast, slow, strict=True):
+            assert np.array_equal(np.sort(a), np.sort(b))
+
+    def test_ties_break_on_lowest_face_id(self):
+        # two identical cylinders → two components of equal size, so the
+        # order is decided purely by the tie-break
+        mesh = _two_cylinders()
+        fi = np.arange(len(mesh.faces))
+        fast = pre._face_components_fast(mesh.faces, fi)
+        assert len(fast) == 2
+        assert len(fast[0]) == len(fast[1])
+        assert fast[0].min() < fast[1].min()
+        slow = _slow_components(mesh, fi)
+        for a, b in zip(fast, slow, strict=True):
+            assert np.array_equal(np.sort(a), np.sort(b))
+
+    def test_largest_first(self):
+        mesh = _mesh_with_island(n_island_faces=2)
+        comps = pre._face_components_fast(mesh.faces, np.arange(len(mesh.faces)))
+        assert [len(c) for c in comps] == sorted((len(c) for c in comps), reverse=True)
+
+    def test_empty(self):
+        mesh = _icosphere()
+        assert pre._face_components_fast(mesh.faces, np.array([], dtype=int)) == []
+
+    def test_returns_faces_ascending(self):
+        mesh = _icosphere()
+        comps = pre._face_components_fast(mesh.faces, np.arange(len(mesh.faces)))
+        for c in comps:
+            assert np.array_equal(c, np.sort(c))
+
+
+# ── _component_effects ───────────────────────────────────────────────
+
+
+def _components(neurites, discarded, n_faces=64):
+    """A MeshComponents carrying only the face lists the diff reads."""
+    z = np.zeros(n_faces, dtype=bool)
+    return MeshComponents(
+        soma=None,
+        organelles=Organelles(pocket=z.copy(), isolated=z.copy(), expanded=z.copy()),
+        neurites=Neurites([np.asarray(a) for a in neurites]),
+        discarded=Discarded([np.asarray(a) for a in discarded]),
+    )
+
+
+def _effects(before, after, n_faces=64):
+    return dict(pre._component_effects(before, after, n_faces))
+
+
+class TestComponentEffects:
+    def test_no_change_reports_nothing(self):
+        c = _components([[0, 1, 2, 3]], [])
+        assert _effects(c, _components([[0, 1, 2, 3]], [])) == {}
+
+    def test_split(self):
+        before = _components([[0, 1, 2, 3]], [])
+        after = _components([[0, 1], [2, 3]], [])
+        assert _effects(before, after)["neurite 0"] == "split into 2"
+
+    def test_merge(self):
+        before = _components([[0, 1], [2, 3]], [])
+        after = _components([[0, 1, 2, 3]], [])
+        got = _effects(before, after)
+        assert got["neurite 0"] == "merged with neurite 1"
+        assert got["neurite 1"] == "merged with neurite 0"
+
+    def test_grown_and_shrunk(self):
+        before = _components([[0, 1, 2, 3]], [])
+        assert _effects(before, _components([[0, 1, 2, 3, 4]], []))["neurite 0"] == (
+            "grown +1f"
+        )
+        assert _effects(before, _components([[0, 1, 2]], []))["neurite 0"] == (
+            "shrunk -1f"
+        )
+
+    def test_dissolved(self):
+        before = _components([[0, 1], [2, 3]], [])
+        after = _components([[2, 3]], [])
+        assert _effects(before, after)["neurite 0"] == (
+            "dissolved into soma/organelles"
+        )
+
+    def test_reclassified_between_neurite_and_discarded(self):
+        before = _components([[0, 1, 2, 3]], [[4]])
+        after = _components([[4]], [[0, 1, 2, 3]])
+        got = _effects(before, after)
+        assert got["neurite 0"] == "reclassified as discarded 0"
+        assert got["discarded 0"] == "reclassified as neurite 0"
+
+    def test_new_component(self):
+        before = _components([[0, 1]], [])
+        after = _components([[0, 1]], [[8, 9]])
+        assert _effects(before, after)["discarded 0"] == "new (2f)"
+
+    def test_pure_renumbering_is_not_reported(self):
+        # same two components, swapped positions — ids shift on every
+        # re-derive and reporting that would bury the real changes
+        before = _components([[0, 1, 2], [4, 5]], [])
+        after = _components([[4, 5], [0, 1, 2]], [])
+        assert _effects(before, after) == {}
+
+
+# ── preview_reassignment / apply_reassignment ────────────────────────
+
+
+def _tube_state():
+    """A plain tube: one neurite, no soma, no organelles."""
+    mesh = _subdivided_tube()
+    z = np.zeros(len(mesh.faces), dtype=bool)
+    org = Organelles(pocket=z.copy(), isolated=z.copy(), expanded=z.copy())
+    return mesh, pre.break_up_mesh(mesh, None, org)
+
+
+def _tube_with_soma():
+    """A tube whose middle band is soma, split either side of it.
+
+    The components are built here rather than by ``break_up_mesh``.  On a
+    bare tube each half is bounded *only* by soma faces, so the
+    absorption pass — which reclaims any component whose boundary is more
+    than half soma — would pull the whole mesh into the soma and leave no
+    arbor to reassign.  Real neurites escape that because their organelle
+    pockets give them plenty of non-soma boundary.
+    """
+    mesh = _subdivided_tube()
+    band = np.array(sorted(_band(mesh, -100.0, 100.0)))
+    sv = np.unique(np.asarray(mesh.faces)[band])
+    soma = Soma.fit(mesh.vertices[sv], verts=sv)
+    z = np.zeros(len(mesh.faces), dtype=bool)
+    org = Organelles(pocket=z.copy(), isolated=z.copy(), expanded=z.copy())
+    arbor = np.flatnonzero(~pre.soma_face_mask(mesh.faces, sv))
+    components = MeshComponents(
+        soma=soma,
+        organelles=org,
+        neurites=Neurites(pre._face_components_fast(mesh.faces, arbor)),
+        discarded=Discarded([]),
+    )
+    return mesh, components, band
+
+
+class TestPreviewReassignment:
+    def test_rejects_unknown_target(self):
+        mesh, comp = _tube_state()
+        with pytest.raises(ValueError, match="to must be"):
+            pre.preview_reassignment(mesh, comp, [0], to="neurite 1")
+
+    def test_rejects_empty_selection(self):
+        mesh, comp = _tube_state()
+        with pytest.raises(ValueError, match="no faces selected"):
+            pre.preview_reassignment(mesh, comp, [], to="organelle")
+
+    def test_rejects_out_of_range_faces(self):
+        mesh, comp = _tube_state()
+        with pytest.raises(ValueError, match="face ids must lie"):
+            pre.preview_reassignment(mesh, comp, [len(mesh.faces)], to="organelle")
+
+    def test_rejects_soma_target_without_a_soma(self):
+        mesh, comp = _tube_state()
+        with pytest.raises(ValueError, match="no soma"):
+            pre.preview_reassignment(mesh, comp, [0], to="soma")
+
+    def test_organelle_target_sets_the_manual_mask(self):
+        mesh, comp = _tube_state()
+        sel = np.array(sorted(_band(mesh, -100.0, 100.0)))
+        r = pre.preview_reassignment(mesh, comp, sel, to="organelle")
+        manual = r.components.organelles.manual
+        assert manual[sel].all()
+        assert manual.sum() == len(sel)
+        # and the detected masks are left alone
+        assert not r.components.organelles.pocket.any()
+
+    def test_preview_does_not_mutate_the_input(self):
+        mesh, comp = _tube_state()
+        before_n = [c.copy() for c in comp.neurites]
+        before_org = comp.organelles.mask.copy()
+        sel = np.array(sorted(_band(mesh, -100.0, 100.0)))
+        pre.preview_reassignment(mesh, comp, sel, to="organelle")
+        assert np.array_equal(comp.organelles.mask, before_org)
+        assert len(comp.neurites) == len(before_n)
+        for a, b in zip(comp.neurites, before_n, strict=True):
+            assert np.array_equal(a, b)
+
+    def test_apply_matches_a_from_scratch_break_up_mesh(self):
+        mesh, comp = _tube_state()
+        sel = np.array(sorted(_band(mesh, -100.0, 100.0)))
+        r = pre.preview_reassignment(mesh, comp, sel, to="organelle")
+        pre.apply_reassignment(comp, r)
+
+        scratch = pre.break_up_mesh(mesh, comp.soma, comp.organelles)
+        assert len(comp.neurites) == len(scratch.neurites)
+        assert len(comp.discarded) == len(scratch.discarded)
+        for a, b in zip(comp.neurites, scratch.neurites, strict=True):
+            assert np.array_equal(np.sort(a), np.sort(b))
+
+    def test_soma_target_grows_the_vertex_set(self):
+        mesh, comp, _ = _tube_with_soma()
+        before = set(comp.soma.verts.tolist())
+        sel = comp.neurites[0][:64]
+        r = pre.preview_reassignment(mesh, comp, sel, to="soma")
+        after = set(r.components.soma.verts.tolist())
+        # every vertex of the selection joins the soma, and nothing leaves
+        assert before <= after
+        assert set(np.unique(np.asarray(mesh.faces)[sel]).tolist()) <= after
+
+    def test_leaving_includes_the_majority_rule_fringe(self):
+        mesh, comp, _ = _tube_with_soma()
+        sel = comp.neurites[0][:64]
+        r = pre.preview_reassignment(mesh, comp, sel, to="soma")
+        # the selection leaves the arbor, and drags with it every
+        # neighbour left sharing two of its vertices
+        assert set(sel.tolist()) <= set(r.leaving.tolist())
+        assert len(r.leaving) > len(sel)
+        assert len(r.entering) == 0
+
+    def test_remainder_target_releases_organelle_faces(self):
+        mesh, comp = _tube_state()
+        sel = np.array(sorted(_band(mesh, -100.0, 100.0)))
+        r = pre.preview_reassignment(mesh, comp, sel, to="organelle")
+        pre.apply_reassignment(comp, r)
+        assert comp.organelles.manual[sel].all()
+
+        back = pre.preview_reassignment(mesh, comp, sel, to="remainder")
+        assert not back.components.organelles.manual[sel].any()
+        assert set(sel.tolist()) <= set(back.entering.tolist())
 
 
 # ── Smoke test on real data ──────────────────────────────────────────
