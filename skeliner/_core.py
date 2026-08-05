@@ -103,14 +103,26 @@ def _build_mst(nodes: np.ndarray, edges: np.ndarray) -> np.ndarray:
     )
 
 
+#: How much of each tail ``trim`` discards.  Node radii are built with this
+#: everywhere — ``_make_nodes``, the centreline pass, and every recomputation
+#: after an edit — so that one estimator name means one thing across a
+#: skeleton's whole radii array.
+TRIM_FRACTION = 0.05
+
+
 def _estimate_radius(
     d: np.ndarray,
     *,
     method: str = "median",
-    trim_fraction: float = 0.15,
+    trim_fraction: float = TRIM_FRACTION,
     q: float = 80.0,
 ) -> float:
-    """Return one scalar radius according to *method*."""
+    """Return one scalar radius from per-vertex distances *d*.
+
+    The single implementation.  ``post`` used to carry a near-copy that
+    differed only in its defaults, so ``trim`` and ``percentile`` quietly
+    meant different things depending on which module you reached from.
+    """
     if method == "median":
         return float(np.median(d))
     if method == "mean":
@@ -124,10 +136,58 @@ def _estimate_radius(
     if method == "trim":
         lo, hi = np.quantile(d, [trim_fraction, 1.0 - trim_fraction])
         mask = (d >= lo) & (d <= hi)
-        if not np.any(mask):
-            return float(np.mean(d))
-        return float(d[mask].mean())
-    raise ValueError(f"Unknown radius estimator '{method}'.")
+    elif method == "trimlow":
+        mask = d >= np.quantile(d, trim_fraction)
+    elif method == "trimhigh":
+        mask = d <= np.quantile(d, 1.0 - trim_fraction)
+    else:
+        raise ValueError(f"Unknown radius estimator '{method}'.")
+    if not np.any(mask):
+        return float(np.mean(d))
+    return float(d[mask].mean())
+
+
+#: Radius keys that are a plain aggregate over a node's vertex distances, and
+#: so can be rebuilt whenever its vertex set changes.
+RECOMPUTABLE_RADII = frozenset(
+    {"median", "mean", "max", "min", "percentile", "trim", "trimlow", "trimhigh"}
+)
+
+
+def _radii_from_distances(
+    radii_dict: dict[str, np.ndarray],
+    nid: int,
+    d: np.ndarray,
+    *,
+    cl_d: np.ndarray | None = None,
+) -> list[str]:
+    """Rewrite node *nid*'s radii from the distances of the vertices it owns.
+
+    Every place that changes which vertices a node owns has to do this, so it
+    lives here rather than being spelled out at each of them.
+
+    Not every key is a distance aggregate, and the ones that are not must be
+    skipped rather than handed to :func:`_estimate_radius`: ``centerline``
+    aggregates *perpendicular* distances (pass them as *cl_d*), and
+    ``calibrated`` is measured by ray casting.  Feeding those through was a
+    real crash — ``post.prune_neurites`` raised ``Unknown radius estimator
+    'centerline'`` on any preprocessing-track skeleton that merged anything
+    into the soma.
+
+    Returns the keys it could not rebuild, which are now stale.
+    """
+    stale: list[str] = []
+    for key, arr in radii_dict.items():
+        if key == "centerline":
+            if cl_d is None:
+                stale.append(key)
+            else:
+                arr[nid] = _estimate_radius(cl_d, method="trim")
+        elif key in RECOMPUTABLE_RADII:
+            arr[nid] = _estimate_radius(d, method=key)
+        else:
+            stale.append(key)
+    return stale
 
 
 def _merge_near_soma_nodes(
@@ -369,8 +429,7 @@ def _prune_neurites(
 
         if mesh_vertices is not None and node2verts[0].size:
             d0 = np.linalg.norm(mesh_vertices[node2verts[0]] - nodes[0], axis=1)
-            for k in radii_dict:
-                radii_dict[k][0] = _estimate_radius(d0, method=k)
+            _radii_from_distances(radii_dict, 0, d0)
 
         if log:
             log(f"Merged {len(merge2soma)} peri-soma nodes into soma ")
@@ -711,8 +770,7 @@ def _merge_single_node_branches(
             if mesh_vertices is not None and state.node2verts[par].size:
                 pts = mesh_vertices[state.node2verts[par]]
                 d = np.linalg.norm(pts - state.nodes[par], axis=1)
-                for k in radii_dict:
-                    state.radii[k][par] = _estimate_radius(d, method=k)
+                _radii_from_distances(state.radii, par, d)
             to_drop.add(leaf)
 
         keep = np.ones(len(state.nodes), bool)

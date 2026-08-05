@@ -1393,12 +1393,28 @@ let meshCentroid = [0, 0, 0];
                     group.add(lines);
                 }
 
+                // A skeleton built from a mesh that is no longer loaded has
+                // node2verts pointing at different vertices.  It is not stale,
+                // it is wrong — so it must not look like the others.  The
+                // server refuses to serve its bins or export it; this is the
+                // part the user actually sees.
+                if (data.stale) {
+                    group.renderOrder = -1;
+                    nodePoints.material.opacity = 0.25;
+                    nodePoints.material.transparent = true;
+                    if (lines) {
+                        lines.material.opacity = 0.25;
+                        lines.material.transparent = true;
+                    }
+                }
+
                 scene.add(group);
 
                 skelGroups[name] = {
                     group,
                     nodePoints,
                     lines,
+                    stale: !!data.stale,
                     nodes: nodesArr,
                     radii: radiiArr,
                     nNodes,
@@ -2326,15 +2342,21 @@ let meshCentroid = [0, 0, 0];
                 const sel = document.getElementById("binSkelSel");
                 const had = sel.value;
                 sel.innerHTML = "";
-                for (const name of Object.keys(skelGroups)) {
+                for (const [name, g] of Object.entries(skelGroups)) {
                     const o = document.createElement("option");
                     o.value = name;
-                    o.textContent = name;
+                    o.textContent = g.stale ? `${name} (stale)` : name;
                     sel.appendChild(o);
                 }
                 if (had && skelGroups[had]) sel.value = had;
                 if (!sel.options.length) {
                     setBinReadout("No skeleton loaded — run Skeletonize first.");
+                } else if (skelGroups[sel.value] && skelGroups[sel.value].stale) {
+                    setBinReadout(
+                        '<span style="color:#e77">This skeleton was built from a ' +
+                            "different mesh — its bins name vertices that have " +
+                            "moved. Re-skeletonize before editing.</span>",
+                    );
                 }
             }
 

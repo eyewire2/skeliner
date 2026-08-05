@@ -14,8 +14,10 @@ from ._core import (
     _bridge_gaps,
     _build_mst,
     _detect_soma,
+    _estimate_radius,
     _merge_near_soma_nodes,
     _prune_neurites,
+    _radii_from_distances,
 )
 from ._state import (
     SkeletonState,
@@ -27,6 +29,8 @@ from ._state import (
 from .dataclass import Skeleton, Soma
 
 __skeleton__ = [
+    # editing bins
+    "reassign_verts",
     # editing edges
     "graft",
     "clip",
@@ -209,6 +213,198 @@ def _remap_ntype(
         )
         mapped = _ensure_root_label(mapped, root_label)
     return mapped
+
+
+# -----------------------------------------------------------------------------
+# editing bins: which mesh vertices each node owns
+# -----------------------------------------------------------------------------
+
+
+def _cl_dist_lut(skel, n_verts: int) -> np.ndarray | None:
+    """Per-vertex centreline distance, or None when it was not kept.
+
+    ``centerline`` is the one radius that is not a function of the vertices
+    alone — it aggregates a perpendicular distance the second binning pass
+    measured.  ``skeletonize`` keeps those distances precisely so a bin can be
+    edited without leaving that key stale beside freshly recomputed ones.
+    """
+    vids = skel.extra.get("cl_dist_vids")
+    vals = skel.extra.get("cl_dist_vals")
+    if vids is None or vals is None or len(vids) == 0:
+        return None
+    lut = np.zeros(n_verts, dtype=np.float64)
+    lut[np.asarray(vids, dtype=np.int64)] = np.asarray(vals, dtype=np.float64)
+    return lut
+
+
+def _recompute_nodes(skel, nodes: Iterable[int], mesh, cl_lut) -> list[str]:
+    """Rebuild position and radii for *nodes* from the vertices they own.
+
+    Returns the radius keys that could not be rebuilt.
+    """
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    stale: list[str] = []
+    for nid in nodes:
+        owned = np.asarray(skel.node2verts[nid], dtype=np.int64)
+        if owned.size == 0:
+            continue
+        pts = verts[owned]
+        centre = pts.mean(axis=0)
+        skel.nodes[nid] = centre
+        d = np.linalg.norm(pts - centre, axis=1)
+        stale = _radii_from_distances(
+            skel.radii, nid, d, cl_d=None if cl_lut is None else cl_lut[owned]
+        )
+    return stale
+
+
+def reassign_verts(skel, verts: ArrayLike, to: int, *, mesh, verbose: bool = False):
+    """Move mesh vertices into bin *to*, and recompute what depends on them.
+
+    A node *is* the set of mesh vertices it owns: its position is their
+    centroid and every radius is an aggregate over them.  So this is the one
+    primitive bin editing needs — nudging a bin boundary, merging two nodes and
+    splitting one are all this call with different arguments.
+
+    Everything downstream is recomputed, never interpolated.  A node left
+    owning nothing is dropped, because a node with no vertices has no position
+    and no radius.
+
+    Parameters
+    ----------
+    skel
+        Modified in place.
+    verts
+        Mesh vertex ids to move.  Every one must currently belong to an arbor
+        bin: unowned surface is soma, organelle or discarded, and claiming it
+        would be a components decision made without re-deriving them.
+    to
+        Destination node.  Node 0 is refused — its "bin" is ``soma.verts``,
+        assigned wholesale by the soma stitch, and belongs to the components,
+        not to the partition.
+    mesh
+        The mesh the skeleton was built from.  Positions and radii are
+        measured from it.
+
+    Returns
+    -------
+    dict
+        ``moved``, ``donors``, ``dropped`` (nodes emptied and removed),
+        ``old2new`` (only when something was dropped), and ``stale_radii`` —
+        radius keys that could not be recomputed, e.g. ``calibrated``, which
+        is measured by ray casting rather than from the vertices.
+
+    Notes
+    -----
+    **Edges are left alone.** Moving vertices between adjacent bins almost
+    never changes which bins touch, and re-deriving the whole graph from the
+    surface would silently discard the edges that have no surface support —
+    the soma stems and ``bridge_gaps`` bridges — and can disconnect the
+    skeleton. Re-derive explicitly with :func:`rebuild_mst`, or re-skeletonize,
+    when that is what you want. Dropping an emptied node does drop its edges,
+    since they no longer have a node at one end.
+    """
+    if skel.node2verts is None:
+        raise ValueError("Skeleton carries no node2verts; nothing to reassign.")
+    to = int(to)
+    if not 0 <= to < len(skel.nodes):
+        raise ValueError(f"node {to} out of range (0..{len(skel.nodes) - 1})")
+    if to == 0:
+        raise ValueError(
+            "node 0 is the soma, not a bin — its vertices are Soma.verts and "
+            "belong to the components. Reassign them in the mesh editor."
+        )
+
+    moving = np.unique(np.asarray(verts, dtype=np.int64).ravel())
+    if moving.size == 0:
+        raise ValueError("No vertices given.")
+    if moving.min() < 0 or moving.max() >= len(mesh.vertices):
+        raise ValueError("vertex ids must lie within the mesh")
+
+    owner = np.full(len(mesh.vertices), -1, dtype=np.int64)
+    for nid, owned in enumerate(skel.node2verts):
+        owned = np.asarray(owned, dtype=np.int64)
+        if nid and owned.size:  # node 0 holds soma.verts, which is not a bin
+            owner[owned] = nid
+
+    unowned = moving[owner[moving] < 0]
+    if unowned.size:
+        raise ValueError(
+            f"{unowned.size:,} of {moving.size:,} vertices belong to no bin "
+            "(soma, organelle or discarded surface). Edit Mesh owns those."
+        )
+
+    donors = sorted({int(n) for n in np.unique(owner[moving])} - {to})
+    if not donors:
+        return {
+            "moved": 0,
+            "donors": [],
+            "dropped": [],
+            "stale_radii": [],
+        }
+
+    keep_set = set(moving.tolist())
+    for nid in donors:
+        owned = np.asarray(skel.node2verts[nid], dtype=np.int64)
+        skel.node2verts[nid] = owned[~np.isin(owned, moving)]
+    skel.node2verts[to] = np.unique(
+        np.concatenate(
+            [
+                np.asarray(skel.node2verts[to], dtype=np.int64),
+                np.asarray(sorted(keep_set)),
+            ]
+        )
+    )
+
+    dropped = [n for n in donors if skel.node2verts[n].size == 0]
+    touched = [n for n in donors if n not in dropped] + [to]
+    old2new = None
+
+    if dropped:
+        keep_mask = np.ones(len(skel.nodes), dtype=bool)
+        keep_mask[dropped] = False
+        state = SkeletonState(
+            nodes=skel.nodes,
+            radii=skel.radii,
+            edges=skel.edges,
+            node2verts=skel.node2verts,
+            vert2node=skel.vert2node,
+        )
+        new_state, old2new = compact_state(state, keep_mask, return_old2new=True)
+        skel.nodes = new_state.nodes
+        skel.radii = new_state.radii
+        skel.edges = new_state.edges
+        skel.node2verts = new_state.node2verts
+        skel.vert2node = new_state.vert2node
+        skel.ntype = _remap_ntype(
+            skel.ntype,
+            old2new,
+            len(new_state.nodes),
+            edges=new_state.edges,
+            fill_gaps=True,
+        )
+        touched = [int(old2new[n]) for n in touched]
+    else:
+        skel.vert2node = rebuild_vert2node(skel.node2verts)
+
+    cl_lut = _cl_dist_lut(skel, len(mesh.vertices))
+    stale = sorted(_recompute_nodes(skel, touched, mesh, cl_lut))
+    skel._invalidate_spatial_index()
+    if verbose:
+        print(
+            f"[skeliner.post] reassign_verts: {moving.size:,} verts → node {to}, "
+            f"{len(donors)} donor(s), {len(dropped)} emptied"
+        )
+        if stale:
+            print(f"      └─ not recomputable, now stale: {', '.join(stale)}")
+
+    return {
+        "moved": int(moving.size),
+        "donors": donors,
+        "dropped": dropped,
+        "old2new": None if old2new is None else old2new.tolist(),
+        "stale_radii": stale,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -1406,45 +1602,6 @@ def downsample(
         )
 
     return new_skel
-
-
-def _estimate_radius(
-    d: np.ndarray,
-    *,
-    method: str = "median",
-    trim_fraction: float = 0.05,
-    q: float = 55.0,
-) -> float:
-    """Return one scalar radius according to *method*."""
-    if method == "median":
-        return float(np.median(d))
-    if method == "mean":
-        return float(d.mean())
-    if method == "max":
-        return float(d.max())
-    if method == "min":
-        return float(d.min())
-    if method == "percentile":
-        return float(np.percentile(d, q=q))
-    if method == "trim":
-        lo, hi = np.quantile(d, [trim_fraction, 1.0 - trim_fraction])
-        mask = (d >= lo) & (d <= hi)
-        if not np.any(mask):
-            return float(np.mean(d))
-        return float(d[mask].mean())
-    if method == "trimlow":
-        lo = np.quantile(d, trim_fraction)
-        mask = d >= lo
-        if not np.any(mask):
-            return float(np.mean(d))
-        return float(d[mask].mean())
-    if method == "trimhigh":
-        hi = np.quantile(d, 1.0 - trim_fraction)
-        mask = d <= hi
-        if not np.any(mask):
-            return float(np.mean(d))
-        return float(d[mask].mean())
-    raise ValueError(f"Unknown radius estimator '{method}'.")
 
 
 def submesh_by_vertices(

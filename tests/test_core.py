@@ -300,3 +300,65 @@ def test_split_is_deterministic():
     first = [p.tolist() for p in _split_branch_band(band, groups, g)]
     second = [p.tolist() for p in _split_branch_band(band, groups, g)]
     assert first == second
+
+
+# ----- one radius estimator, one meaning -----------------------------------
+#
+# `post` used to carry a near-copy of `_estimate_radius` differing only in
+# its defaults, so `trim` and `percentile` quietly meant different things
+# depending on which module you reached from — and the merge paths inside
+# `_prune_neurites` recomputed radii with a different trim than
+# `_make_nodes` had built them with.
+
+
+def test_every_estimator_is_reachable_from_one_place():
+    from skeliner._core import RECOMPUTABLE_RADII, _estimate_radius
+
+    d = np.linspace(1.0, 100.0, 200)
+    for method in RECOMPUTABLE_RADII:
+        assert np.isfinite(_estimate_radius(d, method=method))
+    with pytest.raises(ValueError, match="Unknown radius estimator"):
+        _estimate_radius(d, method="nonsense")
+
+
+def test_recompute_skips_keys_that_are_not_distance_aggregates():
+    """`centerline` aggregates perpendicular distances and `calibrated` is
+    ray-cast, so neither can be rebuilt from a node's own distances.  Passing
+    them to the estimator is what used to raise."""
+    from skeliner._core import _radii_from_distances
+
+    radii = {
+        "trim": np.zeros(1),
+        "centerline": np.full(1, 7.0),
+        "calibrated": np.full(1, 9.0),
+    }
+    stale = _radii_from_distances(radii, 0, np.linspace(1.0, 10.0, 50))
+
+    assert stale == ["centerline", "calibrated"]
+    assert radii["trim"][0] > 0, "the aggregate keys are rebuilt"
+    assert radii["centerline"][0] == 7.0, "left alone, not corrupted"
+    assert radii["calibrated"][0] == 9.0
+
+
+def test_centerline_is_rebuilt_when_its_distances_are_supplied():
+    from skeliner._core import _radii_from_distances
+
+    radii = {"centerline": np.zeros(1)}
+    stale = _radii_from_distances(
+        radii, 0, np.linspace(1.0, 10.0, 50), cl_d=np.full(50, 12.0)
+    )
+    assert stale == []
+    assert radii["centerline"][0] == pytest.approx(12.0)
+
+
+def test_trim_means_the_same_thing_everywhere():
+    """A merged node's `trim` radius must be comparable with every other
+    node's, which means one trim fraction across the whole array."""
+    from skeliner._core import TRIM_FRACTION, _estimate_radius, _radii_from_distances
+
+    d = np.concatenate([np.full(300, 80.0), np.full(120, 400.0)])
+    radii = {"trim": np.zeros(1)}
+    _radii_from_distances(radii, 0, d)
+    assert radii["trim"][0] == pytest.approx(
+        _estimate_radius(d, method="trim", trim_fraction=TRIM_FRACTION)
+    )

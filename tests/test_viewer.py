@@ -367,34 +367,127 @@ def test_bin_rejects_bad_input(bin_client, body, expected):
     assert expected in r.json()["error"]
 
 
-def test_the_owner_cache_follows_the_mesh(bin_client):
-    """The cache holds the mesh and skeleton it was built from and compares
-    them by identity, so replacing either cannot serve a stale answer.
+# ── skeleton invalidation ─────────────────────────────────────────────
+#
+# `node2verts` / `vert2node` index *the mesh the skeleton was built from*.
+# After a face removal or a compaction they name different vertices, with
+# no shape mismatch to catch it — so a skeleton kept across a mesh edit is
+# not stale, it is wrong.  Staleness is derived by comparing the bound mesh
+# by identity rather than set by a flag, which is what these pin down.
 
-    Driven by actually swapping the mesh, because a cache that is only ever
-    read never proves anything.
-    """
-    client, name, mesh, _ = bin_client
-    before = client.post("/bin", json={"name": name, "node": 3}).json()["faces"]
-    assert before, "nothing to invalidate"
 
-    # reach mesh_state the way the reassign fixture does
-    state = None
-    for route in client.app.routes:
+def _mesh_state_of(app):
+    """Reach the app's private mesh_state, as the reassign fixture does."""
+    for route in app.routes:
         fn = getattr(route, "endpoint", None)
         for cell in getattr(fn, "__closure__", None) or ():
             val = cell.cell_contents
             if isinstance(val, dict) and "pending_reassignment" in val:
-                state = val
-        if state is not None:
-            break
-    assert state is not None
+                return val
+    raise AssertionError("could not reach mesh_state")
 
-    # a different mesh object with the faces reversed: same ids, new owners
-    swapped = mesh.copy()
-    swapped.faces = np.asarray(mesh.faces)[::-1]
-    state["mesh"] = swapped
+
+def test_a_skeleton_built_from_another_mesh_is_refused(bin_client):
+    client, name, mesh, _ = bin_client
+    assert client.post("/bin", json={"name": name, "node": 3}).status_code == 200
+
+    _mesh_state_of(client.app)["mesh"] = mesh.copy()  # same geometry, new object
+
+    r = client.post("/bin", json={"name": name, "node": 3})
+    assert r.status_code == 409
+    assert "different mesh" in r.json()["error"]
+
+
+def test_a_stale_skeleton_cannot_be_exported(bin_client):
+    """The one irreversible step: exported radii would belong to surface
+    that is no longer there, and nothing downstream could tell."""
+    client, name, mesh, _ = bin_client
+    assert client.get(f"/export_skeleton?name={name}").status_code == 200
+
+    _mesh_state_of(client.app)["mesh"] = mesh.copy()
+
+    r = client.get(f"/export_skeleton?name={name}")
+    assert r.status_code == 409
+    assert "Re-skeletonize" in r.json()["error"]
+
+
+@pytest.mark.parametrize("route, payload", [("/remove_selected", "faces")])
+def test_a_real_preprocessing_action_invalidates_the_skeleton(
+    bin_client, route, payload
+):
+    """The synthetic swaps above prove the rule; this proves it is wired to
+    the routes a user actually clicks, which is where a missed site shows."""
+    client, name, _, _ = bin_client
+    faces = client.post("/bin", json={"name": name, "node": 3}).json()["faces"]
+
+    r = client.post(route, json={payload: faces[:5]})
+    assert r.status_code == 200, r.text
+
+    assert client.post("/bin", json={"name": name, "node": 3}).status_code == 409
+    assert client.get(f"/export_skeleton?name={name}").status_code == 409
+
+
+def test_undo_after_a_real_edit_restores_currency(bin_client):
+    client, name, _, _ = bin_client
+    faces = client.post("/bin", json={"name": name, "node": 3}).json()["faces"]
+    client.post("/remove_selected", json={"faces": faces[:5]})
+    assert client.post("/bin", json={"name": name, "node": 3}).status_code == 409
+
+    assert client.post("/undo").status_code == 200
+    assert client.post("/bin", json={"name": name, "node": 3}).status_code == 200
+
+
+def test_returning_to_the_original_mesh_makes_it_current_again(bin_client):
+    """Comparing by identity gets undo right for free: restoring the very
+    mesh a skeleton was built from restores the same object."""
+    client, name, mesh, _ = bin_client
+    state = _mesh_state_of(client.app)
+    original = state["mesh"]
+
+    state["mesh"] = mesh.copy()
+    assert client.post("/bin", json={"name": name, "node": 3}).status_code == 409
+
+    state["mesh"] = original
+    assert client.post("/bin", json={"name": name, "node": 3}).status_code == 200
+
+
+def test_the_owner_cache_follows_the_skeleton(bin_client):
+    """The cache is keyed on the mesh *and* the skeleton it was built from,
+    so swapping the skeleton under an unchanged mesh recomputes.
+
+    Driven by an actual swap, because a cache that is only ever read proves
+    nothing.
+    """
+    client, name, mesh, skel = bin_client
+    before = client.post("/bin", json={"name": name, "node": 3}).json()["faces"]
+    assert before, "nothing to invalidate"
+
+    # a different skeleton object: node 3 now owns what node 4 owned
+    swapped = copy.deepcopy(skel)
+    swapped.node2verts[3], swapped.node2verts[4] = (
+        swapped.node2verts[4],
+        swapped.node2verts[3],
+    )
+    swapped.vert2node = {}
+    for nid, vs in enumerate(swapped.node2verts):
+        for v in np.asarray(vs):
+            swapped.vert2node[int(v)] = nid
+
+    for route in client.app.routes:
+        fn = getattr(route, "endpoint", None)
+        for cell in getattr(fn, "__closure__", None) or ():
+            val = cell.cell_contents
+            if isinstance(val, dict) and name in val:
+                val[name]["skeleton"] = swapped
 
     after = client.post("/bin", json={"name": name, "node": 3}).json()["faces"]
-    expected = [len(mesh.faces) - 1 - f for f in reversed(before)]
-    assert after == expected, "the cache served an answer for the old mesh"
+    assert after != before, "the cache served an answer for the old skeleton"
+    assert after == sorted(
+        int(f) for f in np.flatnonzero(_dx().face_owner(swapped, mesh) == 3)
+    )
+
+
+def _dx():
+    from skeliner import dx
+
+    return dx

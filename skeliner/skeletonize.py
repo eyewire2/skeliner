@@ -10,6 +10,7 @@ import trimesh
 from scipy.spatial import KDTree
 
 from ._core import (
+    TRIM_FRACTION,
     _bridge_gaps,
     _build_mst,
     _detect_soma,
@@ -754,7 +755,8 @@ def _make_nodes(
             d = np.linalg.norm(pts - center, axis=1)  # distances → radii
             for est in radius_estimators:
                 radii_dict[est] = np.append(
-                    radii_dict[est], _estimate_radius(d, method=est, trim_fraction=0.05)
+                    radii_dict[est],
+                    _estimate_radius(d, method=est, trim_fraction=TRIM_FRACTION),
                 )
 
             nodes.append(center.astype(np.float64))
@@ -1247,7 +1249,7 @@ def _skeletonize_component(
                     cl_radii[ni] = _estimate_radius(
                         dists,
                         method="trim",
-                        trim_fraction=0.05,
+                        trim_fraction=TRIM_FRACTION,
                     )
                 else:
                     cl_radii[ni] = 0.0

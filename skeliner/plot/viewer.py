@@ -370,6 +370,8 @@ def _create_app(
                 "path": name,
                 "color": color,
                 "l2_graph": False,
+                # the mesh this skeleton's vertex maps index; see _skel_is_stale
+                "mesh": mesh_state["mesh"],
             }
             print(
                 f"Loaded skeleton: {name} ({len(skel.nodes):,} nodes, {len(skel.edges):,} edges)"
@@ -590,22 +592,7 @@ def _create_app(
 
                 await broadcast({"type": "mesh_loaded", "payload": buffers})
                 # Re-send all skeletons (centroid changed)
-                for sname, sstate in skeleton_states.items():
-                    if sstate.get("l2_graph"):
-                        sstate["buffers"] = _l2_graph_to_buffers(
-                            Path(sstate["path"]), mesh_state["centroid"]
-                        )
-                    else:
-                        sstate["buffers"] = _skeleton_to_buffers(
-                            sstate["skeleton"], mesh_state["centroid"]
-                        )
-                    sstate["buffers"]["color"] = sstate["color"]
-                    await broadcast(
-                        {
-                            "type": "skeleton_loaded",
-                            "payload": {"name": sname, **sstate["buffers"]},
-                        }
-                    )
+                await _rebroadcast_skeletons()
 
                 return JSONResponse({"ok": True, "type": "mesh", "name": filename})
 
@@ -917,6 +904,10 @@ def _create_app(
                     "path": str(tmp_path.resolve()),
                     "buffers": buffers,
                     "color": color,
+                    # An uploaded skeleton was built from some mesh offline;
+                    # loading it alongside this one is the claim that they go
+                    # together, so bind it to whatever is loaded now.
+                    "mesh": mesh_state["mesh"],
                 }
 
                 await broadcast(
@@ -990,22 +981,7 @@ def _create_app(
             mesh_state["buffers"] = None
             mesh_state["path"] = None
             mesh_state["centroid"] = np.zeros(3, dtype=np.float32)
-            for sname, sstate in skeleton_states.items():
-                if sstate.get("l2_graph"):
-                    sstate["buffers"] = _l2_graph_to_buffers(
-                        Path(sstate["path"]), mesh_state["centroid"]
-                    )
-                else:
-                    sstate["buffers"] = _skeleton_to_buffers(
-                        sstate["skeleton"], mesh_state["centroid"]
-                    )
-                sstate["buffers"]["color"] = sstate["color"]
-                await broadcast(
-                    {
-                        "type": "skeleton_loaded",
-                        "payload": {"name": sname, **sstate["buffers"]},
-                    }
-                )
+            await _rebroadcast_skeletons()
             await broadcast({"type": "mesh_removed"})
             return JSONResponse({"ok": True})
 
@@ -2047,6 +2023,60 @@ def _create_app(
             json.dumps(ann, separators=(",", ":")), encoding="utf-8"
         )
 
+    def _skel_is_stale(sstate) -> bool:
+        """Was this skeleton built from a mesh that is no longer loaded?
+
+        A ``Skeleton`` holds ``node2verts`` / ``vert2node``, which index *the
+        mesh it was built from*.  After a face removal or a ``compact_mesh``
+        reindex those maps point at different vertices — silently, with no
+        shape mismatch to catch it.  Moving vertices with the transform gizmo
+        keeps the indices but invalidates every position and radius, which is
+        no better.  So any mesh change invalidates a skeleton, and the honest
+        response is to re-skeletonize.
+
+        Derived by identity rather than set by a flag, for the same reason the
+        face-owner cache is: there are four places that swap the mesh and a
+        fifth will be added.  Identity also gets undo right for free — undoing
+        back to the very mesh a skeleton was built from restores the *same
+        object*, so the skeleton is correctly current again.
+
+        It errs conservative: ``compact_mesh`` builds a new mesh even when it
+        removes nothing, so a no-op compaction still reads as stale.  That is
+        the right direction to be wrong in — a spurious stale costs one
+        re-skeletonize, a spurious current costs radii measured against
+        surface that is no longer there, with nothing downstream able to tell.
+        """
+        origin = sstate.get("mesh")
+        return origin is not None and origin is not mesh_state["mesh"]
+
+    async def _rebroadcast_skeletons():
+        """Re-send every skeleton layer, e.g. after the centroid moved."""
+        for sname, sstate in skeleton_states.items():
+            if sstate.get("l2_graph"):
+                sstate["buffers"] = _l2_graph_to_buffers(
+                    Path(sstate["path"]), mesh_state["centroid"]
+                )
+            else:
+                sstate["buffers"] = _skeleton_to_buffers(
+                    sstate["skeleton"], mesh_state["centroid"]
+                )
+            sstate["buffers"]["color"] = sstate["color"]
+            stale = _skel_is_stale(sstate)
+            sstate["buffers"]["stale"] = stale
+            if stale and not sstate.get("_stale_announced"):
+                sstate["_stale_announced"] = True
+                await _log(
+                    f"[skeliner] '{sname}' was built from a different mesh — "
+                    "its vertex maps no longer match. Re-skeletonize before "
+                    "editing or exporting it."
+                )
+            await broadcast(
+                {
+                    "type": "skeleton_loaded",
+                    "payload": {"name": sname, **sstate["buffers"]},
+                }
+            )
+
     async def _apply_new_mesh(new_mesh):
         """Replace the current mesh with a modified one and broadcast."""
         # Save current mesh for undo
@@ -2078,22 +2108,7 @@ def _create_app(
         await broadcast({"type": "mesh_loaded", "payload": buffers})
 
         # Re-send skeletons (centroid may have changed)
-        for sname, sstate in skeleton_states.items():
-            if sstate.get("l2_graph"):
-                sstate["buffers"] = _l2_graph_to_buffers(
-                    Path(sstate["path"]), mesh_state["centroid"]
-                )
-            else:
-                sstate["buffers"] = _skeleton_to_buffers(
-                    sstate["skeleton"], mesh_state["centroid"]
-                )
-            sstate["buffers"]["color"] = sstate["color"]
-            await broadcast(
-                {
-                    "type": "skeleton_loaded",
-                    "payload": {"name": sname, **sstate["buffers"]},
-                }
-            )
+        await _rebroadcast_skeletons()
 
         # Update state file
         current = {}
@@ -2481,22 +2496,7 @@ def _create_app(
         buffers["keepCamera"] = True
         await broadcast({"type": "mesh_loaded", "payload": buffers})
 
-        for sname, sstate in skeleton_states.items():
-            if sstate.get("l2_graph"):
-                sstate["buffers"] = _l2_graph_to_buffers(
-                    Path(sstate["path"]), mesh_state["centroid"]
-                )
-            else:
-                sstate["buffers"] = _skeleton_to_buffers(
-                    sstate["skeleton"], mesh_state["centroid"]
-                )
-            sstate["buffers"]["color"] = sstate["color"]
-            await broadcast(
-                {
-                    "type": "skeleton_loaded",
-                    "payload": {"name": sname, **sstate["buffers"]},
-                }
-            )
+        await _rebroadcast_skeletons()
 
         current = {}
         if state_path.exists():
@@ -2831,22 +2831,7 @@ def _create_app(
         await broadcast({"type": "annotations_updated"})
 
         # Re-send skeletons
-        for sname, sstate in skeleton_states.items():
-            if sstate.get("l2_graph"):
-                sstate["buffers"] = _l2_graph_to_buffers(
-                    Path(sstate["path"]), mesh_state["centroid"]
-                )
-            else:
-                sstate["buffers"] = _skeleton_to_buffers(
-                    sstate["skeleton"], mesh_state["centroid"]
-                )
-            sstate["buffers"]["color"] = sstate["color"]
-            await broadcast(
-                {
-                    "type": "skeleton_loaded",
-                    "payload": {"name": sname, **sstate["buffers"]},
-                }
-            )
+        await _rebroadcast_skeletons()
 
         await _log(
             f"Compact: {n_verts_before:,} → {len(clean.vertices):,} verts, "
@@ -3160,6 +3145,19 @@ def _create_app(
                 {"ok": False, "error": "Skeleton has no exportable data"},
                 status_code=400,
             )
+        if _skel_is_stale(sstate):
+            # Exporting is the one irreversible thing here: a skeleton whose
+            # node2verts index a mesh nobody has any more carries radii
+            # belonging to the wrong surface, and nothing downstream can tell.
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"'{name}' was built from a different mesh — its "
+                    "radii belong to surface that is no longer there. "
+                    "Re-skeletonize before exporting.",
+                },
+                status_code=409,
+            )
 
         from skeliner.io import save_skeleton_npz, save_skeleton_swc
 
@@ -3278,6 +3276,7 @@ def _create_app(
             "path": "",
             "buffers": buffers,
             "color": color,
+            "mesh": mesh,
         }
 
         await broadcast(
@@ -3304,6 +3303,11 @@ def _create_app(
         time someone adds a sixth.  Keeping the references alive is also what
         makes ``is`` sound here: neither object can be freed and have its id
         reused while the cache still points at it.
+
+        Identity cannot see a skeleton **mutated in place**, and the ``post``
+        primitives all mutate in place (``prune``, ``graft``, ``clip``).  Any
+        route that edits a skeleton must therefore drop ``_face_owner`` itself
+        — one line, in the function doing the mutating.
         """
         sstate = skeleton_states[name]
         mesh, skel = mesh_state["mesh"], sstate["skeleton"]
@@ -3340,6 +3344,17 @@ def _create_app(
         if mesh_state["mesh"] is None:
             return JSONResponse(
                 {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+        if _skel_is_stale(skeleton_states[name]):
+            # vert2node indexes the mesh this was built from; against the
+            # current one it would name a plausible but wrong patch.
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"'{name}' was built from a different mesh — its "
+                    "vertex maps no longer match. Re-skeletonize first.",
+                },
+                status_code=409,
             )
 
         owner = _face_owner_for(name)
