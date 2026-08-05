@@ -2,7 +2,7 @@
 
 import time
 import warnings
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 
 import igraph as ig
@@ -1025,6 +1025,75 @@ def _removal_would_sever(
     """
     loops = _trace_border_loops(mesh, sel, edge_to_faces)
     return sum(1 for lp in loops if len(lp) >= 3) >= 2
+
+
+def _sever_cost(
+    mesh: trimesh.Trimesh,
+    sel: set[int],
+    face_adj: dict[int, set[int]],
+    budget: int,
+) -> int:
+    """How many faces removing *sel* would strand, capped at ``budget``.
+
+    :func:`_removal_would_sever` only says a sever is *possible* — two
+    border loops mean the patch wraps the surface.  It says nothing about
+    the cost, and the two differ by orders of magnitude: on 564241053 an
+    annulus stranded 13,438 faces, on 554656742 a 22-face patch of the
+    same shape stranded **4**.  Deciding on the loop count alone throws
+    away good bridges to avoid trivial ones.
+
+    Everything but the largest surviving piece is stranded.  Each piece
+    is grown separately and abandoned once it passes ``budget``, so the
+    work is bounded by the answer rather than by the mesh: at most one
+    piece can exceed the budget and still be the largest, and if two do
+    the cost already exceeds it.  Returns ``budget + 1`` in that case.
+    """
+    seeds: set[int] = set()
+    for fi in sel:
+        seeds.update(f for f in face_adj[fi] if f not in sel)
+    if not seeds:
+        return 0
+
+    seen: set[int] = set()
+    closed: list[int] = []
+    n_over = 0
+    for seed in sorted(seeds):
+        if seed in seen:
+            continue
+        stack = [seed]
+        seen.add(seed)
+        size = 0
+        over = False
+        while stack:
+            u = stack.pop()
+            size += 1
+            if size > budget:
+                over = True
+                break
+            for v in face_adj[u]:
+                if v not in sel and v not in seen:
+                    seen.add(v)
+                    stack.append(v)
+        if over:
+            n_over += 1
+            if n_over >= 2:
+                return budget + 1
+            # drain the rest of this piece so its faces are not revisited
+            while stack:
+                u = stack.pop()
+                for v in face_adj[u]:
+                    if v not in sel and v not in seen:
+                        seen.add(v)
+                        stack.append(v)
+        else:
+            closed.append(size)
+
+    if n_over:
+        # the oversized piece is the largest; everything closed is lost
+        return sum(closed)
+    if not closed:
+        return 0
+    return sum(closed) - max(closed)
 
 
 def _expand_tip_to_good_rim(
@@ -2058,8 +2127,6 @@ def find_soma_via_ring_cutoff(
         seed_comps = vert_comp[seed_vi]
         valid = seed_comps >= 0
         if valid.any():
-            from collections import Counter
-
             soma_ci = Counter(
                 seed_comps[valid].tolist()
             ).most_common(1)[0][0]
@@ -4613,6 +4680,30 @@ def remove_gaps(
     edge_to_faces = _edge_to_faces(mesh)
     face_adj = _face_adjacency(mesh, edge_to_faces)
 
+    # How much a stitch rescues: the size of the piece that stays behind
+    # if it is not built.  Only a gap that actually trips the sever check
+    # needs this, and labelling a multi-million-face mesh is not free, so
+    # it is computed on first use.
+    _sizes: dict = {}
+
+    def _rescue_size(fa: int, fb: int) -> int:
+        if not _sizes:
+            if mesh_stats is not None and mesh_stats.face_comp is not None:
+                labels = mesh_stats.face_comp
+            else:
+                labels, _ = _face_edge_components(mesh)
+            _sizes["labels"] = labels
+            _sizes["count"] = Counter(int(x) for x in labels)
+        labels, count = _sizes["labels"], _sizes["count"]
+        la, lb = int(labels[fa]), int(labels[fb])
+        if la == lb:
+            # A fusion join: the two sides are still glued here and only
+            # `remove_fusions` will part them, so raw connectivity cannot
+            # say how big the far side is.  Claiming no benefit keeps the
+            # original rule for these — never sever to bridge a fusion.
+            return 0
+        return min(count.get(la, 0), count.get(lb, 0))
+
     # For each gap, expand each side's tip until both rims are real
     # loops. The initial tip from find_gaps can produce a degenerate
     # "rim" (e.g. 3 verts when the tip is a tongue attached at a single
@@ -4637,18 +4728,25 @@ def remove_gaps(
             n_skipped += 1
             continue
 
-        # A bridge that lands on a tube's FLANK rather than its end
-        # peels a rim that wraps the circumference, severing everything
-        # distal — which costs far more than the piece being rescued.
-        # This is not specific to the sub-1 nm fusion joins it was first
-        # seen on: on 564241053 a 21 nm gap rescues a 54 f fragment by
-        # cutting 13,438 f off the arbor.  Losing the fragment is always
-        # the cheaper error, so the check is not scoped by distance.
-        if _removal_would_sever(
-            mesh, sel_a, edge_to_faces
-        ) or _removal_would_sever(mesh, sel_b, edge_to_faces):
-            n_skipped += 1
-            continue
+        # A bridge that lands on a tube's FLANK rather than its end peels
+        # a rim that wraps the circumference and strands everything
+        # distal.  Whether that is worth avoiding depends on how much it
+        # strands, not on the fact that it can: on 564241053 a 21 nm gap
+        # strands 13,438 f to rescue 54 f, while on 554656742 a patch of
+        # the same annular shape strands 4 f and rescues 4,160 f.  Skip
+        # only when the stitch costs more than it saves — two face
+        # counts, no distance scope and no threshold.
+        sev_a = _removal_would_sever(mesh, sel_a, edge_to_faces)
+        sev_b = _removal_would_sever(mesh, sel_b, edge_to_faces)
+        if sev_a or sev_b:
+            rescue = _rescue_size(faces_a[0], faces_b[0])
+            if (
+                sev_a and _sever_cost(mesh, sel_a, face_adj, rescue) > rescue
+            ) or (
+                sev_b and _sever_cost(mesh, sel_b, face_adj, rescue) > rescue
+            ):
+                n_skipped += 1
+                continue
 
         loop_pairs.append((loop_a, loop_b))
         faces_to_remove |= sel_a | sel_b
@@ -5980,8 +6078,6 @@ def _find_nonmanifold_fusions(
     mesh_stats: MeshStats | None = None,
 ) -> list[list[int]]:
     """Detect non-manifold fusions (shared edges, duplicate faces, pinch vertices)."""
-    from collections import Counter, deque
-
     areas = mesh.area_faces
     zero_faces = set(np.where(areas < 1e-6)[0].tolist())
 
@@ -7019,7 +7115,6 @@ def find_parallel_patches(
         n_bnd = sum(len(bv) for bv in boundaries.values())
         n_faces = sum(len(r["faces"]) for r in results)
         # Compact per-axis summary
-        from collections import Counter
         ax_counts = Counter(r["axis"] for r in results)
         ax_str = ", ".join(
             f"{'XYZ'[a]}:{c}" for a, c in sorted(ax_counts.items())
@@ -7053,7 +7148,6 @@ def _trim_patches_to_overlap(
     self-opposing: each sign is trimmed against the other sign's
     union.
     """
-    from collections import defaultdict
 
     if not patches:
         return patches
@@ -7187,7 +7281,6 @@ def _filter_weak_sandwich_pairs(
     sides — filters out organelle-to-main parallels where the two
     sheets barely intersect.
     """
-    from collections import defaultdict
 
     if not patches or min_overlap <= 0:
         return patches
@@ -7258,7 +7351,6 @@ def _expand_parallel_patches(
     Patches whose expansions share any absorbed face get merged into
     one in the returned list.
     """
-    from collections import defaultdict, deque
 
     if not patches:
         return patches
@@ -7410,7 +7502,6 @@ def _find_fold_faces(mesh, patch):
     the surface turns 180°.  Returns the set of face indices directly
     on fold edges.
     """
-    from collections import defaultdict
 
     up_set = set(patch["up_faces"])
     down_set = set(patch["down_faces"])
@@ -7452,7 +7543,6 @@ def _trace_edge_loops(
     once, so a figure-8 becomes two separate loops touching at the
     shared vertex.
     """
-    from collections import defaultdict
 
     if not edges:
         return []
@@ -7603,7 +7693,6 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches):
     result has no fans, no duplicate faces, and no non-manifold edges
     by construction.
     """
-    from collections import defaultdict
 
     verts = mesh.vertices
     faces = mesh.faces
@@ -9080,7 +9169,6 @@ def find_soma_via_z_contour(
         soma_face &= ~organelles.mask
 
     # Keep only the largest connected component of soma faces
-    from collections import deque
 
     adj = _face_adjacency(mesh)
     soma_idx = set(np.where(soma_face)[0].tolist())
