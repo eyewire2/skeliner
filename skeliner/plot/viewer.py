@@ -216,6 +216,55 @@ def _l2_graph_to_buffers(path: Path, centroid: np.ndarray) -> dict[str, Any]:
     }
 
 
+class _LogTee(io.TextIOBase):
+    """Wraps stdout: writes to the original AND broadcasts lines via WS.
+
+    Both timing helpers (``pre._timed``, ``skeletonize._timed``) print a
+    stage label with ``end=""`` and only close the line with the elapsed
+    time once the stage returns, so a stage that runs for 30 s is an
+    unterminated line for all of it.  Broadcasting only on newline would
+    leave the browser silent for exactly the stages worth reporting, so
+    an unterminated line is sent as soon as it is written — that is the
+    progress indication — and the newline that later terminates it is
+    not re-sent.
+    """
+
+    def __init__(self, original, loop, broadcast_fn):
+        self._original = original
+        self._loop = loop
+        self._broadcast = broadcast_fn
+        self._partial = ""  # written, no newline yet
+        self._sent = ""  # last text broadcast, so it is not repeated
+
+    def _emit(self, text):
+        text = text.rstrip()
+        if not text or text == self._sent:
+            return
+        self._sent = text
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast({"type": "log", "text": text}),
+            self._loop,
+        )
+
+    def write(self, s):
+        self._original.write(s)
+        self._original.flush()
+        *complete, self._partial = (self._partial + s).split("\n")
+        for line in complete:
+            self._emit(line)
+        if self._partial:
+            self._emit(self._partial)
+        return len(s)
+
+    def finish(self):
+        """Close out a line the writer never terminated."""
+        self._emit(self._partial)
+        self._partial = ""
+
+    def flush(self):
+        self._original.flush()
+
+
 def _get_viewer_html() -> str:
     html_path = Path(__file__).parent / "viewer.html"
     return html_path.read_text(encoding="utf-8")
@@ -368,33 +417,10 @@ def _create_app(
 
     # ── Log-capturing executor helper ─────────────────────────────────
 
-    class _LogTee(io.TextIOBase):
-        """Wraps stdout: writes to original AND broadcasts lines via WS."""
-
-        def __init__(self, original, loop, broadcast_fn):
-            self._original = original
-            self._loop = loop
-            self._broadcast = broadcast_fn
-
-        def write(self, s):
-            self._original.write(s)
-            self._original.flush()
-            for line in s.splitlines():
-                text = line.strip()
-                if text:
-                    asyncio.run_coroutine_threadsafe(
-                        self._broadcast({"type": "log", "text": text}),
-                        self._loop,
-                    )
-            return len(s)
-
-        def flush(self):
-            self._original.flush()
-
     async def _log(text: str):
         """Print to terminal AND broadcast to browser."""
         print(text)
-        await broadcast({"type": "log", "text": text})
+        await broadcast({"type": "log", "text": text, "partial": False})
 
     async def _run_with_log(func, *args, **kwargs):
         """Run *func* in executor, streaming its stdout to WS clients."""
@@ -402,11 +428,13 @@ def _create_app(
 
         def _wrapper():
             old = sys.stdout
-            sys.stdout = _LogTee(old, loop, broadcast)
+            tee = _LogTee(old, loop, broadcast)
+            sys.stdout = tee
             try:
                 return func(*args, **kwargs)
             finally:
                 sys.stdout = old
+                tee.finish()
 
         result = await loop.run_in_executor(None, _wrapper)
         await broadcast({"type": "log_end"})
@@ -2423,7 +2451,7 @@ def _create_app(
         await broadcast({"type": "mesh_loaded", "payload": buffers})
 
         n_faces_edited = len(face_edits)
-        print(f"Edit vertices: {n_faces_edited} faces modified")
+        await _log(f"Edit vertices: {n_faces_edited} faces modified")
 
         return JSONResponse({"ok": True, "facesEdited": n_faces_edited})
 
@@ -2470,8 +2498,9 @@ def _create_app(
         }
         state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
 
-        print(
-            f"Undo: restored mesh with {len(prev_mesh.faces):,} faces ({len(_undo_stack)} steps remaining)"
+        await _log(
+            f"Undo: restored mesh with {len(prev_mesh.faces):,} faces "
+            f"({len(_undo_stack)} steps remaining)"
         )
         return JSONResponse(
             {
@@ -2720,7 +2749,7 @@ def _create_app(
                 }
             )
 
-        print(
+        await _log(
             f"Compact: {n_verts_before:,} → {len(clean.vertices):,} verts, "
             f"{n_faces_before:,} → {len(clean.faces):,} faces"
         )
@@ -3133,8 +3162,11 @@ def _create_app(
                 discarded=Discarded(list(mesh_state.get("discarded") or [])),
             )
 
+        await _log("[skeliner] Skeletonizing...")
         skel = await _run_with_log(skeletonize, mesh, verbose=True, **params)
-        print(f"Skeletonized: {len(skel.nodes)} nodes, {len(skel.edges)} edges")
+        await _log(
+            f"Skeletonized: {len(skel.nodes):,} nodes, {len(skel.edges):,} edges"
+        )
 
         # Add as a skeleton layer
         skel_name = "skeleton"
