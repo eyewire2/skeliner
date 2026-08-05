@@ -5,6 +5,8 @@ Uses synthetic meshes to exercise detection and removal functions
 without depending on large biological data.
 """
 
+from collections import Counter
+
 import numpy as np
 import pytest
 import trimesh
@@ -622,6 +624,44 @@ class TestSeverCost:
 
         assert pre._sever_cost(sel, adj, full - 1) > full - 1
         assert pre._sever_cost(sel, adj, full + 5) == full
+
+
+# ── _rescue_size ──────────────────────────────────────────────────────
+
+
+class TestRescueSize:
+    """The other half of the guard: what a stitch wins back.
+
+    ``_sever_cost`` prices the removal, ``_rescue_size`` prices the
+    bridge, and ``remove_gaps`` skips only when the first exceeds the
+    second.
+    """
+
+    def test_separate_components_rescue_the_smaller(self):
+        labels = np.array([0, 0, 0, 1, 1], dtype=np.int64)
+        counts = Counter(int(x) for x in labels)
+        assert pre._rescue_size(labels, counts, 0, 3) == 2
+        assert pre._rescue_size(labels, counts, 3, 0) == 2
+
+    def test_same_component_is_a_fusion_join(self):
+        """Both tips in one raw component: the sides are still glued, so
+        connectivity cannot size the far side.  Claim nothing."""
+        labels = np.array([0, 0, 0, 1, 1], dtype=np.int64)
+        counts = Counter(int(x) for x in labels)
+        assert pre._rescue_size(labels, counts, 0, 2) == 0
+
+    def test_matches_the_component_it_would_strand(self):
+        """On a real two-piece mesh the rescue is the smaller piece."""
+        mesh = _two_cylinders(separation=1500.0)
+        labels, _ = pre._face_edge_components(mesh)
+        counts = Counter(int(x) for x in labels)
+        comps = sorted(set(int(x) for x in labels) - {-2})
+        assert len(comps) == 2
+
+        fa = int(np.nonzero(labels == comps[0])[0][0])
+        fb = int(np.nonzero(labels == comps[1])[0][0])
+        smaller = min(counts[comps[0]], counts[comps[1]])
+        assert pre._rescue_size(labels, counts, fa, fb) == smaller
 
 
 # ── find_soma_via_ring_cutoff ─────────────────────────────────────────

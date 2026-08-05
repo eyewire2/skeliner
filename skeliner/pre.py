@@ -1093,6 +1093,32 @@ def _sever_cost(
     return sum(closed) - max(closed)
 
 
+def _rescue_size(
+    labels: np.ndarray,
+    counts: dict[int, int],
+    fa: int,
+    fb: int,
+) -> int:
+    """How many faces a stitch between faces *fa* and *fb* wins back.
+
+    The counterpart to :func:`_sever_cost`: what the stitch buys, to weigh
+    against what removing its rims would strand.  Bridging joins two
+    surface components, and the smaller of them is what would otherwise
+    be left behind, so that is the benefit.
+
+    *labels* and *counts* come from :func:`_face_edge_components` and a
+    ``Counter`` over it — raw connectivity, before fusions are parted.
+    """
+    la, lb = int(labels[fa]), int(labels[fb])
+    if la == lb:
+        # A fusion join: the two sides are still glued here and only
+        # `remove_fusions` will part them, so raw connectivity cannot say
+        # how big the far side is.  Claiming no benefit keeps the original
+        # rule for these — never sever to bridge a fusion.
+        return 0
+    return min(counts.get(la, 0), counts.get(lb, 0))
+
+
 def _expand_tip_to_good_rim(
     tip: list[int],
     edge_to_faces: dict[tuple[int, int], list[int]],
@@ -4635,29 +4661,20 @@ def remove_gaps(
     edge_to_faces = _edge_to_faces(mesh)
     face_adj = _face_adjacency(mesh, edge_to_faces)
 
-    # How much a stitch rescues: the size of the piece that stays behind
-    # if it is not built.  Only a gap that actually trips the sever check
-    # needs this, and labelling a multi-million-face mesh is not free, so
-    # it is computed on first use.
+    # Component labels for :func:`_rescue_size`.  Only a gap that actually
+    # trips the sever check needs them, and labelling a multi-million-face
+    # mesh costs ~19 s, so they are built on first use.
     _sizes: dict = {}
 
-    def _rescue_size(fa: int, fb: int) -> int:
+    def _lazy_rescue(fa: int, fb: int) -> int:
         if not _sizes:
             if mesh_stats is not None and mesh_stats.face_comp is not None:
                 labels = mesh_stats.face_comp
             else:
                 labels, _ = _face_edge_components(mesh)
             _sizes["labels"] = labels
-            _sizes["count"] = Counter(int(x) for x in labels)
-        labels, count = _sizes["labels"], _sizes["count"]
-        la, lb = int(labels[fa]), int(labels[fb])
-        if la == lb:
-            # A fusion join: the two sides are still glued here and only
-            # `remove_fusions` will part them, so raw connectivity cannot
-            # say how big the far side is.  Claiming no benefit keeps the
-            # original rule for these — never sever to bridge a fusion.
-            return 0
-        return min(count.get(la, 0), count.get(lb, 0))
+            _sizes["counts"] = Counter(int(x) for x in labels)
+        return _rescue_size(_sizes["labels"], _sizes["counts"], fa, fb)
 
     # For each gap, expand each side's tip until both rims are real
     # loops. The initial tip from find_gaps can produce a degenerate
@@ -4694,7 +4711,7 @@ def remove_gaps(
         sev_a = _removal_would_sever(sel_a, edge_to_faces)
         sev_b = _removal_would_sever(sel_b, edge_to_faces)
         if sev_a or sev_b:
-            rescue = _rescue_size(faces_a[0], faces_b[0])
+            rescue = _lazy_rescue(faces_a[0], faces_b[0])
             if (sev_a and _sever_cost(sel_a, face_adj, rescue) > rescue) or (
                 sev_b and _sever_cost(sel_b, face_adj, rescue) > rescue
             ):
