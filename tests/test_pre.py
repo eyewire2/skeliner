@@ -120,6 +120,21 @@ def _cylinder_at(radius, height, z_center, sections):
     return c
 
 
+def _subdivided_tube(sections=16, height=1000.0):
+    """A tube with several face rings along z.
+
+    ``_cylinder_at`` puts the whole side wall in one ring of triangles,
+    so there is no band across the tube to cut.
+    """
+    return _cylinder_at(50.0, height, 0.0, sections).subdivide().subdivide()
+
+
+def _band(mesh, lo, hi):
+    """Faces whose centroid z falls in [lo, hi] — an annulus around a tube."""
+    z = mesh.vertices[mesh.faces].mean(axis=1)[:, 2]
+    return {int(i) for i in np.nonzero((z >= lo) & (z <= hi))[0]}
+
+
 def _combine(parts):
     verts, faces, n = [], [], 0
     for p in parts:
@@ -562,6 +577,57 @@ class TestRemoveGaps:
         n_comps = len(set(labels) - {-2})
         # Should still work with precomputed gaps
         assert n_comps < 2 or _live_faces(result) != _live_faces(mesh)
+
+
+# ── _sever_cost ───────────────────────────────────────────────────────
+
+
+class TestSeverCost:
+    """What a severing stitch costs, against what it rescues.
+
+    ``_removal_would_sever`` says only that a removal patch is an annulus
+    and so *could* cut the surface.  The cost varies by orders of
+    magnitude — on 564241053 such a patch stranded 13,438 f to rescue 54,
+    on 554656742 a patch of the same shape stranded 4 and would have
+    rescued 4,160 — so the loop count alone cannot decide.
+    """
+
+    def _adj(self, mesh):
+        return pre._face_adjacency(mesh, pre._edge_to_faces(mesh))
+
+    def test_band_across_a_tube_strands_the_shorter_side(self):
+        mesh = _subdivided_tube()
+        sel = _band(mesh, 100.0, 300.0)
+        assert sel, "no band selected"
+
+        cost = pre._sever_cost(sel, self._adj(mesh), len(mesh.faces))
+        survivor = len(mesh.faces) - len(sel) - cost
+        assert 0 < cost < survivor
+
+    def test_cap_at_the_end_strands_nothing(self):
+        """A patch at a tube's end is a cap: removing it leaves one piece."""
+        mesh = _subdivided_tube()
+        z = mesh.vertices[mesh.faces].mean(axis=1)[:, 2]
+        sel = {int(i) for i in np.nonzero(z >= z.max() - 1e-6)[0]}
+        assert sel
+        assert pre._sever_cost(sel, self._adj(mesh), len(mesh.faces)) == 0
+
+    def test_patch_is_everything(self):
+        mesh = _subdivided_tube()
+        sel = set(range(len(mesh.faces)))
+        assert pre._sever_cost(sel, self._adj(mesh), 10) == 0
+
+    def test_budget_caps_the_answer(self):
+        """Over budget the exact cost is irrelevant, only that it compares
+        as larger — that comparison is the rule the guard applies."""
+        mesh = _subdivided_tube()
+        adj = self._adj(mesh)
+        sel = _band(mesh, 100.0, 300.0)
+        full = pre._sever_cost(sel, adj, len(mesh.faces))
+        assert full > 2
+
+        assert pre._sever_cost(sel, adj, full - 1) > full - 1
+        assert pre._sever_cost(sel, adj, full + 5) == full
 
 
 # ── find_soma_via_ring_cutoff ─────────────────────────────────────────

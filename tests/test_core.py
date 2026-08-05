@@ -7,6 +7,7 @@ topological / numerical invariants so that regressions blow up early.
 
 from pathlib import Path
 
+import igraph as ig
 import numpy as np
 import pytest
 
@@ -19,6 +20,11 @@ from skeliner.dataclass import (
     Soma,
 )
 from skeliner.io import load_mesh
+from skeliner.skeletonize import (
+    _neighbour_groups,
+    _split_branch_band,
+    _surface_graph,
+)
 
 
 def _assert_skeleton_valid(skel, *, expect_soma: bool = False):
@@ -79,8 +85,6 @@ def _make_components(mesh, *, with_soma: bool):
     real ``break_up_mesh`` would), since the preproc track
     expects each neurite to be surface-connected.
     """
-    from skeliner.skeletonize import _surface_graph
-
     nF = len(mesh.faces)
     # find the largest connected vertex component
     gsurf = _surface_graph(mesh)
@@ -143,3 +147,100 @@ def test_preproc_track_with_soma(reference_mesh):
     # soma center should be close to the mesh centroid
     mesh_center = reference_mesh.vertices.mean(axis=0)
     assert np.linalg.norm(skel.soma.center - mesh_center) < 1e3
+
+
+# ----- branch-band split --------------------------------------------------
+#
+# A geodesic shell that lands on a branch point wraps the parent tube and
+# both children in one connected band.  It passes the ring test, so it
+# becomes a bin, and its node is the mean of points on two diverging tubes
+# — which lands between them instead of inside one.  `_neighbour_groups`
+# counts how many separate neighbourhoods a bin touches (two for a
+# cross-section, three at a branch) and `_split_branch_band` cuts on that.
+
+
+def _ring(start, n):
+    """Vertex ids of a cycle plus its edges, as (ids, edges)."""
+    ids = list(range(start, start + n))
+    edges = [(ids[i], ids[(i + 1) % n]) for i in range(n)]
+    return ids, edges
+
+
+def _pants():
+    """Three rings around a fourth: the parent, the band, and two children.
+
+    ``band`` touches all three of the others, so it is the bin a branch
+    point produces.  Returns the graph, the band's vertex ids, and the
+    ownership map.
+    """
+    n = 8
+    parent, e_parent = _ring(0, n)
+    band, e_band = _ring(n, 2 * n)      # wide enough to feed two children
+    childA, e_a = _ring(3 * n, n)
+    childB, e_b = _ring(4 * n, n)
+
+    edges = e_parent + e_band + e_a + e_b
+    # parent sits under the first half of the band, the children over the
+    # second half, one on each quarter
+    for i in range(n):
+        edges.append((parent[i], band[i]))
+    for i in range(n):
+        edges.append((childA[i], band[n + (i % (n // 2))]))
+        edges.append((childB[i], band[n + n // 2 + (i % (n // 2))]))
+
+    owner = {}
+    for bin_id, verts in enumerate((parent, band, childA, childB)):
+        for v in verts:
+            owner[v] = (bin_id, 0)
+    g = ig.Graph(n=5 * n, edges=edges)
+    return g, np.asarray(band, dtype=np.int64), owner
+
+
+def test_branch_band_sees_three_neighbourhoods():
+    g, band, owner = _pants()
+    assert len(_neighbour_groups(band, g, owner, (1, 0))) == 3
+
+
+def test_two_patches_of_one_bin_are_one_neighbourhood():
+    """Dipping into the same neighbour twice is one tube, not two.
+
+    Counting vertex patches instead of bins made a plain band look like a
+    branch point and cut it into slivers.
+    """
+    g, band, owner = _pants()
+    # merge both children into a single bin: the band now touches two bins
+    # (parent, child) but along three separate patches
+    for v in list(owner):
+        if owner[v] == (3, 0):
+            owner[v] = (2, 0)
+    assert len(_neighbour_groups(band, g, owner, (1, 0))) == 2
+
+
+def test_end_ring_sees_one_neighbourhood():
+    """The parent ring touches only the band: nothing to split."""
+    g, _, owner = _pants()
+    parent = np.arange(0, 8, dtype=np.int64)
+    assert len(_neighbour_groups(parent, g, owner, (0, 0))) == 1
+
+
+def test_split_yields_one_connected_piece_per_tube():
+    g, band, owner = _pants()
+    groups = _neighbour_groups(band, g, owner, (1, 0))
+    parts = _split_branch_band(band, groups, g)
+    assert len(parts) == 3
+
+    allv = np.concatenate(parts).tolist()
+    assert sorted(allv) == sorted(band.tolist())
+    assert len(set(allv)) == len(allv), "a vertex landed in two pieces"
+    for part in parts:
+        # a disconnected piece leaves its node with no place to sit
+        sub = g.induced_subgraph([int(v) for v in part])
+        assert len(part) > 0 and len(sub.components()) == 1
+
+
+def test_split_is_deterministic():
+    g, band, owner = _pants()
+    groups = _neighbour_groups(band, g, owner, (1, 0))
+    first = [p.tolist() for p in _split_branch_band(band, groups, g)]
+    second = [p.tolist() for p in _split_branch_band(band, groups, g)]
+    assert first == second

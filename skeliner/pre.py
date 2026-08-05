@@ -1028,7 +1028,6 @@ def _removal_would_sever(
 
 
 def _sever_cost(
-    mesh: trimesh.Trimesh,
     sel: set[int],
     face_adj: dict[int, set[int]],
     budget: int,
@@ -4740,10 +4739,8 @@ def remove_gaps(
         sev_b = _removal_would_sever(mesh, sel_b, edge_to_faces)
         if sev_a or sev_b:
             rescue = _rescue_size(faces_a[0], faces_b[0])
-            if (
-                sev_a and _sever_cost(mesh, sel_a, face_adj, rescue) > rescue
-            ) or (
-                sev_b and _sever_cost(mesh, sel_b, face_adj, rescue) > rescue
+            if (sev_a and _sever_cost(sel_a, face_adj, rescue) > rescue) or (
+                sev_b and _sever_cost(sel_b, face_adj, rescue) > rescue
             ):
                 n_skipped += 1
                 continue
