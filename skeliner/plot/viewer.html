@@ -1777,7 +1777,13 @@ let meshCentroid = [0, 0, 0];
 
                 // Clicking the surface is the more natural way in: the thing
                 // in front of you is a misassigned strip, not a node id.
-                if (panelMode === "editskel") {
+                //
+                // Only a *plain* click, though.  Shift is the surface
+                // modifier throughout — it is what draws the lasso — so a
+                // shift-click adjusts the face selection here as it does
+                // everywhere else.  Letting it pick a bin as well gave one
+                // modifier two meanings in the mode where both are live.
+                if (panelMode === "editskel" && !event.shiftKey) {
                     selectBin(faceIndex, true);
                     return;
                 }
@@ -3792,13 +3798,29 @@ let meshCentroid = [0, 0, 0];
             }
 
             let _suppressNextClick = false;
+
+            /**
+             * Swallow the `click` a drag leaves behind.
+             *
+             * A pointerdown and pointerup on the same element are followed by
+             * a `click`, so without this every drag also picks whatever is
+             * under the cursor when it ends.  For the lasso that was actively
+             * destructive: a lasso drawn over the selected bin's own surface —
+             * which is the split gesture — ended by deselecting that very bin,
+             * disarming the buttons it had just armed.
+             */
+            function suppressClickAfterDrag() {
+                _suppressNextClick = true;
+                setTimeout(() => {
+                    _suppressNextClick = false;
+                }, 0);
+            }
+
             function onTransformPointerUp(e) {
                 if (e.button !== 0 || !transformDragging) return;
                 transformDragging = false;
                 confirmTransform();
-                // Suppress the click event that follows this pointerup
-                _suppressNextClick = true;
-                setTimeout(() => { _suppressNextClick = false; }, 0);
+                suppressClickAfterDrag();
             }
 
             function onTransformRightClick(e) {
@@ -4039,6 +4061,12 @@ let meshCentroid = [0, 0, 0];
 
                     // Ignore tiny drags (clicks)
                     if (x1 - x0 < 5 && y1 - y0 < 5) return;
+
+                    // Past that threshold this was a lasso, not a click, so
+                    // the click it is about to leave behind must not select
+                    // anything.  Below it nothing is suppressed, which keeps
+                    // shift-click working as its own gesture.
+                    suppressClickAfterDrag();
 
                     if (!meshGeometry) return;
                     const posAttr = meshGeometry.getAttribute("position");
