@@ -105,9 +105,12 @@ def _dist_vec_for_component(
 
     seed_arr = np.atleast_1d(np.asarray(seed_vid, dtype=np.int64))
 
-    # Map seed mesh-vertex IDs → local indices in *sub*
-    local_of = {int(v): i for i, v in enumerate(verts)}
-    root_idxs = [local_of[int(s)] for s in seed_arr]
+    # Map seed mesh-vertex IDs → local indices in *sub*.  Order does not
+    # matter: either there is one seed, or they are all joined to a
+    # single virtual vertex below.
+    root_idxs = np.flatnonzero(np.isin(verts, seed_arr)).tolist()
+    if not root_idxs:
+        raise ValueError("no seed vertex lies in this component")
 
     if len(root_idxs) > 1:
         # Join every seed to one virtual vertex by a zero-weight edge:
