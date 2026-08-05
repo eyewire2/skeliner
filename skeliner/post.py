@@ -301,8 +301,12 @@ def reassign_verts(skel, verts: ArrayLike, to: int, *, mesh, verbose: bool = Fal
     surface would silently discard the edges that have no surface support —
     the soma stems and ``bridge_gaps`` bridges — and can disconnect the
     skeleton. Re-derive explicitly with :func:`rebuild_mst`, or re-skeletonize,
-    when that is what you want. Dropping an emptied node does drop its edges,
-    since they no longer have a node at one end.
+    when that is what you want.
+
+    The one exception is a bin emptied by this call. It was absorbed into
+    *to*, not deleted, so its edges are **contracted onto** *to* rather than
+    dropped — otherwise merging a node would cut the tree at every neighbour
+    that node was holding on to.
     """
     if skel.node2verts is None:
         raise ValueError("Skeleton carries no node2verts; nothing to reassign.")
@@ -361,6 +365,17 @@ def reassign_verts(skel, verts: ArrayLike, to: int, *, mesh, verbose: bool = Fal
     old2new = None
 
     if dropped:
+        # A bin that gave everything to `to` was *absorbed* by it, not
+        # deleted, so its edges are now `to`'s.  Contract them onto `to`
+        # before compacting: `remap_edges` drops edges touching a removed
+        # node, which is right for a deletion and would here cut the tree
+        # at every neighbour the absorbed node was holding.
+        contracted = np.asarray(skel.edges, dtype=np.int64).copy()
+        if contracted.size:
+            contracted[np.isin(contracted, dropped)] = to
+            # remap_edges removes the resulting self-loops and dedups.
+            skel.edges = contracted
+
         keep_mask = np.ones(len(skel.nodes), dtype=bool)
         keep_mask[dropped] = False
         state = SkeletonState(

@@ -497,12 +497,47 @@
                     </label>
                     <button id="binClearBtn" style="margin-left: 10px">Clear</button>
                 </div>
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <button
+                        id="binMergeBtn"
+                        disabled
+                        title="Select two or more bins — the first one you click keeps its id. Merging is direction-free: the union has the same centre and radius whichever way round it goes."
+                    >
+                        Merge
+                    </button>
+                    <button
+                        id="binMoveBtn"
+                        style="margin-left: 4px"
+                        disabled
+                        title="Shift-drag over surface owned by a neighbouring bin, then move it into the selected one."
+                    >
+                        Move lassoed surface
+                    </button>
+                    <span id="binPending" style="display: none; margin-left: 12px">
+                        <button id="binApplyBtn">Apply</button>
+                        <button id="binCancelBtn" style="margin-left: 4px">Cancel</button>
+                    </span>
+                </div>
                 <div
                     id="binReadout"
                     style="margin-top: 4px; color: #888; white-space: nowrap; overflow-x: auto"
                 >
                     Click a node, or the surface it owns, to select a bin.
                 </div>
+                <div
+                    id="binEditSummary"
+                    style="
+                        display: none;
+                        margin-top: 4px;
+                        padding: 4px 6px;
+                        border-left: 2px solid #d98cd9;
+                        background: #2a222a;
+                        font-size: 11px;
+                        line-height: 1.5;
+                        max-width: 360px;
+                        white-space: normal;
+                    "
+                ></div>
             </div>
         </div>
 
@@ -933,6 +968,10 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("binSkelSel").addEventListener("change", clearBinSelection);
                 document.getElementById("binClearBtn").addEventListener("click", clearBinSelection);
                 document.getElementById("binShowBall").addEventListener("change", redrawBinBalls);
+                document.getElementById("binMoveBtn").addEventListener("click", runBinMove);
+                document.getElementById("binMergeBtn").addEventListener("click", runBinMerge);
+                document.getElementById("binApplyBtn").addEventListener("click", runBinApply);
+                document.getElementById("binCancelBtn").addEventListener("click", runBinCancel);
                 document.getElementById("scopeAllBtn").addEventListener("click", () => setScopeAll(true));
                 document.getElementById("scopeNoneBtn").addEventListener("click", () => setScopeAll(false));
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
@@ -1994,6 +2033,15 @@ let meshCentroid = [0, 0, 0];
             };
 
             function setMode(mode) {
+                // Preprocess and Edit Mesh both read a selection as faces to
+                // operate on; Edit Partition reads it as surface to move
+                // between bins.  Carrying one across that line would hand the
+                // new mode a selection made under the other's scope.
+                if ((panelMode === "editskel") !== (mode === "editskel")) {
+                    manualHighlightFaces.clear();
+                    rebuildManualHighlight();
+                    syncManualHighlight();
+                }
                 panelMode = mode;
                 editMode = mode === "editmesh";
                 for (const [m, id] of Object.entries(MODE_ROWS))
@@ -2030,6 +2078,13 @@ let meshCentroid = [0, 0, 0];
             // the lookup is the lasso's inner loop, over every face.
             let scopeMask = null; // null → unscoped, everything pickable
             let scopeOn = null;
+            // Edit Partition's scope, filled in by rebuildBinScopeMask.  Here
+            // rather than with the bin code because inScope is the one pick
+            // path both modes go through, and a scope it cannot see is a scope
+            // that silently does not apply.  Note `null` means the opposite of
+            // it does above: nothing pickable, since with no destination bin
+            // chosen there is nowhere for a lassoed vertex to go.
+            let binScopeMask = null;
 
             function componentHighlights() {
                 if (!currentAnnotations || !currentAnnotations.highlights) return [];
@@ -2055,7 +2110,14 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
+            // Two modes, two scopes, one pick path.  Edit Mesh bounds the
+            // lasso by component; Edit Partition bounds it by the destination
+            // bin's graph neighbours, which is a correctness constraint and
+            // not only a convenience — see binScopeMask.
             function inScope(faceIndex) {
+                if (panelMode === "editskel") {
+                    return binScopeMask !== null && binScopeMask[faceIndex] === 1;
+                }
                 return scopeMask === null || scopeMask[faceIndex] === 1;
             }
 
@@ -2391,6 +2453,25 @@ let meshCentroid = [0, 0, 0];
             let binOverlays = [];   // face patches, one per selected bin
             let binBalls = [];      // the radius each bin produces
             let selectedBins = [];  // [{node, faces, nVerts, radius, neighbors}]
+            let binMoveOverlay = null; // what a previewed edit would move
+
+            /** The bin a move would go into: the one selected first. */
+            function binDestination() {
+                return selectedBins.length ? selectedBins[0] : null;
+            }
+
+            function rebuildBinScopeMask() {
+                const dest = binDestination();
+                if (!dest || !dest.editable || !meshGeometry) {
+                    binScopeMask = null;
+                    return;
+                }
+                const nFaces = meshGeometry.getAttribute("position").count / 3;
+                binScopeMask = new Uint8Array(nFaces);
+                for (const f of dest.scopeFaces || []) {
+                    if (f < nFaces) binScopeMask[f] = 1;
+                }
+            }
 
             function refreshBinSkelSel() {
                 const sel = document.getElementById("binSkelSel");
@@ -2433,6 +2514,10 @@ let meshCentroid = [0, 0, 0];
                 binBalls = [];
                 selectedBins = [];
                 setBinReadout("Click a node, or the surface it owns, to select a bin.");
+                // The pending edit names the destination that just went away.
+                runBinCancel();
+                rebuildBinScopeMask();
+                refreshBinMoveRow();
             }
 
             function redrawBinBalls() {
@@ -2478,8 +2563,14 @@ let meshCentroid = [0, 0, 0];
                     const swatch = `<span class="chip-swatch" style="background:rgb(${
                         Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${
                         Math.round(c[2] * 255)})"></span>`;
+                    // Which bin the others land in has to be visible before
+                    // the edit, not inferable from click order afterwards.
+                    const role =
+                        i === 0
+                            ? " <i>keeps its id</i>"
+                            : ` <i>→ ${selectedBins[0].node}</i>`;
                     return (
-                        `${swatch}<b>node ${b.node}</b> — ` +
+                        `${swatch}<b>node ${b.node}</b>${role} — ` +
                         `${b.nVerts.toLocaleString()} verts, ` +
                         `${b.faces.length.toLocaleString()} faces, ` +
                         `r=${b.radius.toFixed(1)}, ` +
@@ -2536,6 +2627,172 @@ let meshCentroid = [0, 0, 0];
                 );
                 redrawBinBalls();
                 renderBinReadout();
+                rebuildBinScopeMask();
+                refreshBinMoveRow();
+            }
+
+            // ── Move surface into a bin ──────────────────────────────────
+            // Preview then apply, like Part A's reassignment.  The preview
+            // runs the real primitive on a copy server-side, so what the
+            // summary describes is the object that gets installed.
+
+            function clearBinMoveOverlay() {
+                if (!binMoveOverlay) return;
+                scene.remove(binMoveOverlay);
+                binMoveOverlay.geometry.dispose();
+                binMoveOverlay.material.dispose();
+                binMoveOverlay = null;
+            }
+
+            function setBinPending(on) {
+                document.getElementById("binPending").style.display = on
+                    ? "inline"
+                    : "none";
+                if (!on) {
+                    document.getElementById("binEditSummary").style.display = "none";
+                    clearBinMoveOverlay();
+                }
+            }
+
+            // Two verbs, and which one is available follows from the
+            // selection alone: clicking bins is a merge, and needs no lasso
+            // because the bins already *are* the selection; the lasso is only
+            // for naming part of a bin, which clicking cannot express.  Each
+            // button spells out what it would do, so "what merges into what"
+            // never has to be inferred from click order.
+            function refreshBinMoveRow() {
+                const merge = document.getElementById("binMergeBtn");
+                const move = document.getElementById("binMoveBtn");
+                const dest = binDestination();
+                const nFaces = manualHighlightFaces.size;
+                const donors = selectedBins.slice(1);
+
+                merge.disabled =
+                    !dest || !dest.editable || !donors.length ||
+                    donors.some((b) => !b.editable);
+                merge.textContent = donors.length
+                    ? `Merge ${donors.map((b) => b.node).join(", ")} → node ${dest.node}`
+                    : "Merge";
+
+                move.disabled = !dest || !dest.editable || nFaces === 0;
+                move.textContent = nFaces
+                    ? `Move ${nFaces.toLocaleString()} faces → node ${dest.node}`
+                    : "Move lassoed surface";
+            }
+
+            function renderBinEditSummary(d) {
+                const box = document.getElementById("binEditSummary");
+                const lines = [
+                    `<div><b>${d.moved.toLocaleString()}</b> verts → ` +
+                        `<b>node ${d.to}</b></div>`,
+                    `<div style="color:#888">from ${d.donors.length} bin` +
+                        `${d.donors.length === 1 ? "" : "s"}: ` +
+                        `${d.donors.join(", ")}</div>`,
+                    `<div style="color:#888">r ${d.radiusBefore.toFixed(1)} → ` +
+                        `${d.radiusAfter.toFixed(1)}</div>`,
+                ];
+                if (d.dropped.length)
+                    lines.push(
+                        `<div style="color:#e9a">${d.dropped.length} bin(s) emptied ` +
+                            `and dropped: ${d.dropped.join(", ")} — nodes after them ` +
+                            `are renumbered</div>`,
+                    );
+                // Reported, never refused: the skeletonizer itself leaves ~3%
+                // of bins fragmented, so this is a smell and not an error.
+                for (const f of d.fragmented)
+                    lines.push(
+                        `<div style="color:#e9a">node ${f.node} would be left in ` +
+                            `${f.pieces} pieces</div>`,
+                    );
+                if (d.ignoredFar)
+                    lines.push(
+                        `<div style="color:#888">${d.ignoredFar.toLocaleString()} verts ` +
+                            `ignored — owned by bins that do not touch node ${d.to}</div>`,
+                    );
+                if (d.ignoredUnowned)
+                    lines.push(
+                        `<div style="color:#888">${d.ignoredUnowned.toLocaleString()} ` +
+                            `verts ignored — soma, organelle or discarded surface</div>`,
+                    );
+                if (d.staleRadii.length)
+                    lines.push(
+                        `<div style="color:#e9a">cannot recompute: ` +
+                            `${d.staleRadii.join(", ")}</div>`,
+                    );
+                box.innerHTML = lines.join("");
+                box.style.display = "block";
+            }
+
+            async function previewBinEdit(btnId, payload) {
+                const dest = binDestination();
+                if (!dest) return;
+                const data = await _runAction(document.getElementById(btnId), () =>
+                    fetch("/bin_reassign_preview", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            name: document.getElementById("binSkelSel").value,
+                            to: dest.node,
+                            ...payload,
+                        }),
+                    }),
+                );
+                if (!data || !data.ok) {
+                    setBinPending(false);
+                    return;
+                }
+                clearBinMoveOverlay();
+                binMoveOverlay = makeFaceOverlay(data.movedFaces, [0.3, 1.0, 0.3], 0.9);
+                renderBinEditSummary(data);
+                setBinPending(true);
+            }
+
+            function runBinMove() {
+                if (manualHighlightFaces.size === 0) return;
+                return previewBinEdit("binMoveBtn", {
+                    faces: Array.from(manualHighlightFaces),
+                });
+            }
+
+            function runBinMerge() {
+                const donors = selectedBins.slice(1);
+                if (!donors.length) return;
+                return previewBinEdit("binMergeBtn", {
+                    fromNodes: donors.map((b) => b.node),
+                });
+            }
+
+            async function runBinApply() {
+                const data = await _runAction(
+                    document.getElementById("binApplyBtn"),
+                    () =>
+                        fetch("/bin_reassign_apply", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                name: document.getElementById("binSkelSel").value,
+                            }),
+                        }),
+                );
+                setBinPending(false);
+                if (!data || !data.ok) return;
+                // Dropping a bin renumbers everything after it, so every id
+                // held here may now name a different node.  Start clean.
+                manualHighlightFaces.clear();
+                rebuildManualHighlight();
+                syncManualHighlight();
+                clearBinSelection();
+            }
+
+            async function runBinCancel() {
+                await fetch("/bin_reassign_cancel", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        name: document.getElementById("binSkelSel").value,
+                    }),
+                }).catch(() => {});
+                setBinPending(false);
             }
 
             async function runMergeSelected() {
@@ -2958,9 +3215,10 @@ let meshCentroid = [0, 0, 0];
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify(payload),
                     }).catch(() => {});
-                // Every selection change funnels through here, so the rescue
-                // row cannot fall out of step with what is selected.
+                // Every selection change funnels through here, so neither row
+                // can fall out of step with what is selected.
                 refreshRescueRow();
+                refreshBinMoveRow();
             }
 
             // ── Transform (edit mesh) ─────────────────────────────────────

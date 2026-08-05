@@ -490,3 +490,74 @@ def test_prune_neurites_survives_a_centerline_radius(bin_mesh):
     assert len(out.nodes) < n_before, "the merge branch must actually run"
     assert out.radii["centerline"][0] == cl_before, "left alone, not corrupted"
     assert dx.check_bins(out)
+
+
+# ── merging must not cut the tree ────────────────────────────────────
+#
+# An emptied bin is absorbed, not deleted.  Deleting its edges instead
+# strands every neighbour it was holding on to, which is the failure the
+# whole manual-editing effort exists to avoid.
+
+
+def _n_components(skel):
+    """Connected components of the skeleton graph."""
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(skel.nodes)
+    e = np.asarray(skel.edges, dtype=np.int64)
+    adj = sp.coo_matrix(
+        (np.ones(len(e), dtype=np.int8), (e[:, 0], e[:, 1])), shape=(n, n)
+    )
+    return connected_components(adj, directed=False)[0]
+
+
+def _a_node_between_two_others(skel):
+    """A node with >=2 neighbours, so absorbing it could strand one."""
+    e = np.asarray(skel.edges)
+    for n in range(1, len(skel.nodes)):
+        nbrs = np.unique(e[(e[:, 0] == n) | (e[:, 1] == n)])
+        nbrs = nbrs[nbrs != n]
+        if nbrs.size >= 2 and 0 not in nbrs.tolist():
+            return int(n), [int(x) for x in nbrs]
+    pytest.skip("fixture has no interior node to absorb")
+
+
+def test_absorbing_a_node_contracts_its_edges_instead_of_dropping_them(
+    bin_skel, bin_mesh
+):
+    src, nbrs = _a_node_between_two_others(bin_skel)
+    dst = nbrs[0]
+    others = [n for n in nbrs if n != dst]
+
+    before = _n_components(bin_skel)
+    out = post.reassign_verts(bin_skel, bin_skel.node2verts[src], dst, mesh=bin_mesh)
+    assert out["dropped"] == [src], "the emptied bin should have been dropped"
+
+    old2new = out["old2new"]
+    new_dst = int(old2new[dst])
+    e = np.asarray(bin_skel.edges)
+    survivors = set(np.unique(e[(e[:, 0] == new_dst) | (e[:, 1] == new_dst)]).tolist())
+    for o in others:
+        assert int(old2new[o]) in survivors, (
+            f"node {o} lost its link when {src} was absorbed into {dst}"
+        )
+    assert _n_components(bin_skel) == before, "the merge split the skeleton"
+
+
+def test_absorbing_a_leaf_leaves_no_self_loop(bin_skel, bin_mesh):
+    e = np.asarray(bin_skel.edges)
+    leaf = None
+    for n in range(1, len(bin_skel.nodes)):
+        nbrs = np.unique(e[(e[:, 0] == n) | (e[:, 1] == n)])
+        nbrs = nbrs[nbrs != n]
+        if nbrs.size == 1 and int(nbrs[0]) != 0:
+            leaf, host = int(n), int(nbrs[0])
+            break
+    if leaf is None:
+        pytest.skip("fixture has no leaf to absorb")
+
+    post.reassign_verts(bin_skel, bin_skel.node2verts[leaf], host, mesh=bin_mesh)
+    e2 = np.asarray(bin_skel.edges)
+    assert not (e2[:, 0] == e2[:, 1]).any(), "contraction left a self-loop"
+    assert len(np.unique(e2, axis=0)) == len(e2), "contraction left a duplicate edge"

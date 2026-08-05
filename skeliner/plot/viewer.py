@@ -3331,6 +3331,295 @@ def _create_app(
             sstate["_face_owner"] = (mesh, skel, dx.face_owner(skel, mesh))
         return sstate["_face_owner"][2]
 
+    def _bin_neighbors(skel, node: int) -> np.ndarray:
+        """Nodes sharing an edge with *node*."""
+        edges = np.asarray(skel.edges)
+        touching = edges[(edges[:, 0] == node) | (edges[:, 1] == node)]
+        nbrs = np.unique(touching)
+        return nbrs[nbrs != node]
+
+    def _bin_edit_target(body):
+        """Resolve and check the skeleton a bin edit names.
+
+        Returns ``(name, sstate, skel, error_response)``; only one of the
+        last two is ever meaningful.
+        """
+        name = body.get("name")
+        if not name or name not in skeleton_states:
+            return (
+                None,
+                None,
+                None,
+                JSONResponse(
+                    {"ok": False, "error": "No such skeleton"}, status_code=400
+                ),
+            )
+        sstate = skeleton_states[name]
+        skel = sstate.get("skeleton")
+        if skel is None or skel.node2verts is None:
+            return (
+                None,
+                None,
+                None,
+                JSONResponse(
+                    {"ok": False, "error": "Skeleton carries no mesh data"},
+                    status_code=400,
+                ),
+            )
+        if mesh_state["mesh"] is None:
+            return (
+                None,
+                None,
+                None,
+                JSONResponse({"ok": False, "error": "No mesh loaded"}, status_code=400),
+            )
+        if _skel_is_stale(sstate):
+            return (
+                None,
+                None,
+                None,
+                JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"'{name}' was built from a different mesh — its "
+                        "vertex maps no longer match. Re-skeletonize first.",
+                    },
+                    status_code=409,
+                ),
+            )
+        return name, sstate, skel, None
+
+    async def bin_reassign_preview(request):
+        """Work out what moving the selected surface into a bin would do.
+
+        Runs the real :func:`skeliner.post.reassign_verts` on a copy and keeps
+        that copy, so committing installs the very skeleton this described
+        rather than a second computation of it.  The copy costs ~100 ms on the
+        largest cell measured, which is the price of the two never disagreeing.
+
+        The surface to move is named one of two ways, because the two
+        gestures that produce it are different in kind:
+
+        ``faces``
+            What a lasso picked.  The lasso picks *faces*; a node owns
+            *vertices*, so a selected face contributes its three, and the
+            donors are restricted to the destination's graph neighbours —
+            see :meth:`get_bin`.
+        ``fromNodes``
+            Whole bins, picked by clicking them.  This is the merge, and it
+            needs no lasso: the bins are already the selection.  Merging is
+            direction-free — the union of two bins has the same centroid and
+            the same radii whichever id survives — so *to* only decides which
+            node id remains.
+        """
+        import copy as _copy
+
+        from skeliner import dx, post
+
+        body = await request.json()
+        name, sstate, skel, err = _bin_edit_target(body)
+        if err is not None:
+            return err
+        mesh = mesh_state["mesh"]
+
+        faces = np.asarray(body.get("faces") or [], dtype=np.int64)
+        from_nodes = np.asarray(body.get("fromNodes") or [], dtype=np.int64)
+        if faces.size == 0 and from_nodes.size == 0:
+            return JSONResponse(
+                {"ok": False, "error": "No faces selected"}, status_code=400
+            )
+        if faces.size and (faces.min() < 0 or faces.max() >= len(mesh.faces)):
+            return JSONResponse(
+                {"ok": False, "error": "face id out of range"}, status_code=400
+            )
+        if from_nodes.size and (
+            from_nodes.min() < 0 or from_nodes.max() >= len(skel.nodes)
+        ):
+            return JSONResponse(
+                {"ok": False, "error": "node id out of range"}, status_code=400
+            )
+
+        to = body.get("to")
+        if to is None:
+            return JSONResponse(
+                {"ok": False, "error": "No destination bin"}, status_code=400
+            )
+        to = int(to)
+        if not 0 <= to < len(skel.nodes):
+            return JSONResponse(
+                {"ok": False, "error": "node id out of range"}, status_code=400
+            )
+        if to == 0:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "node 0 is the soma, not a bin — its vertices "
+                    "belong to the components. Edit Mesh owns those.",
+                },
+                status_code=400,
+            )
+
+        owner = np.full(len(mesh.vertices), -1, dtype=np.int64)
+        for nid, owned in enumerate(skel.node2verts):
+            owned = np.asarray(owned, dtype=np.int64)
+            if nid and owned.size:
+                owner[owned] = nid
+
+        n_unowned = n_far = 0
+        if from_nodes.size:
+            # Merging bins that do not touch would make a "bin" that is not a
+            # cross-section of anything, with a centroid between the places it
+            # draws from — the same reason the lasso is bounded below.
+            merged = set(int(n) for n in from_nodes) | {to}
+            if 0 in merged:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "node 0 is the soma, not a bin — it cannot "
+                        "take part in a merge.",
+                    },
+                    status_code=400,
+                )
+            seen, stack = {to}, [to]
+            while stack:
+                for nb in _bin_neighbors(skel, stack.pop()):
+                    nb = int(nb)
+                    if nb in merged and nb not in seen:
+                        seen.add(nb)
+                        stack.append(nb)
+            stranded = sorted(merged - seen)
+            if stranded:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"node(s) {', '.join(map(str, stranded))} do not "
+                        f"connect to node {to} through the selection — the bins "
+                        "in a merge must form one connected piece.",
+                    },
+                    status_code=400,
+                )
+            moving = np.unique(
+                np.concatenate(
+                    [
+                        np.asarray(skel.node2verts[int(n)], dtype=np.int64)
+                        for n in from_nodes
+                        if int(n) != to
+                    ]
+                    or [np.empty(0, dtype=np.int64)]
+                )
+            )
+        else:
+            picked = np.unique(np.asarray(mesh.faces)[faces])
+            allowed = np.append(_bin_neighbors(skel, to), to)
+            own = owner[picked]
+            moving = picked[np.isin(own, allowed) & (own != to)]
+            n_unowned = int((own < 0).sum())
+            n_far = int((~np.isin(own, allowed) & (own >= 0)).sum())
+
+        if moving.size == 0:
+            why = "already owned by that bin"
+            if n_far:
+                why = (
+                    f"owned by bins that do not touch node {to} — a bin may "
+                    "only take surface from its neighbours"
+                )
+            elif n_unowned:
+                why = "soma, organelle or discarded surface, which Edit Mesh owns"
+            return JSONResponse(
+                {"ok": False, "error": f"Nothing to move: the selection is {why}"},
+                status_code=400,
+            )
+
+        before = dx._fragmented_bins(skel.node2verts, mesh)
+        after_skel = _copy.deepcopy(skel)
+        result = post.reassign_verts(after_skel, moving, to, mesh=mesh)
+        after = dx._fragmented_bins(after_skel.node2verts, mesh)
+
+        # Report only bins this edit *made* worse: 20 of 582 bins on a real
+        # cell are already fragmented, and the skeletonizer produced them.
+        old2new = result.get("old2new")
+        touched = [to, *result["donors"]]
+        broke = []
+        for nid in touched:
+            new_id = nid if old2new is None else int(old2new[nid])
+            if new_id < 0:
+                continue
+            now = after.get(new_id, 1)
+            if now > before.get(nid, 1):
+                broke.append({"node": new_id, "pieces": now})
+
+        moved_faces = np.flatnonzero(
+            np.isin(np.asarray(mesh.faces), moving).sum(axis=1) >= 2
+        )
+        summary = {
+            "to": to,
+            "moved": int(result["moved"]),
+            "donors": [int(d) for d in result["donors"]],
+            "dropped": [int(d) for d in result["dropped"]],
+            "staleRadii": list(result["stale_radii"]),
+            "ignoredUnowned": n_unowned,
+            "ignoredFar": n_far,
+            "fragmented": broke,
+            "radiusBefore": float(skel.r[to]),
+            "radiusAfter": float(
+                after_skel.r[to if old2new is None else int(old2new[to])]
+            ),
+            "movedFaces": moved_faces.tolist(),
+        }
+        sstate["pending_bin_edit"] = {
+            "base": skel,
+            "mesh": mesh,
+            "skeleton": after_skel,
+            "summary": summary,
+        }
+        return JSONResponse({"ok": True, **summary})
+
+    async def bin_reassign_apply(request):
+        """Install the previewed skeleton."""
+        body = await request.json()
+        name = body.get("name")
+        sstate = skeleton_states.get(name or "")
+        pending = sstate.get("pending_bin_edit") if sstate else None
+        if pending is None:
+            return JSONResponse(
+                {"ok": False, "error": "Nothing to apply — preview first"},
+                status_code=400,
+            )
+        # The preview names vertices of one mesh and one partition.  If
+        # either has been replaced since, applying it would edit something
+        # else — the same identity check staleness uses.
+        if pending["mesh"] is not mesh_state["mesh"] or pending[
+            "base"
+        ] is not sstate.get("skeleton"):
+            sstate["pending_bin_edit"] = None
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "The mesh or the skeleton changed since the "
+                    "preview — draw the selection again.",
+                },
+                status_code=409,
+            )
+
+        summary = pending["summary"]
+        # A new object, so the cached face-owner map invalidates by identity.
+        sstate["skeleton"] = pending["skeleton"]
+        sstate["pending_bin_edit"] = None
+        await _rebroadcast_skeletons()
+        note = ""
+        if summary["dropped"]:
+            note = f", {len(summary['dropped'])} node(s) dropped and renumbered"
+        await _log(f"Bin edit: {summary['moved']:,} verts → node {summary['to']}{note}")
+        return JSONResponse({"ok": True, **summary})
+
+    async def bin_reassign_cancel(request):
+        """Drop the pending bin edit."""
+        body = await request.json()
+        sstate = skeleton_states.get(body.get("name") or "")
+        if sstate is not None:
+            sstate["pending_bin_edit"] = None
+        return JSONResponse({"ok": True})
+
     async def get_bin(request):
         """The surface one skeleton node owns.
 
@@ -3401,10 +3690,12 @@ def _create_app(
             )
 
         faces = np.flatnonzero(owner == node)
-        edges = np.asarray(skel.edges)
-        touching = edges[(edges[:, 0] == node) | (edges[:, 1] == node)]
-        nbrs = np.unique(touching)
-        nbrs = nbrs[nbrs != node]
+        nbrs = _bin_neighbors(skel, node)
+        # Surface this bin may legitimately take from.  Taking vertices from a
+        # distant bin would build a "bin" that is not a cross-section of
+        # anything, with a centroid between the two places it draws from, so
+        # the donors are the graph neighbours and nothing else.
+        scope = np.flatnonzero(np.isin(owner, np.append(nbrs, node)))
         return JSONResponse(
             {
                 "ok": True,
@@ -3413,6 +3704,7 @@ def _create_app(
                 "nVerts": int(len(skel.node2verts[node])),
                 "radius": float(skel.r[node]),
                 "neighbors": nbrs.tolist(),
+                "scopeFaces": scope.tolist(),
                 # node 0's "bin" is soma.verts, not a bin: it is assigned
                 # wholesale by the soma stitch and is Edit Mesh's to change.
                 "editable": node != 0,
@@ -3801,6 +4093,9 @@ def _create_app(
             ),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
             Route("/bin", get_bin, methods=["POST"]),
+            Route("/bin_reassign_preview", bin_reassign_preview, methods=["POST"]),
+            Route("/bin_reassign_apply", bin_reassign_apply, methods=["POST"]),
+            Route("/bin_reassign_cancel", bin_reassign_cancel, methods=["POST"]),
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],

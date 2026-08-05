@@ -696,3 +696,306 @@ def test_compacting_carries_the_override_through_the_reindex(rescue_client):
 
     # And the override still does its job on the renumbered mesh.
     assert client.post("/break_up_mesh").json()["nDiscarded"] == 0
+
+
+# ── /bin_reassign_* ───────────────────────────────────────────────────
+#
+# Moving surface from one bin into another.  The preview runs the real
+# primitive on a copy and keeps it, so these check both that the summary
+# is right and that applying installs the very thing it described.
+
+
+def _skel_state_of(app, name):
+    for route in app.routes:
+        fn = getattr(route, "endpoint", None)
+        for cell in getattr(fn, "__closure__", None) or ():
+            val = cell.cell_contents
+            if isinstance(val, dict) and name in val and "skeleton" in val[name]:
+                return val[name]
+    raise AssertionError("could not reach the skeleton state")
+
+
+def _a_donor_face(client, name, node):
+    """A face owned by one of *node*'s graph neighbours."""
+    bin_ = client.post("/bin", json={"name": name, "node": node}).json()
+    assert bin_["neighbors"], "fixture node has no neighbour to take from"
+    nbr = bin_["neighbors"][0]
+    nbr_bin = client.post("/bin", json={"name": name, "node": nbr}).json()
+    return nbr, nbr_bin["faces"]
+
+
+def test_the_scope_is_the_bin_and_its_neighbours(bin_client):
+    client, name, mesh, skel = bin_client
+    body = client.post("/bin", json={"name": name, "node": 3}).json()
+
+    allowed = set(body["neighbors"]) | {3}
+    owner = _dx().face_owner(skel, mesh)
+    for f in body["scopeFaces"]:
+        assert int(owner[f]) in allowed
+    # and it is not merely the bin itself
+    assert set(body["scopeFaces"]) > set(body["faces"])
+
+
+def test_a_preview_moves_nothing_until_applied(bin_client):
+    client, name, mesh, skel = bin_client
+    nbr, faces = _a_donor_face(client, name, 3)
+    before = len(skel.node2verts[3])
+
+    r = client.post(
+        "/bin_reassign_preview",
+        json={"name": name, "faces": faces[:2], "to": 3},
+    )
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    assert body["moved"] > 0
+    assert body["donors"] == [nbr]
+    assert len(skel.node2verts[3]) == before, "preview must not commit"
+
+
+def test_applying_installs_exactly_what_was_previewed(bin_client):
+    client, name, mesh, _ = bin_client
+    nbr, faces = _a_donor_face(client, name, 3)
+    n_before = client.post("/bin", json={"name": name, "node": 3}).json()["nVerts"]
+
+    preview = client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": faces[:2], "to": 3}
+    ).json()
+    applied = client.post("/bin_reassign_apply", json={"name": name}).json()
+    assert applied["ok"]
+    assert applied["moved"] == preview["moved"]
+    assert applied["radiusAfter"] == preview["radiusAfter"]
+
+    live = _skel_state_of(client.app, name)["skeleton"]
+    assert float(live.r[3]) == pytest.approx(preview["radiusAfter"])
+    after = client.post("/bin", json={"name": name, "node": 3}).json()
+    assert after["nVerts"] == n_before + preview["moved"]
+
+
+def test_a_bin_may_not_take_from_a_distant_bin(bin_client):
+    """The scope is a correctness constraint, so the server enforces it too."""
+    client, name, mesh, skel = bin_client
+    body = client.post("/bin", json={"name": name, "node": 1}).json()
+    far = [
+        n for n in range(2, len(skel.nodes)) if n not in body["neighbors"] and n != 1
+    ]
+    assert far, "fixture has no non-neighbour to test with"
+    far_faces = client.post("/bin", json={"name": name, "node": far[-1]}).json()[
+        "faces"
+    ]
+
+    r = client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": far_faces, "to": 1}
+    )
+    assert r.status_code == 400
+    assert "do not touch" in r.json()["error"]
+
+
+def test_node_0_is_refused_as_a_destination(bin_client):
+    client, name, _, _ = bin_client
+    faces = client.post("/bin", json={"name": name, "node": 2}).json()["faces"]
+    r = client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": faces, "to": 0}
+    )
+    assert r.status_code == 400
+    assert "soma" in r.json()["error"]
+
+
+@pytest.mark.parametrize(
+    "body, code, expected",
+    [
+        ({"name": "nope", "faces": [0], "to": 1}, 400, "No such skeleton"),
+        ({"faces": [], "to": 1}, 400, "No faces selected"),
+        ({"faces": [0]}, 400, "No destination bin"),
+        ({"faces": [10**9], "to": 1}, 400, "face id out of range"),
+        ({"faces": [0], "to": 10**6}, 400, "node id out of range"),
+    ],
+)
+def test_bin_reassign_rejects_bad_input(bin_client, body, code, expected):
+    client, name, _, _ = bin_client
+    body = {"name": name, **body} if "name" not in body else body
+    r = client.post("/bin_reassign_preview", json=body)
+    assert r.status_code == code
+    assert expected in r.json()["error"]
+
+
+def test_applying_without_a_preview_is_refused(bin_client):
+    client, name, _, _ = bin_client
+    r = client.post("/bin_reassign_apply", json={"name": name})
+    assert r.status_code == 400
+    assert "preview first" in r.json()["error"]
+
+
+def test_cancel_retires_the_bin_preview(bin_client):
+    client, name, _, _ = bin_client
+    _, faces = _a_donor_face(client, name, 3)
+    client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": faces[:2], "to": 3}
+    )
+    assert client.post("/bin_reassign_cancel", json={"name": name}).json()["ok"]
+    r = client.post("/bin_reassign_apply", json={"name": name})
+    assert r.status_code == 400
+
+
+def test_a_preview_does_not_survive_the_mesh_changing(bin_client):
+    """It names vertices of one mesh; against another it would move others."""
+    client, name, mesh, _ = bin_client
+    _, faces = _a_donor_face(client, name, 3)
+    client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": faces[:2], "to": 3}
+    )
+
+    _mesh_state_of(client.app)["mesh"] = mesh.copy()
+
+    r = client.post("/bin_reassign_apply", json={"name": name})
+    assert r.status_code == 409
+    assert "changed since the preview" in r.json()["error"]
+
+
+def test_the_owner_cache_follows_an_applied_edit(bin_client):
+    """The cache compares by identity, so the edit must install a new object."""
+    client, name, _, _ = bin_client
+    nbr, faces = _a_donor_face(client, name, 3)
+    before = client.post("/bin", json={"name": name, "node": nbr}).json()["faces"]
+
+    client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": faces[:2], "to": 3}
+    )
+    client.post("/bin_reassign_apply", json={"name": name})
+
+    after = client.post("/bin", json={"name": name, "node": nbr}).json()["faces"]
+    assert after != before, "the cache served the pre-edit partition"
+
+
+def test_moving_a_whole_bin_drops_it_and_renumbers(bin_client):
+    """The merge verb: a bin that gives up everything has no position or
+    radius left, so it is removed and the nodes after it shift down."""
+    client, name, _, _ = bin_client
+    nbr, faces = _a_donor_face(client, name, 3)
+    n_nodes = len(_skel_state_of(client.app, name)["skeleton"].nodes)
+
+    preview = client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": faces, "to": 3}
+    ).json()
+    assert preview["dropped"] == [nbr], preview
+
+    client.post("/bin_reassign_apply", json={"name": name})
+    live = _skel_state_of(client.app, name)["skeleton"]
+    assert len(live.nodes) == n_nodes - 1
+
+
+def test_the_preview_reports_what_it_could_not_recompute(bin_client):
+    client, name, _, _ = bin_client
+    _, faces = _a_donor_face(client, name, 3)
+    body = client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": faces[:2], "to": 3}
+    ).json()
+    # Shapes the panel renders unconditionally; all four must always be there.
+    assert isinstance(body["staleRadii"], list)
+    assert isinstance(body["fragmented"], list)
+    assert isinstance(body["movedFaces"], list) and body["movedFaces"]
+    assert body["ignoredUnowned"] >= 0 and body["ignoredFar"] >= 0
+
+
+def test_merging_bins_needs_no_lasso(bin_client):
+    """Clicking the bins *is* the selection; the merge takes them whole."""
+    client, name, _, _ = bin_client
+    nbr, _ = _a_donor_face(client, name, 3)
+    donor_verts = client.post("/bin", json={"name": name, "node": nbr}).json()["nVerts"]
+
+    r = client.post(
+        "/bin_reassign_preview", json={"name": name, "fromNodes": [nbr], "to": 3}
+    )
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    assert body["moved"] == donor_verts, "a merge takes the whole bin"
+    assert body["dropped"] == [nbr]
+
+
+def test_a_merge_keeps_the_skeleton_in_one_piece(bin_client):
+    """The absorbed node's edges are contracted onto the survivor, so no
+    neighbour it was holding gets stranded."""
+    client, name, _, _ = bin_client
+    live = _skel_state_of(client.app, name)["skeleton"]
+    e = np.asarray(live.edges)
+
+    interior = None
+    for n in range(1, len(live.nodes)):
+        nbrs = np.unique(e[(e[:, 0] == n) | (e[:, 1] == n)])
+        nbrs = nbrs[nbrs != n]
+        if nbrs.size >= 2 and 0 not in nbrs.tolist():
+            interior, nbrs = int(n), [int(x) for x in nbrs]
+            break
+    assert interior is not None, "fixture has no interior node to absorb"
+
+    client.post(
+        "/bin_reassign_preview",
+        json={"name": name, "fromNodes": [interior], "to": nbrs[0]},
+    )
+    assert client.post("/bin_reassign_apply", json={"name": name}).json()["ok"]
+
+    after = _skel_state_of(client.app, name)["skeleton"]
+    assert _n_components_of(after) == 1, "the merge broke the skeleton apart"
+
+
+def _n_components_of(skel):
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(skel.nodes)
+    e = np.asarray(skel.edges, dtype=np.int64)
+    adj = sp.coo_matrix(
+        (np.ones(len(e), dtype=np.int8), (e[:, 0], e[:, 1])), shape=(n, n)
+    )
+    return connected_components(adj, directed=False)[0]
+
+
+def test_bins_that_do_not_touch_cannot_be_merged(bin_client):
+    client, name, _, skel = bin_client
+    body = client.post("/bin", json={"name": name, "node": 1}).json()
+    far = [n for n in range(2, len(skel.nodes)) if n not in body["neighbors"]]
+    assert far, "fixture has no non-neighbour to test with"
+
+    r = client.post(
+        "/bin_reassign_preview", json={"name": name, "fromNodes": [far[-1]], "to": 1}
+    )
+    assert r.status_code == 400
+    assert "connected piece" in r.json()["error"]
+
+
+def test_a_chain_of_bins_merges_even_though_the_ends_do_not_touch(bin_client):
+    """Connectivity is checked *through the selection*, so a-b-c works."""
+    client, name, _, skel = bin_client
+    e = np.asarray(skel.edges)
+
+    chain = None
+    for b in range(1, len(skel.nodes)):
+        nbrs = np.unique(e[(e[:, 0] == b) | (e[:, 1] == b)])
+        nbrs = [int(x) for x in nbrs if x != b and x != 0]
+        if len(nbrs) >= 2:
+            a, c = nbrs[0], nbrs[1]
+            if (
+                c
+                not in client.post("/bin", json={"name": name, "node": a}).json()[
+                    "neighbors"
+                ]
+            ):
+                chain = (a, int(b), c)
+                break
+    if chain is None:
+        pytest.skip("fixture has no a-b-c chain with a and c apart")
+
+    a, b, c = chain
+    r = client.post(
+        "/bin_reassign_preview", json={"name": name, "fromNodes": [b, c], "to": a}
+    )
+    assert r.status_code == 200, r.json()
+    assert sorted(r.json()["dropped"]) == sorted([b, c])
+
+
+def test_merging_with_the_soma_is_refused(bin_client):
+    client, name, _, _ = bin_client
+    r = client.post(
+        "/bin_reassign_preview", json={"name": name, "fromNodes": [0], "to": 1}
+    )
+    assert r.status_code == 400
+    assert "soma" in r.json()["error"]
