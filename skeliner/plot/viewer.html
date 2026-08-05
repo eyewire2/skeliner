@@ -283,7 +283,10 @@
                 margin-left: 6px;
                 padding-left: 4px;
             }
-            #scopeChips .chip-swatch {
+            /* Not scoped to #scopeChips: the bin readout uses the same
+               swatch, and under the narrower selector it rendered as a
+               zero-sized span — a colour key with no colour in it. */
+            .chip-swatch {
                 display: inline-block;
                 width: 8px;
                 height: 8px;
@@ -409,9 +412,9 @@
                         id="modeSkelBtn"
                         class="mode-btn"
                         style="margin-left: 4px"
-                        title="Edit how the neurites are partitioned into bins — needs Skeletonize first"
+                        title="Edit the bins the neurites are partitioned into, and the edges between them — needs Skeletonize first"
                     >
-                        Edit Partition
+                        Edit Skeleton
                     </button>
                     <span style="color: #888; margin-left: 12px">Path:</span>
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
@@ -486,7 +489,7 @@
 
             <div id="editskel-rows" style="display: none">
                 <div style="white-space: nowrap; margin-top: 4px">
-                    <span style="color: #888">Bin:</span>
+                    <span style="color: #888">Skeleton:</span>
                     <select id="binSkelSel" style="font-size: 11px; margin-left: 4px"></select>
                     <label
                         style="margin-left: 10px"
@@ -498,8 +501,10 @@
                     <button id="binClearBtn" style="margin-left: 10px">Clear</button>
                 </div>
                 <div style="white-space: nowrap; margin-top: 4px">
+                    <span style="color: #888">Bins:</span>
                     <button
                         id="binMergeBtn"
+                        style="margin-left: 4px"
                         disabled
                         title="Select two or more bins — the first one you click keeps its id. Merging is direction-free: the union has the same centre and radius whichever way round it goes."
                     >
@@ -513,9 +518,18 @@
                     >
                         Move lassoed surface
                     </button>
-                    <span id="binPending" style="display: none; margin-left: 12px">
-                        <button id="binApplyBtn">Apply</button>
-                        <button id="binCancelBtn" style="margin-left: 4px">Cancel</button>
+                    <span style="color: #888; margin-left: 12px">Edge:</span>
+                    <button
+                        id="edgeEditBtn"
+                        style="margin-left: 4px"
+                        disabled
+                        title="Select exactly two bins. Which verb this is follows from the two graphs: an edge the tree already has can be clipped, one the surface supports can be restored, one it does not is a graft across a gap."
+                    >
+                        Select two nodes
+                    </button>
+                    <span id="skelPending" style="display: none; margin-left: 12px">
+                        <button id="skelApplyBtn">Apply</button>
+                        <button id="skelCancelBtn" style="margin-left: 4px">Cancel</button>
                     </span>
                 </div>
                 <div
@@ -525,7 +539,7 @@
                     Click a node, or the surface it owns, to select a bin.
                 </div>
                 <div
-                    id="binEditSummary"
+                    id="skelEditSummary"
                     style="
                         display: none;
                         margin-top: 4px;
@@ -965,13 +979,17 @@ let meshCentroid = [0, 0, 0];
                 document
                     .getElementById("modeSkelBtn")
                     .addEventListener("click", () => setMode("editskel"));
-                document.getElementById("binSkelSel").addEventListener("change", clearBinSelection);
+                document.getElementById("binSkelSel").addEventListener("change", () => {
+                    clearBinSelection();
+                    fetchEdgeSupport();
+                });
                 document.getElementById("binClearBtn").addEventListener("click", clearBinSelection);
                 document.getElementById("binShowBall").addEventListener("change", redrawBinBalls);
                 document.getElementById("binMoveBtn").addEventListener("click", runBinMove);
                 document.getElementById("binMergeBtn").addEventListener("click", runBinMerge);
-                document.getElementById("binApplyBtn").addEventListener("click", runBinApply);
-                document.getElementById("binCancelBtn").addEventListener("click", runBinCancel);
+                document.getElementById("edgeEditBtn").addEventListener("click", runEdgeEdit);
+                document.getElementById("skelApplyBtn").addEventListener("click", runSkelApply);
+                document.getElementById("skelCancelBtn").addEventListener("click", runSkelCancel);
                 document.getElementById("scopeAllBtn").addEventListener("click", () => setScopeAll(true));
                 document.getElementById("scopeNoneBtn").addEventListener("click", () => setScopeAll(false));
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
@@ -1480,6 +1498,17 @@ let meshCentroid = [0, 0, 0];
 
                 if (!meshObj) fitCamera();
                 updateLoadedPanel();
+
+                // Every way the skeleton can change — an edit applied, a
+                // re-skeletonize, an undo restoring currency — arrives here,
+                // so this is the one place that has to notice.  Which pairs
+                // the tree already has is a function of this layer's edges, so
+                // it is re-asked when *this* layer is the one being looked at.
+                if (panelMode === "editskel") {
+                    refreshBinSkelSel();
+                    if (document.getElementById("binSkelSel").value === name)
+                        fetchEdgeSupport();
+                }
             }
 
             function buildTubes(name) {
@@ -1674,10 +1703,18 @@ let meshCentroid = [0, 0, 0];
                     const radius = skelNodeRadii ? skelNodeRadii[nodeIndex] : null;
                     const key = `${bestSkelName}:${nodeIndex}`;
 
-                    // In Edit Partition a node is shown as the surface it
+                    // In Edit Skeleton a node is shown as the surface it
                     // owns, not as a ball: the bin is what a node actually is.
                     if (panelMode === "editskel") {
-                        document.getElementById("binSkelSel").value = bestSkelName;
+                        const sel = document.getElementById("binSkelSel");
+                        // Node ids mean different things in different layers,
+                        // so a click that switches layer starts a new
+                        // selection rather than adding to the old one.
+                        if (sel.value !== bestSkelName) {
+                            sel.value = bestSkelName;
+                            clearBinSelection();
+                            fetchEdgeSupport();
+                        }
                         selectBin(nodeIndex);
                         return;
                     }
@@ -2034,7 +2071,7 @@ let meshCentroid = [0, 0, 0];
 
             function setMode(mode) {
                 // Preprocess and Edit Mesh both read a selection as faces to
-                // operate on; Edit Partition reads it as surface to move
+                // operate on; Edit Skeleton reads it as surface to move
                 // between bins.  Carrying one across that line would hand the
                 // new mode a selection made under the other's scope.
                 if ((panelMode === "editskel") !== (mode === "editskel")) {
@@ -2057,8 +2094,15 @@ let meshCentroid = [0, 0, 0];
                 if (editMode) renderScopeChips();
                 else cancelReassign();
 
-                if (mode === "editskel") refreshBinSkelSel();
-                else clearBinSelection();
+                if (mode === "editskel") {
+                    refreshBinSkelSel();
+                    // The edge verb cannot be named without knowing which
+                    // pairs the surface supports, so this is not optional.
+                    fetchEdgeSupport();
+                } else {
+                    clearBinSelection();
+                    clearEdgeSupport();
+                }
             }
 
             // ── Selection scope ──────────────────────────────────────────
@@ -2078,7 +2122,7 @@ let meshCentroid = [0, 0, 0];
             // the lookup is the lasso's inner loop, over every face.
             let scopeMask = null; // null → unscoped, everything pickable
             let scopeOn = null;
-            // Edit Partition's scope, filled in by rebuildBinScopeMask.  Here
+            // Edit Skeleton's scope, filled in by rebuildBinScopeMask.  Here
             // rather than with the bin code because inScope is the one pick
             // path both modes go through, and a scope it cannot see is a scope
             // that silently does not apply.  Note `null` means the opposite of
@@ -2111,7 +2155,7 @@ let meshCentroid = [0, 0, 0];
             }
 
             // Two modes, two scopes, one pick path.  Edit Mesh bounds the
-            // lasso by component; Edit Partition bounds it by the destination
+            // lasso by component; Edit Skeleton bounds it by the destination
             // bin's graph neighbours, which is a correctness constraint and
             // not only a convenience — see binScopeMask.
             function inScope(faceIndex) {
@@ -2436,7 +2480,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("reassignSummary").style.display = "none";
             }
 
-            // ── Bin selection (Edit Partition) ───────────────────────────
+            // ── Bin selection (Edit Skeleton) ───────────────────────────
             // A node *is* the set of mesh vertices it owns: its position is
             // their centroid and every radius is an aggregate over them.  So
             // in this mode a selected node renders as the surface it owns
@@ -2514,10 +2558,11 @@ let meshCentroid = [0, 0, 0];
                 binBalls = [];
                 selectedBins = [];
                 setBinReadout("Click a node, or the surface it owns, to select a bin.");
-                // The pending edit names the destination that just went away.
-                runBinCancel();
+                // The pending edit names the bins that just went away.
+                runSkelCancel();
                 rebuildBinScopeMask();
                 refreshBinMoveRow();
+                refreshEdgeRow();
             }
 
             function redrawBinBalls() {
@@ -2629,6 +2674,160 @@ let meshCentroid = [0, 0, 0];
                 renderBinReadout();
                 rebuildBinScopeMask();
                 refreshBinMoveRow();
+                refreshEdgeRow();
+            }
+
+            // ── Edge editing ─────────────────────────────────────────────
+            // `edges` is the only thing on a Skeleton that nothing else is
+            // derived from, so it is the only part that can honestly be
+            // edited directly — and the only part whose edit does not
+            // survive a re-skeletonize.
+            //
+            // The gesture is the one already there: two selected bins name
+            // the node pair.  Which of the three verbs that pair is follows
+            // from the two graphs, never from click order.
+            //
+            // There is deliberately no list of edges to look at.  An earlier
+            // version ranked the dropped adjacency into "loops" by how far the
+            // tree detours around them; measured, that ranks arbor *density*,
+            // not defects — a tight axon tuft and a fused mesh look the same
+            // from here — so the surface support is a classifier only.
+            let surfaceEdges = null;    // Set("u,v") the mesh joins but T does not
+            let edgePreviewOverlay = null; // what a previewed edit would do
+
+            /** The node pair two selected bins name, or null. */
+            function edgePair() {
+                if (selectedBins.length !== 2) return null;
+                const [a, b] = selectedBins.map((x) => x.node);
+                return a < b ? [a, b] : [b, a];
+            }
+
+            function treeHasEdge(u, v) {
+                const sg = skelGroups[document.getElementById("binSkelSel").value];
+                const e = sg && sg.data && sg.data.edges;
+                if (!e) return false;
+                for (let i = 0; i < e.length; i += 2) {
+                    if ((e[i] === u && e[i + 1] === v) || (e[i] === v && e[i + 1] === u))
+                        return true;
+                }
+                return false;
+            }
+
+            /**
+             * Which verb a pair names.  The server decides this again before
+             * it acts; here it is only so the button can say what it will do.
+             * `null` means the surface support has not arrived, so restore
+             * and graft cannot be told apart yet and neither may be claimed.
+             */
+            function classifyEdge(u, v) {
+                if (treeHasEdge(u, v)) return "clip";
+                if (!surfaceEdges) return null;
+                return surfaceEdges.has(`${u},${v}`) ? "restore" : "graft";
+            }
+
+            const EDGE_VERB_TITLE = {
+                clip: "Remove this edge. On a tree edge that orphans everything beyond it — the preview says how much.",
+                restore:
+                    "Put back an adjacency the surface already has: the spanning tree cut this cycle somewhere else.",
+                graft:
+                    "Join two nodes the surface does not connect — a leap across a gap, like the automatic bridges.",
+            };
+
+            function refreshEdgeRow() {
+                const btn = document.getElementById("edgeEditBtn");
+                const pair = edgePair();
+                if (!pair) {
+                    btn.disabled = true;
+                    btn.textContent = "Select two nodes";
+                    btn.title = EDGE_VERB_TITLE.clip;
+                    return;
+                }
+                const [u, v] = pair;
+                const verb = classifyEdge(u, v);
+                btn.disabled = verb === null;
+                btn.textContent = verb
+                    ? `${verb[0].toUpperCase()}${verb.slice(1)} ${u}—${v}`
+                    : `Checking surface for ${u}—${v}…`;
+                btn.title = verb ? EDGE_VERB_TITLE[verb] : "";
+            }
+
+            /** Line segments between node pairs of the selected skeleton. */
+            function makeSkelLines(pairs, color, opacity = 1.0) {
+                const sg = skelGroups[document.getElementById("binSkelSel").value];
+                if (!sg || !sg.nodes || !pairs.length) return null;
+                const pos = new Float32Array(pairs.length * 6);
+                let n = 0;
+                for (const [a, b] of pairs) {
+                    if (a >= sg.nNodes || b >= sg.nNodes) continue;
+                    pos.set(sg.nodes.subarray(a * 3, a * 3 + 3), n * 6);
+                    pos.set(sg.nodes.subarray(b * 3, b * 3 + 3), n * 6 + 3);
+                    n++;
+                }
+                if (!n) return null;
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute(
+                    "position",
+                    new THREE.BufferAttribute(pos.subarray(0, n * 6), 3),
+                );
+                const line = new THREE.LineSegments(
+                    geo,
+                    new THREE.LineBasicMaterial({
+                        color: new THREE.Color(color[0], color[1], color[2]),
+                        transparent: opacity < 1,
+                        opacity,
+                        depthTest: false,
+                    }),
+                );
+                line.renderOrder = 5;
+                scene.add(line);
+                return line;
+            }
+
+            function disposeLine(obj) {
+                if (!obj) return null;
+                scene.remove(obj);
+                obj.geometry.dispose();
+                obj.material.dispose();
+                return null;
+            }
+
+            function clearEdgeSupport() {
+                surfaceEdges = null;
+                refreshEdgeRow();
+            }
+
+            /**
+             * Ask which node pairs the surface joins that the tree does not.
+             *
+             * Not optional and not user-initiated: without it a pair cannot be
+             * told from a restore to a graft, and those are different claims.
+             * ~15 ms on a 583-node cell, ~110 ms on an 11k-node one.
+             */
+            async function fetchEdgeSupport() {
+                const sname = document.getElementById("binSkelSel").value;
+                if (panelMode !== "editskel" || !sname) {
+                    clearEdgeSupport();
+                    return;
+                }
+                let data;
+                try {
+                    const r = await fetch("/edge_support", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: sname }),
+                    });
+                    data = await r.json();
+                } catch (e) {
+                    clearEdgeSupport();
+                    return;
+                }
+                if (!data.ok) {
+                    clearEdgeSupport();
+                    return;
+                }
+                surfaceEdges = new Set(data.dropped.map(([u, v]) => `${u},${v}`));
+                // A pair that was waiting on this can now be named.
+                refreshEdgeRow();
             }
 
             // ── Move surface into a bin ──────────────────────────────────
@@ -2644,13 +2843,21 @@ let meshCentroid = [0, 0, 0];
                 binMoveOverlay = null;
             }
 
-            function setBinPending(on) {
-                document.getElementById("binPending").style.display = on
+            // One pending edit at a time, because there is one skeleton: a bin
+            // edit and an edge edit both replace it, so whichever landed
+            // second would be refused by the identity check anyway.  Making
+            // the panel hold one Apply says that up front instead.
+            let pendingSkelEdit = null; // "bin" | "edge" | null
+
+            function setSkelPending(kind) {
+                pendingSkelEdit = kind;
+                document.getElementById("skelPending").style.display = kind
                     ? "inline"
                     : "none";
-                if (!on) {
-                    document.getElementById("binEditSummary").style.display = "none";
+                if (!kind) {
+                    document.getElementById("skelEditSummary").style.display = "none";
                     clearBinMoveOverlay();
+                    edgePreviewOverlay = disposeLine(edgePreviewOverlay);
                 }
             }
 
@@ -2669,7 +2876,7 @@ let meshCentroid = [0, 0, 0];
 
                 merge.disabled =
                     !dest || !dest.editable || !donors.length ||
-                    donors.some((b) => !b.editable);
+                    donors.some((b) => !b.editable) || !binsAreConnected();
                 merge.textContent = donors.length
                     ? `Merge ${donors.map((b) => b.node).join(", ")} → node ${dest.node}`
                     : "Merge";
@@ -2680,8 +2887,34 @@ let meshCentroid = [0, 0, 0];
                     : "Move lassoed surface";
             }
 
+            /**
+             * Do the selected bins form one connected piece of the skeleton?
+             *
+             * The server refuses a merge that does not — a bin drawing from
+             * somewhere distant is not a cross-section of anything — and each
+             * bin already carries its neighbours, so the same walk can be done
+             * here rather than offering a button that always fails.  Reachable
+             * *through the selection*, so a-b-c merges though a and c do not
+             * touch.
+             */
+            function binsAreConnected() {
+                if (selectedBins.length < 2) return true;
+                const want = new Set(selectedBins.map((b) => b.node));
+                const seen = new Set([selectedBins[0].node]);
+                const stack = [selectedBins[0]];
+                while (stack.length) {
+                    for (const nb of stack.pop().neighbors || []) {
+                        if (want.has(nb) && !seen.has(nb)) {
+                            seen.add(nb);
+                            stack.push(selectedBins.find((b) => b.node === nb));
+                        }
+                    }
+                }
+                return seen.size === want.size;
+            }
+
             function renderBinEditSummary(d) {
-                const box = document.getElementById("binEditSummary");
+                const box = document.getElementById("skelEditSummary");
                 const lines = [
                     `<div><b>${d.moved.toLocaleString()}</b> verts → ` +
                         `<b>node ${d.to}</b></div>`,
@@ -2738,13 +2971,13 @@ let meshCentroid = [0, 0, 0];
                     }),
                 );
                 if (!data || !data.ok) {
-                    setBinPending(false);
+                    setSkelPending(null);
                     return;
                 }
                 clearBinMoveOverlay();
                 binMoveOverlay = makeFaceOverlay(data.movedFaces, [0.3, 1.0, 0.3], 0.9);
                 renderBinEditSummary(data);
-                setBinPending(true);
+                setSkelPending("bin");
             }
 
             function runBinMove() {
@@ -2762,37 +2995,145 @@ let meshCentroid = [0, 0, 0];
                 });
             }
 
-            async function runBinApply() {
+            function renderEdgeEditSummary(d) {
+                const box = document.getElementById("skelEditSummary");
+                // Restore and graft must not read alike: one says the surface
+                // already joins these bins, the other asserts a connection
+                // the surface does not have.
+                const claim = {
+                    clip: "removes an edge the tree has",
+                    restore: "the surface joins these bins — the tree cut this cycle elsewhere",
+                    graft: "<b>no surface support</b> — a leap across a gap, like the automatic bridges",
+                }[d.verb];
+                const lines = [
+                    `<div><b>${d.verb}</b> ${d.u}—${d.v}</div>`,
+                    `<div style="color:${d.verb === "graft" ? "#e9a" : "#888"}">${claim}</div>`,
+                ];
+                if (d.verb === "clip") {
+                    lines.push(
+                        d.orphans.length
+                            ? `<div style="color:#e77"><b>${d.orphans.length.toLocaleString()}` +
+                                  `</b> node(s) would be cut off from the soma</div>`
+                            : `<div style="color:#888">nothing is cut off — this edge ` +
+                                  `is on a cycle</div>`,
+                    );
+                } else if (d.hops >= 0) {
+                    lines.push(
+                        `<div style="color:#888">closes a cycle spanning ` +
+                            `${d.hops} tree hops</div>`,
+                    );
+                } else {
+                    lines.push(
+                        `<div style="color:#8e8">joins two pieces the tree does ` +
+                            `not connect</div>`,
+                    );
+                }
+                if (d.unsupportedTree)
+                    lines.push(
+                        `<div style="color:#e9a">this tree edge has no surface ` +
+                            `behind it — a soma stem or a gap bridge</div>`,
+                    );
+                if (d.componentsAfter !== d.componentsBefore)
+                    lines.push(
+                        `<div style="color:#888">components ${d.componentsBefore} → ` +
+                            `${d.componentsAfter}</div>`,
+                    );
+                if (d.cyclesAfter !== d.cyclesBefore)
+                    lines.push(
+                        `<div style="color:#888">cycles ${d.cyclesBefore} → ` +
+                            `${d.cyclesAfter}</div>`,
+                    );
+                box.innerHTML = lines.join("");
+                box.style.display = "block";
+            }
+
+            async function runEdgeEdit() {
+                const pair = edgePair();
+                if (!pair) return;
                 const data = await _runAction(
-                    document.getElementById("binApplyBtn"),
+                    document.getElementById("edgeEditBtn"),
                     () =>
-                        fetch("/bin_reassign_apply", {
+                        fetch("/edge_edit_preview", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({
                                 name: document.getElementById("binSkelSel").value,
+                                u: pair[0],
+                                v: pair[1],
                             }),
                         }),
                 );
-                setBinPending(false);
+                if (!data || !data.ok) {
+                    setSkelPending(null);
+                    return;
+                }
+                edgePreviewOverlay = disposeLine(edgePreviewOverlay);
+                if (data.verb === "clip") {
+                    // What a cut costs is the subtree it strands, so draw
+                    // that rather than the edge being removed.
+                    const sg = skelGroups[document.getElementById("binSkelSel").value];
+                    const orphan = new Set(data.orphans);
+                    const e = sg && sg.data ? sg.data.edges : [];
+                    const pairs = [];
+                    for (let i = 0; i < e.length; i += 2)
+                        if (orphan.has(e[i]) || orphan.has(e[i + 1]))
+                            pairs.push([e[i], e[i + 1]]);
+                    edgePreviewOverlay = makeSkelLines(pairs, [1.0, 0.2, 0.2]);
+                } else {
+                    edgePreviewOverlay = makeSkelLines(
+                        [[data.u, data.v]],
+                        data.verb === "restore" ? [0.3, 1.0, 0.3] : [1.0, 0.7, 0.1],
+                    );
+                }
+                renderEdgeEditSummary(data);
+                setSkelPending("edge");
+            }
+
+            async function runSkelApply() {
+                const kind = pendingSkelEdit;
+                if (!kind) return;
+                const data = await _runAction(
+                    document.getElementById("skelApplyBtn"),
+                    () =>
+                        fetch(
+                            kind === "bin"
+                                ? "/bin_reassign_apply"
+                                : "/edge_edit_apply",
+                            {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    name: document.getElementById("binSkelSel").value,
+                                }),
+                            },
+                        ),
+                );
+                setSkelPending(null);
                 if (!data || !data.ok) return;
-                // Dropping a bin renumbers everything after it, so every id
-                // held here may now name a different node.  Start clean.
+                // Either edit installs a new skeleton, so ids held here may
+                // now name different nodes.  Start clean; the rescan comes
+                // with the layer being rebuilt.
                 manualHighlightFaces.clear();
                 rebuildManualHighlight();
                 syncManualHighlight();
                 clearBinSelection();
             }
 
-            async function runBinCancel() {
-                await fetch("/bin_reassign_cancel", {
+            async function runSkelCancel() {
+                const name = document.getElementById("binSkelSel").value;
+                const body = JSON.stringify({ name });
+                const opts = {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        name: document.getElementById("binSkelSel").value,
-                    }),
-                }).catch(() => {});
-                setBinPending(false);
+                    body,
+                };
+                // Retire both: clearing the selection has to leave nothing
+                // pending, whichever kind it was.
+                await Promise.all([
+                    fetch("/bin_reassign_cancel", opts).catch(() => {}),
+                    fetch("/edge_edit_cancel", opts).catch(() => {}),
+                ]);
+                setSkelPending(null);
             }
 
             async function runMergeSelected() {

@@ -3338,8 +3338,11 @@ def _create_app(
         nbrs = np.unique(touching)
         return nbrs[nbrs != node]
 
-    def _bin_edit_target(body):
-        """Resolve and check the skeleton a bin edit names.
+    def _skel_edit_target(body):
+        """Resolve and check the skeleton an edit names.
+
+        Shared by the bin edits and the edge edits: both need a skeleton that
+        exists, carries mesh data, and was built from the mesh now loaded.
 
         Returns ``(name, sstate, skel, error_response)``; only one of the
         last two is ever meaningful.
@@ -3417,7 +3420,7 @@ def _create_app(
         from skeliner import dx, post
 
         body = await request.json()
-        name, sstate, skel, err = _bin_edit_target(body)
+        name, sstate, skel, err = _skel_edit_target(body)
         if err is not None:
             return err
         mesh = mesh_state["mesh"]
@@ -3710,6 +3713,208 @@ def _create_app(
                 "editable": node != 0,
             }
         )
+
+    # ── Edge editing (B2) ────────────────────────────────────────────────
+    # `edges` is the one thing on a Skeleton that nothing else is derived
+    # from, which is why it can be edited directly — and why such an edit
+    # does not survive a re-skeletonize.
+
+    def _graph_shape(skel):
+        """Components and independent cycles — what an edge edit moves.
+
+        An editing UI that can produce an orphan or a cycle should say so
+        when it happens, not leave it for an exporter to trip on.
+        """
+        g = skel._igraph()
+        n_comp = len(g.components())
+        return {
+            "components": int(n_comp),
+            "cycles": int(g.ecount() - g.vcount() + n_comp),
+        }
+
+    async def edge_support(request):
+        """Which node pairs the surface joins, so the verb can be named.
+
+        The client needs this to tell a **restore** (the surface really does
+        join these bins) from a **graft** (it does not), and to say which tree
+        edges have no surface behind them at all.
+
+        Deliberately not a list of things to look at.  An earlier version
+        grouped the dropped pairs into "loops" and ranked them by how far the
+        tree detours, on the theory that a big detour meant a wrongly merged
+        mesh.  Measured on 549190673, 147 of the 156 pairs at least three hops
+        apart lie within a single branch with the bins overlapping in space —
+        a dense axon tuft, which is indistinguishable here from a fusion.  A
+        signal that cannot separate the two has no business being a menu.
+        """
+        from skeliner import dx
+
+        body = await request.json()
+        name, sstate, skel, err = _skel_edit_target(body)
+        if err is not None:
+            return err
+
+        rep = dx.edge_support(skel, mesh_state["mesh"])
+        return JSONResponse(
+            {
+                "ok": True,
+                "name": name,
+                "nTree": rep["n_tree"],
+                "dropped": [[int(u), int(v)] for u, v in rep["dropped"]],
+                "unsupported": [[int(u), int(v)] for u, v in rep["unsupported"]],
+            }
+        )
+
+    async def edge_edit_preview(request):
+        """Work out what clipping or grafting one edge would do.
+
+        Which of the three verbs a node pair names is not the client's to
+        decide, so it is derived here from the two graphs:
+
+        =============  ==========================================
+        in ``T``       **clip** — and cutting is asymmetric: on a
+                       tree edge it orphans a whole subtree, on a
+                       cycle edge it disconnects nothing.
+        in ``G∖T``     **restore** — the surface really is joined
+                       there; the MST cut this cycle elsewhere.
+        in neither     **graft** — a leap across a genuine gap,
+                       which is a different claim and is labelled
+                       as one.
+        =============  ==========================================
+
+        Runs the real primitive on a copy and keeps it, as the bin edits do,
+        so applying installs the very skeleton this described.  The copy also
+        means the installed object is a *new* one, which is what invalidates
+        the cached face-owner map — ``clip`` and ``graft`` mutate in place and
+        would otherwise leave it stale.
+        """
+        import copy as _copy
+
+        from skeliner import dx, post
+        from skeliner.skeletonize import _edges_from_mesh
+
+        body = await request.json()
+        name, sstate, skel, err = _skel_edit_target(body)
+        if err is not None:
+            return err
+        mesh = mesh_state["mesh"]
+
+        u, v = body.get("u"), body.get("v")
+        if u is None or v is None:
+            return JSONResponse(
+                {"ok": False, "error": "Pass two nodes, u and v"}, status_code=400
+            )
+        u, v = int(u), int(v)
+        if u == v:
+            return JSONResponse(
+                {"ok": False, "error": "An edge needs two different nodes"},
+                status_code=400,
+            )
+        n = len(skel.nodes)
+        if not (0 <= u < n and 0 <= v < n):
+            return JSONResponse(
+                {"ok": False, "error": "node id out of range"}, status_code=400
+            )
+
+        pair = (min(u, v), max(u, v))
+        tree = np.unique(
+            np.sort(np.asarray(skel.edges, dtype=np.int64), axis=1), axis=0
+        )
+        in_tree = bool(((tree[:, 0] == pair[0]) & (tree[:, 1] == pair[1])).any())
+        surface = _edges_from_mesh(
+            np.asarray(mesh.edges_unique), skel.vert2node, len(mesh.vertices)
+        )
+        supported = bool(
+            ((surface[:, 0] == pair[0]) & (surface[:, 1] == pair[1])).any()
+        )
+        verb = "clip" if in_tree else ("restore" if supported else "graft")
+
+        # How far apart the two already are along the tree, which is how big
+        # a cycle a restore or a graft would close.  ``-1`` when the tree does
+        # not join them at all — then the edit reconnects the skeleton instead
+        # of closing anything.  Asked of the components first, because
+        # ``get_shortest_path`` warns when there is no path to find.
+        g = skel._igraph()
+        comp = g.components().membership
+        hops = len(g.get_shortest_path(u, v)) - 1 if comp[u] == comp[v] else -1
+
+        before = _graph_shape(skel)
+        before_iso = set(dx.check_connectivity(skel, return_isolated=True))
+        after_skel = _copy.deepcopy(skel)
+        if verb == "clip":
+            post.clip(after_skel, u, v)
+        else:
+            post.graft(after_skel, u, v)
+        after = _graph_shape(after_skel)
+        orphans = sorted(
+            set(dx.check_connectivity(after_skel, return_isolated=True)) - before_iso
+        )
+
+        summary = {
+            "verb": verb,
+            "u": u,
+            "v": v,
+            "supported": supported,
+            "hops": hops,
+            "orphans": [int(o) for o in orphans],
+            "unsupportedTree": in_tree and not supported,
+            "componentsBefore": before["components"],
+            "componentsAfter": after["components"],
+            "cyclesBefore": before["cycles"],
+            "cyclesAfter": after["cycles"],
+        }
+        sstate["pending_edge_edit"] = {
+            "base": skel,
+            "skeleton": after_skel,
+            "summary": summary,
+        }
+        return JSONResponse({"ok": True, **summary})
+
+    async def edge_edit_apply(request):
+        """Install the previewed skeleton."""
+        body = await request.json()
+        name = body.get("name")
+        sstate = skeleton_states.get(name or "")
+        pending = sstate.get("pending_edge_edit") if sstate else None
+        if pending is None:
+            return JSONResponse(
+                {"ok": False, "error": "Nothing to apply — preview first"},
+                status_code=400,
+            )
+        # Node ids are positions in *this* skeleton, so the check is on the
+        # skeleton alone — unlike a bin edit, an edge edit names no vertices
+        # and so does not care which mesh is loaded.  A bin edit applied in
+        # the meantime replaces the object and lands here.
+        if pending["base"] is not sstate.get("skeleton"):
+            sstate["pending_edge_edit"] = None
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "The skeleton changed since the preview — its "
+                    "node ids may name different nodes now. Pick the edge again.",
+                },
+                status_code=409,
+            )
+
+        summary = pending["summary"]
+        sstate["skeleton"] = pending["skeleton"]
+        sstate["pending_edge_edit"] = None
+        await _rebroadcast_skeletons()
+        note = ""
+        if summary["orphans"]:
+            note = f", {len(summary['orphans']):,} node(s) now cut off from the soma"
+        await _log(
+            f"{summary['verb'].capitalize()} edge {summary['u']}—{summary['v']}{note}"
+        )
+        return JSONResponse({"ok": True, **summary})
+
+    async def edge_edit_cancel(request):
+        """Drop the pending edge edit."""
+        body = await request.json()
+        sstate = skeleton_states.get(body.get("name") or "")
+        if sstate is not None:
+            sstate["pending_edge_edit"] = None
+        return JSONResponse({"ok": True})
 
     async def shortest_path_endpoint(request):
         """Compute shortest path between two faces or two skeleton nodes."""
@@ -4096,6 +4301,10 @@ def _create_app(
             Route("/bin_reassign_preview", bin_reassign_preview, methods=["POST"]),
             Route("/bin_reassign_apply", bin_reassign_apply, methods=["POST"]),
             Route("/bin_reassign_cancel", bin_reassign_cancel, methods=["POST"]),
+            Route("/edge_support", edge_support, methods=["POST"]),
+            Route("/edge_edit_preview", edge_edit_preview, methods=["POST"]),
+            Route("/edge_edit_apply", edge_edit_apply, methods=["POST"]),
+            Route("/edge_edit_cancel", edge_edit_cancel, methods=["POST"]),
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],

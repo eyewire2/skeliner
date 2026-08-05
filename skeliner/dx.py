@@ -12,6 +12,7 @@ __skeleton__ = [
     "check_acyclicity",
     "acyclicity",
     "check_bins",
+    "edge_support",
     "face_owner",
     "bin_faces",
     "degree",
@@ -200,6 +201,53 @@ def check_bins(skel, *, mesh=None, return_report: bool = False):
     if mesh is not None:
         report["fragmented"] = _fragmented_bins(bins, mesh)
     return report
+
+
+def edge_support(skel, mesh) -> Dict[str, Any]:
+    """Which node pairs the mesh surface joins, against which ones the tree has.
+
+    ``skel.edges`` is a spanning tree *T* of the node-adjacency graph *G* the
+    mesh implies.  *G* is not stored but is recomputable at any time from the
+    mesh and ``vert2node``, and the two differences between them are what an
+    edge edit needs to know:
+
+    ``dropped`` (*G∖T*)
+        Pairs whose bins share surface that the tree does not carry.  Adding
+        one back is a **restore** — the surface really does join them —
+        as opposed to a **graft**, which asserts a connection nothing
+        supports.  That distinction is the whole reason this exists.
+    ``unsupported`` (*T∖G*)
+        Tree edges with no surface behind them at all: the soma stems from
+        ``_stitch_to_soma`` and the synthetic bridges from ``bridge_gaps``.
+        They are why a repartition must never simply re-span *G* — doing so
+        would silently delete precisely the edges holding a broken arbor
+        together.
+
+    What ``dropped`` is **not** is a defect report.  The surface graph has
+    cycles whether or not the arbor does: bins along one tube touch, and so do
+    bins on branches that merely pass close.  Measured on 549190673, 147 of the
+    156 dropped pairs at least three tree hops apart lie *within one branch*
+    with the two bins overlapping in space — a dense axon tuft, not a fusion.
+    A wrongly merged mesh and a tightly packed one look identical here, so
+    nothing in this list may be presented as something to fix.
+    """
+    from .skeletonize import _edges_from_mesh
+
+    v2n = skel.vert2node
+    if v2n is None:
+        raise ValueError("skeleton carries no vert2node — cannot rebuild G")
+
+    g_edges = _edges_from_mesh(np.asarray(mesh.edges_unique), v2n, len(mesh.vertices))
+    tree = np.unique(np.sort(np.asarray(skel.edges, dtype=np.int64), axis=1), axis=0)
+    tset = {(int(u), int(v)) for u, v in tree}
+    gset = {(int(u), int(v)) for u, v in g_edges}
+
+    return {
+        "n_nodes": len(skel.nodes),
+        "n_tree": len(tset),
+        "dropped": sorted(gset - tset),
+        "unsupported": sorted(tset - gset),
+    }
 
 
 def _fragmented_bins(bins: List[np.ndarray], mesh) -> Dict[int, int]:

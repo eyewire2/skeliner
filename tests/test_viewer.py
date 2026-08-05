@@ -999,3 +999,243 @@ def test_merging_with_the_soma_is_refused(bin_client):
     )
     assert r.status_code == 400
     assert "soma" in r.json()["error"]
+
+
+# ── /edge_support and /edge_edit_* ────────────────────────────────────
+#
+# `edges` is the one thing on a Skeleton nothing else derives from, so it
+# is the only part that can honestly be edited directly.  Which of the
+# three verbs a node pair names is the server's to decide, from the tree
+# and from the surface — never from the gesture.
+
+
+@pytest.fixture
+def loop_client(tmp_path, monkeypatch):
+    """A viewer whose surface graph drops an edge the tree could restore.
+
+    A tube gives a path, so ``G`` and ``T`` are the same and there is no
+    restore to test.  A ring is the smallest thing that drops one.
+    """
+    from starlette.testclient import TestClient
+
+    from skeliner import skeletonize
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+    mesh = trimesh.creation.torus(
+        major_radius=300.0, minor_radius=60.0, major_sections=64, minor_sections=16
+    )
+    skel = skeletonize(mesh, verbose=False)
+
+    app = _create_app(preload_mesh=mesh, port=8915)
+    with TestClient(app) as client:
+        path = tmp_path / "skeleton.npz"
+        skel.to_npz(path)
+        client.post("/upload", files={"file": ("skeleton.npz", path.read_bytes())})
+        name = next(iter(client.get("/skeletons").json()))
+        yield client, name, mesh, skel
+
+
+def _a_dropped_pair(client, name):
+    body = client.post("/edge_support", json={"name": name}).json()
+    assert body["ok"], body
+    assert body["dropped"], "fixture was supposed to drop an adjacency"
+    return body["dropped"][0]
+
+
+def test_edge_support_reports_what_the_tree_does_not_carry(loop_client):
+    client, name, _, skel = loop_client
+    body = client.post("/edge_support", json={"name": name}).json()
+
+    assert body["nTree"] == len(skel.edges)
+    assert len(body["dropped"]) == 1
+    u, v = body["dropped"][0]
+    assert (u, v) not in {tuple(sorted(map(int, e))) for e in skel.edges}
+
+
+def test_a_stale_skeleton_is_neither_checked_nor_edited(bin_client):
+    """vert2node indexes the mesh it was built from; against another one
+    the answer would be plausible and wrong."""
+    client, name, _, _ = bin_client
+    faces = client.post("/bin", json={"name": name, "node": 3}).json()["faces"]
+    assert client.post("/edge_support", json={"name": name}).status_code == 200
+
+    assert client.post("/remove_selected", json={"faces": faces[:5]}).status_code == 200
+
+    assert client.post("/edge_support", json={"name": name}).status_code == 409
+    r = client.post("/edge_edit_preview", json={"name": name, "u": 1, "v": 2})
+    assert r.status_code == 409
+    assert "Re-skeletonize" in r.json()["error"]
+
+
+def test_restoring_an_edge_the_surface_supports(loop_client):
+    client, name, _, skel = loop_client
+    u, v = _a_dropped_pair(client, name)
+
+    r = client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v})
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    assert body["verb"] == "restore"
+    assert body["supported"] is True
+    assert body["hops"] >= len(skel.nodes) // 2
+    assert body["cyclesAfter"] == body["cyclesBefore"] + 1
+    assert body["componentsAfter"] == body["componentsBefore"]
+    assert body["orphans"] == []
+
+
+def test_grafting_is_not_dressed_up_as_a_restore(bin_client):
+    """A pair the surface does not join is a leap across a gap — a
+    different claim, and it has to be labelled as one."""
+    client, name, _, skel = bin_client
+    far = len(skel.nodes) - 1
+    assert far >= 3
+    r = client.post("/edge_edit_preview", json={"name": name, "u": 1, "v": far})
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    assert body["verb"] == "graft"
+    assert body["supported"] is False
+
+
+def test_clipping_says_what_it_orphans(bin_client):
+    """Cutting is asymmetric: on a tree edge it strands a whole subtree, and
+    the size of that is the thing to know before committing."""
+    client, name, _, skel = bin_client
+    u, v = (int(x) for x in skel.edges[len(skel.edges) // 2])
+
+    body = client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v}).json()
+    assert body["verb"] == "clip"
+    assert body["orphans"], "cutting a tree edge must strand something"
+    assert body["componentsAfter"] == body["componentsBefore"] + 1
+    assert 0 not in body["orphans"], "the soma side is never the orphan"
+
+
+def test_clipping_a_cycle_edge_orphans_nothing(loop_client):
+    """The other half of the asymmetry — and the reason the preview says
+    which case this is rather than warning either way."""
+    client, name, _, _ = loop_client
+    u, v = _a_dropped_pair(client, name)
+    client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v})
+    assert client.post("/edge_edit_apply", json={"name": name}).json()["ok"]
+
+    live = _skel_state_of(client.app, name)["skeleton"]
+    a, b = (int(x) for x in live.edges[len(live.edges) // 2])
+    body = client.post("/edge_edit_preview", json={"name": name, "u": a, "v": b}).json()
+    assert body["verb"] == "clip"
+    assert body["orphans"] == []
+    assert body["componentsAfter"] == body["componentsBefore"]
+    assert body["cyclesAfter"] == body["cyclesBefore"] - 1
+
+
+def test_a_preview_changes_nothing_until_applied(loop_client):
+    client, name, _, _ = loop_client
+    u, v = _a_dropped_pair(client, name)
+    before = len(_skel_state_of(client.app, name)["skeleton"].edges)
+
+    client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v})
+    assert len(_skel_state_of(client.app, name)["skeleton"].edges) == before
+
+    assert client.post("/edge_edit_apply", json={"name": name}).json()["ok"]
+    after = _skel_state_of(client.app, name)["skeleton"]
+    assert len(after.edges) == before + 1
+    assert (min(u, v), max(u, v)) in {tuple(sorted(map(int, e))) for e in after.edges}
+
+
+def test_applying_installs_a_new_object_so_caches_invalidate(loop_client):
+    """`clip` and `graft` mutate in place, which the identity-compared
+    face-owner cache cannot see — so the edit is made on a copy."""
+    client, name, _, _ = loop_client
+    was = _skel_state_of(client.app, name)["skeleton"]
+    u, v = _a_dropped_pair(client, name)
+    client.post("/bin", json={"name": name, "node": 2})  # warm the cache
+    client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v})
+    client.post("/edge_edit_apply", json={"name": name})
+
+    sstate = _skel_state_of(client.app, name)
+    assert sstate["skeleton"] is not was
+    assert len(was.edges) + 1 == len(sstate["skeleton"].edges), "the base was mutated"
+
+
+def test_a_restored_edge_is_thereafter_a_tree_edge(loop_client):
+    client, name, _, _ = loop_client
+    u, v = _a_dropped_pair(client, name)
+    client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v})
+    client.post("/edge_edit_apply", json={"name": name})
+
+    again = client.post("/edge_support", json={"name": name}).json()
+    assert again["dropped"] == [], "the tree now carries it, so nothing is dropped"
+
+
+def test_a_grafted_edge_is_thereafter_called_out_as_unsupported(bin_client):
+    """Soma stems and gap bridges have no surface behind them, which is
+    exactly why re-spanning ``G`` would delete them.  A graft makes one, so
+    the round trip both produces the case and checks it is reported."""
+    client, name, _, skel = bin_client
+    far = len(skel.nodes) - 1
+    assert (
+        client.post("/edge_edit_preview", json={"name": name, "u": 1, "v": far}).json()[
+            "verb"
+        ]
+        == "graft"
+    )
+    assert client.post("/edge_edit_apply", json={"name": name}).json()["ok"]
+
+    scan = client.post("/edge_support", json={"name": name}).json()
+    assert [1, far] in scan["unsupported"]
+
+    body = client.post(
+        "/edge_edit_preview", json={"name": name, "u": 1, "v": far}
+    ).json()
+    assert body["verb"] == "clip", "it is a tree edge now"
+    assert body["unsupportedTree"] is True
+    assert body["orphans"] == [], "and it is on a cycle, so nothing is stranded"
+
+
+@pytest.mark.parametrize(
+    "body, code, expected",
+    [
+        ({"name": "nope", "u": 1, "v": 2}, 400, "No such skeleton"),
+        ({"u": 1}, 400, "two nodes"),
+        ({"u": 2, "v": 2}, 400, "two different nodes"),
+        ({"u": 1, "v": 10**6}, 400, "node id out of range"),
+        ({"u": -1, "v": 2}, 400, "node id out of range"),
+    ],
+)
+def test_edge_edit_rejects_bad_input(bin_client, body, code, expected):
+    client, name, _, _ = bin_client
+    body = {"name": name, **body} if "name" not in body else body
+    r = client.post("/edge_edit_preview", json=body)
+    assert r.status_code == code
+    assert expected in r.json()["error"]
+
+
+def test_applying_an_edge_edit_without_a_preview_is_refused(loop_client):
+    client, name, _, _ = loop_client
+    r = client.post("/edge_edit_apply", json={"name": name})
+    assert r.status_code == 400
+    assert "preview first" in r.json()["error"]
+
+
+def test_cancel_retires_the_edge_preview(loop_client):
+    client, name, _, _ = loop_client
+    u, v = _a_dropped_pair(client, name)
+    client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v})
+    assert client.post("/edge_edit_cancel", json={"name": name}).json()["ok"]
+    assert client.post("/edge_edit_apply", json={"name": name}).status_code == 400
+
+
+def test_a_bin_edit_landing_first_retires_the_edge_preview(bin_client):
+    """Both replace the skeleton, and node ids are positions in it — so the
+    second one to land is naming a different graph than it previewed."""
+    client, name, _, skel = bin_client
+    u, v = (int(x) for x in skel.edges[len(skel.edges) // 2])
+    client.post("/edge_edit_preview", json={"name": name, "u": u, "v": v})
+
+    nbr, faces = _a_donor_face(client, name, 3)
+    client.post(
+        "/bin_reassign_preview", json={"name": name, "faces": faces[:2], "to": 3}
+    )
+    assert client.post("/bin_reassign_apply", json={"name": name}).json()["ok"]
+
+    r = client.post("/edge_edit_apply", json={"name": name})
+    assert r.status_code == 409
+    assert "skeleton changed" in r.json()["error"]

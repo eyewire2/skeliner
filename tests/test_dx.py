@@ -193,6 +193,112 @@ class TestCheckBins:
         assert r["fragmented"].get(3, 1) > 1
 
 
+# ---------------------------------------------------------------------
+# edge_support
+#
+# Which node pairs the mesh joins, against which ones the tree carries.
+# This is a classifier for the edge-editing verbs — restore (the surface
+# supports it) versus graft (it does not) — and nothing more.  It is
+# deliberately not a defect report: see the docstring, and the entry
+# 2026-08-05-skeleton-as-derived-state in the labbook for the measurement
+# that ruled that out.
+# ---------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def torus():
+    """A mesh whose surface graph closes a cycle the tree has to cut.
+
+    A tube gives a path, so its ``G`` and ``T`` are identical and there is
+    nothing to say.  A ring is the smallest thing with a dropped edge.
+    """
+    import trimesh
+
+    return trimesh.creation.torus(
+        major_radius=300.0, minor_radius=60.0, major_sections=64, minor_sections=16
+    )
+
+
+@pytest.fixture(scope="session")
+def torus_skel(torus):
+    return skeletonize(torus, verbose=False)
+
+
+@pytest.fixture
+def tangled(skel):
+    """A bin owning surface in two places, so several pairs are dropped.
+
+    Half of one bin is handed to a distant node, which is what a densely
+    packed arbor looks like from the graph's side: bins that share surface
+    while sitting far apart in the tree.
+    """
+    bad = copy.deepcopy(skel)
+    far = len(bad.nodes) - 1
+    take = np.asarray(bad.node2verts[3])[: len(bad.node2verts[3]) // 2]
+    bad.node2verts[3] = np.setdiff1d(np.asarray(bad.node2verts[3]), take)
+    bad.node2verts[far] = np.union1d(np.asarray(bad.node2verts[far]), take)
+    for v in take:
+        bad.vert2node[int(v)] = far
+    return bad
+
+
+class TestEdgeSupport:
+    def test_a_tree_shaped_arbor_drops_nothing(self, skel, mesh):
+        """The common case: every adjacency the surface has is in the tree,
+        so no pair is a restore and every graft is honestly a graft."""
+        rep = dx.edge_support(skel, mesh)
+        assert rep["dropped"] == []
+        assert rep["n_tree"] == len({tuple(sorted(map(int, e))) for e in skel.edges})
+
+    def test_a_ring_drops_the_one_edge_that_closes_it(self, torus_skel, torus):
+        rep = dx.edge_support(torus_skel, torus)
+        assert len(rep["dropped"]) == 1
+
+    def test_a_dropped_pair_is_real_surface_adjacency(self, torus_skel, torus):
+        """Not an invention: the two bins really do share mesh edges, which
+        is the whole difference between a restore and a graft."""
+        u, v = dx.edge_support(torus_skel, torus)["dropped"][0]
+        v2n = torus_skel.vert2node
+        touching = [
+            (a, b)
+            for a, b in np.asarray(torus.edges_unique)
+            if {v2n.get(int(a), -1), v2n.get(int(b), -1)} == {u, v}
+        ]
+        assert touching, "a dropped pair names bins that do not touch"
+
+    def test_dropped_and_the_tree_are_disjoint_and_canonical(self, tangled, mesh):
+        rep = dx.edge_support(tangled, mesh)
+        tree = {tuple(sorted(map(int, e))) for e in tangled.edges}
+        assert rep["dropped"]
+        for u, v in rep["dropped"]:
+            assert (u, v) not in tree
+            assert u < v
+
+    def test_unsupported_are_tree_edges_with_no_surface(self, skel, mesh):
+        """The soma stems and the ``bridge_gaps`` bridges — the edges a
+        re-span of ``G`` would silently delete."""
+        rep = dx.edge_support(skel, mesh)
+        tree = {tuple(sorted(map(int, e))) for e in skel.edges}
+        assert rep["unsupported"], "reference skeleton has soma stems"
+        for u, v in rep["unsupported"]:
+            assert (u, v) in tree
+        assert not set(rep["unsupported"]) & set(rep["dropped"])
+
+    def test_clipping_makes_the_cut_edge_a_dropped_pair(self, torus_skel, torus):
+        """The two halves of the classification meet: cut a supported tree
+        edge and it moves from the tree into the surface-supported set, so
+        putting it back is offered as a restore rather than as a graft."""
+        cut = copy.deepcopy(torus_skel)
+        u, v = (int(x) for x in cut.edges[len(cut.edges) // 2])
+        post.clip(cut, u, v)
+        rep = dx.edge_support(cut, torus)
+        assert (min(u, v), max(u, v)) in rep["dropped"]
+
+    def test_a_skeleton_without_bins_is_refused(self, skel, mesh):
+        bare = copy.deepcopy(skel)
+        bare.vert2node = None
+        with pytest.raises(ValueError, match="vert2node"):
+            dx.edge_support(bare, mesh)
+
+
 def test_degree_and_neighbors_match_igraph(skel):
     g = _igraph(skel)
     degrees_ref = g.degree()
