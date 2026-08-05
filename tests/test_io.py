@@ -7,6 +7,7 @@ IO round-trip smoke tests.
 * reload and compare a few coarse features
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -365,3 +366,92 @@ def test_mesh_stats_npz_face_count_validation(tmp_path):
     # Without the mesh argument it should still load
     loaded = load_mesh_stats_npz(path)
     assert loaded.main_ci == 0
+
+
+# ── provenance: which track and which parameters produced a skeleton ──
+#
+# Written into every export, so it cannot be added retroactively — a
+# skeleton saved without it can never say what made it.  The two tracks
+# disagree about the same cell by construction, which is exactly why the
+# file has to name the one that ran.
+
+
+class TestSkeletonProvenance:
+    def test_each_track_names_itself(self, reference_mesh):
+        from skeliner import pre
+
+        direct = skeletonize(reference_mesh, verbose=False)
+        assert direct.meta["track"] == "direct"
+
+        empty = np.zeros(len(reference_mesh.faces), dtype=bool)
+        comps = pre.break_up_mesh(
+            reference_mesh,
+            direct.soma,
+            Organelles(
+                pocket=empty.copy(), isolated=empty.copy(), expanded=empty.copy()
+            ),
+            verbose=False,
+        )
+        preproc = skeletonize(reference_mesh, components=comps, verbose=False)
+        assert preproc.meta["track"] == "preproc"
+
+    def test_a_track_records_only_the_parameters_it_used(self, reference_mesh):
+        """The preprocessing track ignores soma detection, bridging and
+        pruning — they happen upstream — so claiming them would describe a
+        run that did not happen."""
+        from skeliner import pre
+
+        direct = skeletonize(reference_mesh, verbose=False)
+        empty = np.zeros(len(reference_mesh.faces), dtype=bool)
+        comps = pre.break_up_mesh(
+            reference_mesh,
+            direct.soma,
+            Organelles(
+                pocket=empty.copy(), isolated=empty.copy(), expanded=empty.copy()
+            ),
+            verbose=False,
+        )
+        preproc = skeletonize(reference_mesh, components=comps, verbose=False)
+
+        for ignored in ("bridge_gaps", "detect_soma", "prune_tiny_neurites"):
+            assert ignored in direct.meta["params"]
+            assert ignored not in preproc.meta["params"]
+        # and the one they share is recorded by both
+        assert "geodesic_shell_count" in preproc.meta["params"]
+        assert "geodesic_shell_count" in direct.meta["params"]
+
+    def test_a_changed_parameter_shows_up(self, reference_mesh):
+        a = skeletonize(reference_mesh, geodesic_shell_count=1000, verbose=False)
+        b = skeletonize(reference_mesh, geodesic_shell_count=400, verbose=False)
+        assert a.meta["params"]["geodesic_shell_count"] == 1000
+        assert b.meta["params"]["geodesic_shell_count"] == 400
+
+    def test_numpy_arguments_do_not_break_swc_export(self, reference_mesh, tmp_path):
+        """``to_swc`` writes meta as one JSON line with a plain ``json.dumps``
+        and no fallback encoder, so an ndarray left in the record would raise
+        on export rather than where it was recorded."""
+        skel = skeletonize(
+            reference_mesh,
+            soma_seed_point=np.array([1.0, 2.0, 3.0]),
+            verbose=False,
+        )
+        assert skel.meta["params"]["soma_seed_point"] == [1.0, 2.0, 3.0]
+        json.dumps(skel.meta)  # the export path, directly
+
+        path = tmp_path / "s.swc"
+        skel.to_swc(path)
+        assert load_skeleton_swc(path).meta["params"]["soma_seed_point"] == [
+            1.0,
+            2.0,
+            3.0,
+        ]
+
+    @pytest.mark.parametrize("fmt", ["npz", "swc"])
+    def test_provenance_survives_the_round_trip(self, reference_mesh, tmp_path, fmt):
+        skel = skeletonize(reference_mesh, verbose=False)
+        path = tmp_path / f"s.{fmt}"
+        (skel.to_npz if fmt == "npz" else skel.to_swc)(path)
+        back = (load_skeleton_npz if fmt == "npz" else load_skeleton_swc)(path)
+        assert back.meta["track"] == skel.meta["track"]
+        assert back.meta["params"] == skel.meta["params"]
+        assert back.meta["skeliner_version"] == skel.meta["skeliner_version"]

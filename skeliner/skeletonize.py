@@ -29,6 +29,46 @@ __all__ = [
 ]
 
 
+def _jsonable(v):
+    """Coerce a parameter value to something ``json.dumps`` accepts.
+
+    ``to_swc`` writes ``meta`` as a single ``# meta {...}`` line with a plain
+    ``json.dumps`` and no fallback encoder, so a numpy scalar or array left in
+    here would raise on *export* — long after the run that recorded it.
+    ``soma_seed_point`` is the reachable case.
+    """
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (np.integer, np.floating, np.bool_)):
+        return v.item()
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
+def _skel_meta(track: str, unit: str, id, params: dict) -> dict:
+    """Provenance for one skeletonize run.
+
+    *track* and *params* are recorded by the assembler that ran, not by the
+    dispatcher, so what lands is what actually took effect.  The preprocessing
+    track ignores most of :func:`skeletonize`'s arguments — soma detection,
+    gap bridging and pruning all happen upstream — and copying them in would
+    describe a run that did not happen.
+
+    Without this a saved skeleton cannot say which track produced it, and the
+    two tracks disagree about the same cell by construction.  It is written
+    into every export, so it cannot be added retroactively.
+    """
+    return {
+        "skeliner_version": _SKELINER_VERSION,
+        "skeletonized_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "unit": unit,
+        "id": _jsonable(id),
+        "track": track,
+        "params": {k: _jsonable(v) for k, v in params.items()},
+    }
+
+
 # -----------------------------------------------------------------------------
 #  Verbose timing helper
 # -----------------------------------------------------------------------------
@@ -1523,6 +1563,15 @@ def _skeletonize_preproc(
     splitting (all unnecessary on clean preprocessed
     neurites).
     """
+    # Snapshot the arguments before anything else is bound, so the recorded
+    # parameters cannot drift from the signature the way a hand-kept list
+    # would.  A stale provenance record is worse than none.
+    _params = {
+        k: v
+        for k, v in locals().items()
+        if k not in ("mesh", "components", "unit", "id", "verbose")
+    }
+
     soma = components.soma
     has_soma = soma is not None
 
@@ -1685,12 +1734,7 @@ def _skeletonize_preproc(
         soma=soma,
         node2verts=node2verts,
         vert2node=vert2node,
-        meta={
-            "skeliner_version": _SKELINER_VERSION,
-            "skeletonized_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "unit": unit,
-            "id": id,
-        },
+        meta=_skel_meta("preproc", unit, id, _params),
         extra=(
             {
                 "cl_dist_vids": np.asarray(cl_vids, dtype=np.int64),
@@ -1757,6 +1801,12 @@ def _skeletonize_direct(
     soma detection, edge mapping, near-soma collapse, gap
     bridging, MST, neurite pruning.
     """
+    # See _skeletonize_preproc: snapshot the arguments before anything else
+    # is bound, so the record cannot drift from the signature.
+    _params = {
+        k: v for k, v in locals().items() if k not in ("mesh", "unit", "id", "verbose")
+    }
+
     # ------------------------------------------------------------------
     #  Direct track: helpers for verbose timing
     # ------------------------------------------------------------------
@@ -1983,12 +2033,7 @@ def _skeletonize_direct(
         soma=soma,
         node2verts=node2verts,
         vert2node=vert2node,
-        meta={
-            "skeliner_version": _SKELINER_VERSION,
-            "skeletonized_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "unit": unit,
-            "id": id,
-        },
+        meta=_skel_meta("direct", unit, id, _params),
     )
 
 
