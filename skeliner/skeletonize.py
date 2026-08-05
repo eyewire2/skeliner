@@ -978,6 +978,7 @@ def _skeletonize_component(
     list[np.ndarray],
     dict[int, int],
     np.ndarray,
+    dict[int, float],
 ]:
     """Bin, build nodes, and extract edges for one component.
 
@@ -1007,10 +1008,17 @@ def _skeletonize_component(
 
     Returns
     -------
-    nodes_arr, radii_dict, node2verts, vert2node, edges_arr
+    nodes_arr, radii_dict, node2verts, vert2node, edges_arr, vid_cl_dist
+
+    ``vid_cl_dist`` maps mesh vertex -> perpendicular distance to the
+    centreline, and is empty when the second pass does not run.  It is
+    returned rather than consumed because it is the only input to the
+    ``centerline`` radius that cannot be recovered from the vertices alone;
+    keeping it lets that radius be recomputed after a bin is edited.
     """
     mesh_vertices = mesh.vertices.view(np.ndarray)
     e_m = float(mesh.edges_unique_length.mean())
+    vid_cl_dist: dict[int, float] = {}
 
     with stage("bin vertices by geodesic distance"):
         all_shells = _bin_one_component(
@@ -1258,6 +1266,7 @@ def _skeletonize_component(
         node2verts,
         vert2node,
         edges_arr,
+        vid_cl_dist,
     )
 
 
@@ -1320,6 +1329,7 @@ def _stitch_to_soma(
             list[np.ndarray],
             dict[int, int],
             np.ndarray,
+            dict[int, float],
         ]
     ],
     soma: Soma,
@@ -1352,7 +1362,7 @@ def _stitch_to_soma(
     all_edges: list[np.ndarray] = []
 
     offset = 1  # node 0 is soma
-    for nodes, radii, n2v, _, edges in sub_skeletons:
+    for nodes, radii, n2v, _, edges, _cl in sub_skeletons:
         if len(nodes) == 0:
             continue
 
@@ -1430,6 +1440,7 @@ def _concatenate_sub_skeletons(
             list[np.ndarray],
             dict[int, int],
             np.ndarray,
+            dict[int, float],
         ]
     ],
     radius_estimators: list[str],
@@ -1452,7 +1463,7 @@ def _concatenate_sub_skeletons(
     all_edges: list[np.ndarray] = []
 
     offset = 0
-    for nodes, radii, n2v, _, edges in sub_skeletons:
+    for nodes, radii, n2v, _, edges, _cl in sub_skeletons:
         if len(nodes) == 0:
             continue
         all_nodes.append(nodes)
@@ -1598,6 +1609,17 @@ def _skeletonize_preproc(
                 edges_arr,
             ) = _concatenate_sub_skeletons(sub_skeletons, radius_estimators)
 
+    # -- keep the per-vertex centreline distances --
+    # The `centerline` radius is an aggregate of these, so keeping them is
+    # what lets it be recomputed when a bin changes; every other radius is
+    # already recoverable from the vertices alone.  Vertex ids are global,
+    # so the per-neurite maps merge without any offsetting.
+    cl_vids: list[int] = []
+    cl_dists: list[float] = []
+    for *_rest, cl in sub_skeletons:
+        cl_vids.extend(cl.keys())
+        cl_dists.extend(cl.values())
+
     # -- global MST --
     with _timed(
         "↳  build global minimum-spanning tree",
@@ -1667,6 +1689,14 @@ def _skeletonize_preproc(
             "unit": unit,
             "id": id,
         },
+        extra=(
+            {
+                "cl_dist_vids": np.asarray(cl_vids, dtype=np.int64),
+                "cl_dist_vals": np.asarray(cl_dists, dtype=np.float64),
+            }
+            if cl_vids
+            else {}
+        ),
     )
 
 

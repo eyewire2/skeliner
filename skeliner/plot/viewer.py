@@ -3291,6 +3291,106 @@ def _create_app(
             }
         )
 
+    def _face_owner_for(name: str):
+        """Cached per-face bin owner for one skeleton layer.
+
+        Recomputing costs an O(faces) pass — cheap, but not free at a million
+        faces and one query per click.
+
+        The cache holds the mesh and skeleton it was built from and compares
+        them by identity, so replacing either invalidates it automatically.
+        The alternative, clearing a flag at every site that swaps a mesh or a
+        skeleton, is five call sites today and a silent staleness bug the first
+        time someone adds a sixth.  Keeping the references alive is also what
+        makes ``is`` sound here: neither object can be freed and have its id
+        reused while the cache still points at it.
+        """
+        sstate = skeleton_states[name]
+        mesh, skel = mesh_state["mesh"], sstate["skeleton"]
+        cached = sstate.get("_face_owner")
+        if cached is None or cached[0] is not mesh or cached[1] is not skel:
+            from skeliner import dx
+
+            sstate["_face_owner"] = (mesh, skel, dx.face_owner(skel, mesh))
+        return sstate["_face_owner"][2]
+
+    async def get_bin(request):
+        """The surface one skeleton node owns.
+
+        A node's position and every radius are computed from the mesh vertices
+        it owns, so this is what the node actually *is*.  Small enough to fetch
+        per click — a bin is ~0.3–0.9 KB of face ids on real cells — which is
+        why the partition is never shipped in bulk.
+
+        Accepts either ``node`` (which bin?) or ``face`` (which bin owns this
+        piece of surface?), the same lookup in both directions.
+        """
+        body = await request.json()
+        name = body.get("name")
+        if not name or name not in skeleton_states:
+            return JSONResponse(
+                {"ok": False, "error": "No such skeleton"}, status_code=400
+            )
+        skel = skeleton_states[name].get("skeleton")
+        if skel is None or skel.node2verts is None:
+            return JSONResponse(
+                {"ok": False, "error": "Skeleton carries no mesh data"},
+                status_code=400,
+            )
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        owner = _face_owner_for(name)
+
+        node = body.get("node")
+        if node is None:
+            face = body.get("face")
+            if face is None:
+                return JSONResponse(
+                    {"ok": False, "error": "Pass either node or face"},
+                    status_code=400,
+                )
+            if not (0 <= int(face) < len(owner)):
+                return JSONResponse(
+                    {"ok": False, "error": "face id out of range"}, status_code=400
+                )
+            node = int(owner[int(face)])
+            if node < 0:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "That face belongs to no bin — soma, organelle "
+                        "or discarded surface is not part of the arbor.",
+                    },
+                    status_code=400,
+                )
+        node = int(node)
+        if not (0 <= node < len(skel.nodes)):
+            return JSONResponse(
+                {"ok": False, "error": "node id out of range"}, status_code=400
+            )
+
+        faces = np.flatnonzero(owner == node)
+        edges = np.asarray(skel.edges)
+        touching = edges[(edges[:, 0] == node) | (edges[:, 1] == node)]
+        nbrs = np.unique(touching)
+        nbrs = nbrs[nbrs != node]
+        return JSONResponse(
+            {
+                "ok": True,
+                "node": node,
+                "faces": faces.tolist(),
+                "nVerts": int(len(skel.node2verts[node])),
+                "radius": float(skel.r[node]),
+                "neighbors": nbrs.tolist(),
+                # node 0's "bin" is soma.verts, not a bin: it is assigned
+                # wholesale by the soma stitch and is Edit Mesh's to change.
+                "editable": node != 0,
+            }
+        )
+
     async def shortest_path_endpoint(request):
         """Compute shortest path between two faces or two skeleton nodes."""
         import heapq
@@ -3672,6 +3772,7 @@ def _create_app(
                 methods=["GET"],
             ),
             Route("/skeletonize", run_skeletonize, methods=["POST"]),
+            Route("/bin", get_bin, methods=["POST"]),
             Route("/shortest_path", shortest_path_endpoint, methods=["POST"]),
             WebSocketRoute("/ws", ws_endpoint),
         ],

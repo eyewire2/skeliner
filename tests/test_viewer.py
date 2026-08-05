@@ -6,6 +6,7 @@ the WebSocket, which is the only sign a long-running step is moving.
 
 import asyncio
 import contextlib
+import copy
 import io
 import threading
 
@@ -233,3 +234,167 @@ def test_organelle_target_writes_the_manual_mask(reassign_client):
     client.post("/reassign_apply")
     assert state["organelles"].manual[sel].all()
     assert not state["organelles"].pocket.any()
+
+
+# ── /bin ──────────────────────────────────────────────────────────────
+#
+# A node *is* the set of mesh vertices it owns, so Edit Partition renders a
+# selected node as that surface.  A bin is small enough to fetch per click,
+# which is why the partition is never shipped in bulk.
+
+
+@pytest.fixture
+def bin_client(tmp_path, monkeypatch):
+    """A viewer with a mesh and a skeleton layer built from it.
+
+    Subdivided three times so the tube is long enough in mesh edges to bin
+    into several nodes; two subdivisions give four, which is too few for the
+    neighbour and non-overlap checks to say anything.
+    """
+    from starlette.testclient import TestClient
+
+    from skeliner import skeletonize
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+    mesh = trimesh.creation.cylinder(radius=40.0, height=1200.0, sections=24)
+    mesh = mesh.subdivide().subdivide().subdivide()
+    skel = skeletonize(mesh, verbose=False)
+    assert len(skel.nodes) >= 6, "fixture must produce enough bins to test with"
+
+    app = _create_app(preload_mesh=mesh, port=8913)
+    with TestClient(app) as client:
+        path = tmp_path / "skeleton.npz"
+        skel.to_npz(path)
+        client.post("/upload", files={"file": ("skeleton.npz", path.read_bytes())})
+        name = next(iter(client.get("/skeletons").json()))
+        yield client, name, mesh, skel
+
+
+def test_a_bin_is_the_surface_its_node_owns(bin_client):
+    client, name, mesh, skel = bin_client
+    r = client.post("/bin", json={"name": name, "node": 3})
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["node"] == 3
+    assert body["nVerts"] == len(skel.node2verts[3])
+    assert body["radius"] == pytest.approx(float(skel.r[3]))
+    assert len(body["faces"]) > 0
+
+    # every returned face really is a >=2-of-3 majority of that bin
+    owned = set(np.asarray(skel.node2verts[3]).tolist())
+    for f in body["faces"]:
+        assert sum(v in owned for v in mesh.faces[f]) >= 2
+
+
+def test_clicking_a_face_finds_the_bin_that_owns_it(bin_client):
+    """The inverse lookup: what is in front of you is a strip of surface,
+    not a node id."""
+    client, name, _, _ = bin_client
+    faces = client.post("/bin", json={"name": name, "node": 4}).json()["faces"]
+    back = client.post("/bin", json={"name": name, "face": faces[0]}).json()
+    assert back["node"] == 4
+
+
+def test_bins_do_not_overlap(bin_client):
+    client, name, _, skel = bin_client
+    seen = set()
+    for node in range(1, min(8, len(skel.nodes))):
+        faces = client.post("/bin", json={"name": name, "node": node}).json()["faces"]
+        assert not (seen & set(faces)), f"node {node} shares faces with an earlier bin"
+        seen |= set(faces)
+
+
+def test_node_0_is_reported_as_not_editable(bin_client):
+    """Node 0's "bin" is ``soma.verts``, assigned wholesale by the soma
+    stitch.  It belongs to Edit Mesh, not Edit Partition."""
+    client, name, _, _ = bin_client
+    assert (
+        client.post("/bin", json={"name": name, "node": 0}).json()["editable"] is False
+    )
+    assert (
+        client.post("/bin", json={"name": name, "node": 1}).json()["editable"] is True
+    )
+
+
+def test_a_face_owned_by_no_bin_is_refused(bin_client, tmp_path):
+    """Soma, organelle and discarded surface is display-only here — saying
+    so beats silently returning an empty selection.
+
+    A bare tube has no unowned surface, so one is made: emptying a bin
+    leaves its faces owned by nobody, which is exactly the shape of the
+    real case.
+    """
+    from skeliner import dx
+
+    client, _, mesh, skel = bin_client
+    holed = copy.deepcopy(skel)
+    orphaned = np.asarray(holed.node2verts[2], dtype=np.int64)
+    holed.node2verts[2] = np.empty(0, dtype=np.int64)
+    for v in orphaned:
+        holed.vert2node.pop(int(v), None)
+
+    path = tmp_path / "holed.npz"
+    holed.to_npz(path)
+    client.post("/upload", files={"file": ("holed.npz", path.read_bytes())})
+
+    owner = dx.face_owner(holed, mesh)
+    orphans = np.flatnonzero(owner < 0)
+    assert orphans.size > 0, "emptying a bin must leave surface unowned"
+
+    r = client.post("/bin", json={"name": "holed.npz", "face": int(orphans[0])})
+    assert r.status_code == 400
+    assert "no bin" in r.json()["error"]
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ({}, "No such skeleton"),
+        ({"name": "nope", "node": 0}, "No such skeleton"),
+        ({"name": "skeleton.npz"}, "Pass either node or face"),
+        ({"name": "skeleton.npz", "node": 10**9}, "node id out of range"),
+        ({"name": "skeleton.npz", "face": 10**9}, "face id out of range"),
+    ],
+)
+def test_bin_rejects_bad_input(bin_client, body, expected):
+    client, name, _, _ = bin_client
+    if body.get("name") == "skeleton.npz":
+        body = {**body, "name": name}
+    r = client.post("/bin", json=body)
+    assert r.status_code == 400
+    assert expected in r.json()["error"]
+
+
+def test_the_owner_cache_follows_the_mesh(bin_client):
+    """The cache holds the mesh and skeleton it was built from and compares
+    them by identity, so replacing either cannot serve a stale answer.
+
+    Driven by actually swapping the mesh, because a cache that is only ever
+    read never proves anything.
+    """
+    client, name, mesh, _ = bin_client
+    before = client.post("/bin", json={"name": name, "node": 3}).json()["faces"]
+    assert before, "nothing to invalidate"
+
+    # reach mesh_state the way the reassign fixture does
+    state = None
+    for route in client.app.routes:
+        fn = getattr(route, "endpoint", None)
+        for cell in getattr(fn, "__closure__", None) or ():
+            val = cell.cell_contents
+            if isinstance(val, dict) and "pending_reassignment" in val:
+                state = val
+        if state is not None:
+            break
+    assert state is not None
+
+    # a different mesh object with the faces reversed: same ids, new owners
+    swapped = mesh.copy()
+    swapped.faces = np.asarray(mesh.faces)[::-1]
+    state["mesh"] = swapped
+
+    after = client.post("/bin", json={"name": name, "node": 3}).json()["faces"]
+    expected = [len(mesh.faces) - 1 - f for f in reversed(before)]
+    assert after == expected, "the cache served an answer for the old mesh"

@@ -405,6 +405,14 @@
                     >
                         Edit Mesh
                     </button>
+                    <button
+                        id="modeSkelBtn"
+                        class="mode-btn"
+                        style="margin-left: 4px"
+                        title="Edit how the arbor is partitioned into bins — needs Skeletonize first"
+                    >
+                        Edit Partition
+                    </button>
                     <span style="color: #888; margin-left: 12px">Path:</span>
                     <button id="findPathBtn" style="margin-left: 4px">Edge</button>
                     <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
@@ -464,6 +472,27 @@
                         <button id="reassignApplyBtn">Apply</button>
                         <button id="reassignCancelBtn" style="margin-left: 4px">Cancel</button>
                     </span>
+                </div>
+            </div>
+
+            <div id="editskel-rows" style="display: none">
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <span style="color: #888">Bin:</span>
+                    <select id="binSkelSel" style="font-size: 11px; margin-left: 4px"></select>
+                    <label
+                        style="margin-left: 10px"
+                        title="The ball is the radius the bin produces; the patch is what it is computed from. Their disagreement is the defect."
+                    >
+                        <input type="checkbox" id="binShowBall" checked />
+                        radius ball
+                    </label>
+                    <button id="binClearBtn" style="margin-left: 10px">Clear</button>
+                </div>
+                <div
+                    id="binReadout"
+                    style="margin-top: 4px; color: #888; white-space: nowrap; overflow-x: auto"
+                >
+                    Click a node, or the surface it owns, to select a bin.
                 </div>
             </div>
         </div>
@@ -887,8 +916,16 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("reassignCancelBtn").addEventListener("click", cancelReassign);
                 document
                     .getElementById("modePreprocessBtn")
-                    .addEventListener("click", () => setMode(false));
-                document.getElementById("modeEditBtn").addEventListener("click", () => setMode(true));
+                    .addEventListener("click", () => setMode("preprocess"));
+                document
+                    .getElementById("modeEditBtn")
+                    .addEventListener("click", () => setMode("editmesh"));
+                document
+                    .getElementById("modeSkelBtn")
+                    .addEventListener("click", () => setMode("editskel"));
+                document.getElementById("binSkelSel").addEventListener("change", clearBinSelection);
+                document.getElementById("binClearBtn").addEventListener("click", clearBinSelection);
+                document.getElementById("binShowBall").addEventListener("change", redrawBinBalls);
                 document.getElementById("scopeAllBtn").addEventListener("click", () => setScopeAll(true));
                 document.getElementById("scopeNoneBtn").addEventListener("click", () => setScopeAll(false));
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
@@ -1362,6 +1399,7 @@ let meshCentroid = [0, 0, 0];
                     group,
                     nodePoints,
                     lines,
+                    nodes: nodesArr,
                     radii: radiiArr,
                     nNodes,
                     nEdges,
@@ -1574,6 +1612,14 @@ let meshCentroid = [0, 0, 0];
                     const radius = skelNodeRadii ? skelNodeRadii[nodeIndex] : null;
                     const key = `${bestSkelName}:${nodeIndex}`;
 
+                    // In Edit Partition a node is shown as the surface it
+                    // owns, not as a ball: the bin is what a node actually is.
+                    if (panelMode === "editskel") {
+                        document.getElementById("binSkelSel").value = bestSkelName;
+                        selectBin(nodeIndex);
+                        return;
+                    }
+
                     // Click same node again → deselect
                     if (selectedNodes[key]) {
                         scene.remove(selectedNodes[key].mesh);
@@ -1620,6 +1666,14 @@ let meshCentroid = [0, 0, 0];
                 const hit = hits[0];
                 const faceIndex = hit.faceIndex;
                 const point = hit.point;
+
+                // Clicking the surface is the more natural way in: the thing
+                // in front of you is a misassigned strip, not a node id.
+                if (panelMode === "editskel") {
+                    selectBin(faceIndex, true);
+                    return;
+                }
+
                 if (event.shiftKey) {
                     // Deselecting is always allowed; only adding is scoped, so
                     // a narrowed scope can never trap faces in the selection.
@@ -1900,26 +1954,42 @@ let meshCentroid = [0, 0, 0];
             // The two panels are different activities — run the automatic
             // steps in order, versus select/assign/commit — and separating
             // them is what keeps a lasso from meaning two things.
+            // Three modes, because they are the workflow stages: run the
+            // automatic steps, then correct the components, then correct the
+            // partition.  `editMode` stays a boolean for Edit Mesh so the
+            // scope block below reads exactly one thing.
+            let panelMode = "preprocess"; // preprocess | editmesh | editskel
             let editMode = false;
 
-            function setMode(edit) {
-                editMode = edit;
-                document.getElementById("preprocess-rows").style.display = edit
-                    ? "none"
-                    : "block";
-                document.getElementById("editmesh-rows").style.display = edit
-                    ? "block"
-                    : "none";
-                document.getElementById("modePreprocessBtn").dataset.active = edit
-                    ? "0"
-                    : "1";
-                document.getElementById("modeEditBtn").dataset.active = edit ? "1" : "0";
+            const MODE_ROWS = {
+                preprocess: "preprocess-rows",
+                editmesh: "editmesh-rows",
+                editskel: "editskel-rows",
+            };
+            const MODE_BTNS = {
+                preprocess: "modePreprocessBtn",
+                editmesh: "modeEditBtn",
+                editskel: "modeSkelBtn",
+            };
+
+            function setMode(mode) {
+                panelMode = mode;
+                editMode = mode === "editmesh";
+                for (const [m, id] of Object.entries(MODE_ROWS))
+                    document.getElementById(id).style.display =
+                        m === mode ? "block" : "none";
+                for (const [m, id] of Object.entries(MODE_BTNS))
+                    document.getElementById(id).dataset.active = m === mode ? "1" : "0";
+
                 // Scoping is an Edit Mesh notion; leaving a mask applied on the
                 // way out would silently narrow selection in a panel with no
                 // scope UI to explain it.  rebuildScopeMask reads editMode.
                 rebuildScopeMask();
-                if (edit) renderScopeChips();
+                if (editMode) renderScopeChips();
                 else cancelReassign();
+
+                if (mode === "editskel") refreshBinSkelSel();
+                else clearBinSelection();
             }
 
             // ── Selection scope ──────────────────────────────────────────
@@ -2122,8 +2192,13 @@ let meshCentroid = [0, 0, 0];
                 reassignOverlays = [];
             }
 
-            function drawReassignOverlay(faces, color) {
-                if (!faces.length || !meshGeometry) return;
+            /** A coloured copy of a face subset, floated just above the mesh.
+             *
+             *  Shared by the reassign preview and by bin selection so the two
+             *  cannot drift into rendering a face set differently.  Returns
+             *  the mesh (already added to the scene) or null. */
+            function makeFaceOverlay(faces, color, opacity = 0.95) {
+                if (!faces.length || !meshGeometry) return null;
                 const posAttr = meshGeometry.getAttribute("position");
                 const positions = new Float32Array(faces.length * 9);
                 for (let j = 0; j < faces.length; j++) {
@@ -2141,13 +2216,18 @@ let meshCentroid = [0, 0, 0];
                         side: THREE.DoubleSide,
                         clippingPlanes: [clipPlane],
                         transparent: true,
-                        opacity: 0.95,
+                        opacity,
                         polygonOffset: true,
                         polygonOffsetFactor: -3,
                     }),
                 );
                 scene.add(m);
-                reassignOverlays.push(m);
+                return m;
+            }
+
+            function drawReassignOverlay(faces, color) {
+                const m = makeFaceOverlay(faces, color);
+                if (m) reassignOverlays.push(m);
             }
 
             function setPendingReassign(on) {
@@ -2222,6 +2302,164 @@ let meshCentroid = [0, 0, 0];
                 clearReassignOverlay();
                 setPendingReassign(false);
                 document.getElementById("reassignSummary").style.display = "none";
+            }
+
+            // ── Bin selection (Edit Partition) ───────────────────────────
+            // A node *is* the set of mesh vertices it owns: its position is
+            // their centroid and every radius is an aggregate over them.  So
+            // in this mode a selected node renders as the surface it owns
+            // rather than as a ball.
+            //
+            // The whole partition is never shipped — a bin is ~0.3-0.9 KB of
+            // face ids on real cells, so it is fetched per click.
+            const BIN_COLORS = [
+                [1.0, 0.35, 0.1],
+                [0.2, 0.9, 1.0],
+                [0.9, 0.3, 1.0],
+                [0.4, 1.0, 0.35],
+            ];
+            let binOverlays = [];   // face patches, one per selected bin
+            let binBalls = [];      // the radius each bin produces
+            let selectedBins = [];  // [{node, faces, nVerts, radius, neighbors}]
+
+            function refreshBinSkelSel() {
+                const sel = document.getElementById("binSkelSel");
+                const had = sel.value;
+                sel.innerHTML = "";
+                for (const name of Object.keys(skelGroups)) {
+                    const o = document.createElement("option");
+                    o.value = name;
+                    o.textContent = name;
+                    sel.appendChild(o);
+                }
+                if (had && skelGroups[had]) sel.value = had;
+                if (!sel.options.length) {
+                    setBinReadout("No skeleton loaded — run Skeletonize first.");
+                }
+            }
+
+            function setBinReadout(html) {
+                document.getElementById("binReadout").innerHTML = html;
+            }
+
+            function clearBinSelection() {
+                for (const m of binOverlays) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                for (const m of binBalls) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                binOverlays = [];
+                binBalls = [];
+                selectedBins = [];
+                setBinReadout("Click a node, or the surface it owns, to select a bin.");
+            }
+
+            function redrawBinBalls() {
+                for (const m of binBalls) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                binBalls = [];
+                if (!document.getElementById("binShowBall").checked) return;
+                const sname = document.getElementById("binSkelSel").value;
+                const sg = skelGroups[sname];
+                if (!sg || !sg.nodes) return;
+                selectedBins.forEach((b, i) => {
+                    const c = BIN_COLORS[i % BIN_COLORS.length];
+                    const geo = new THREE.SphereGeometry(b.radius, 20, 14);
+                    const m = new THREE.Mesh(
+                        geo,
+                        new THREE.MeshBasicMaterial({
+                            color: new THREE.Color(c[0], c[1], c[2]),
+                            wireframe: true,
+                            transparent: true,
+                            opacity: 0.35,
+                        }),
+                    );
+                    m.position.set(
+                        sg.nodes[b.node * 3],
+                        sg.nodes[b.node * 3 + 1],
+                        sg.nodes[b.node * 3 + 2],
+                    );
+                    scene.add(m);
+                    binBalls.push(m);
+                });
+            }
+
+            function renderBinReadout() {
+                if (!selectedBins.length) {
+                    setBinReadout("Click a node, or the surface it owns, to select a bin.");
+                    return;
+                }
+                const parts = selectedBins.map((b, i) => {
+                    const c = BIN_COLORS[i % BIN_COLORS.length];
+                    const swatch = `<span class="chip-swatch" style="background:rgb(${
+                        Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${
+                        Math.round(c[2] * 255)})"></span>`;
+                    return (
+                        `${swatch}<b>node ${b.node}</b> — ` +
+                        `${b.nVerts.toLocaleString()} verts, ` +
+                        `${b.faces.length.toLocaleString()} faces, ` +
+                        `r=${b.radius.toFixed(1)}, ` +
+                        `${b.neighbors.length} neighbour${b.neighbors.length === 1 ? "" : "s"}`
+                    );
+                });
+                setBinReadout(parts.join("<br>"));
+            }
+
+            function drawBinOverlay(faces, color) {
+                const m = makeFaceOverlay(faces, color, 0.9);
+                if (m) binOverlays.push(m);
+            }
+
+            /** Select the bin for a node id, or for a face if `byFace`. */
+            async function selectBin(value, byFace = false) {
+                const sname = document.getElementById("binSkelSel").value;
+                if (!sname) {
+                    setBinReadout("No skeleton loaded — run Skeletonize first.");
+                    return;
+                }
+                const body = { name: sname };
+                body[byFace ? "face" : "node"] = value;
+                let data;
+                try {
+                    const r = await fetch("/bin", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body),
+                    });
+                    data = await r.json();
+                } catch (e) {
+                    setBinReadout(`<span style="color:#e77">${e}</span>`);
+                    return;
+                }
+                if (!data.ok) {
+                    setBinReadout(`<span style="color:#e77">${data.error}</span>`);
+                    return;
+                }
+
+                // Clicking the same bin again deselects it.
+                const at = selectedBins.findIndex((b) => b.node === data.node);
+                if (at >= 0) selectedBins.splice(at, 1);
+                else selectedBins.push(data);
+
+                for (const m of binOverlays) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+                binOverlays = [];
+                selectedBins.forEach((b, i) =>
+                    drawBinOverlay(b.faces, BIN_COLORS[i % BIN_COLORS.length]),
+                );
+                redrawBinBalls();
+                renderBinReadout();
             }
 
             async function runMergeSelected() {

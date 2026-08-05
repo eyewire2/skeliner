@@ -138,6 +138,47 @@ def test_preproc_track_with_soma(reference_mesh):
     assert np.linalg.norm(skel.soma.center - mesh_center) < 1e3
 
 
+# ----- centreline distances survive so `centerline` can be recomputed ------
+#
+# Every other radius is an aggregate over the vertices a node owns, so it
+# falls out of a re-partition for free.  `centerline` aggregates a *per
+# vertex* perpendicular distance that only the second binning pass knows,
+# so it is kept on the skeleton — otherwise editing a bin would leave a
+# stale `centerline` beside freshly recomputed `mean` / `median` / `trim`.
+
+
+def test_centerline_distances_are_kept(reference_mesh):
+    comp = _make_components(reference_mesh, with_soma=True)
+    skel = skeletonize(reference_mesh, components=comp, verbose=False)
+    if "centerline" not in skel.radii:
+        pytest.skip("second pass did not run on this mesh")
+
+    vids = skel.extra["cl_dist_vids"]
+    vals = skel.extra["cl_dist_vals"]
+    assert vids.size == vals.size > 0
+    assert np.unique(vids).size == vids.size, "one distance per vertex"
+
+
+def test_centerline_is_reproducible_from_what_was_kept(reference_mesh):
+    """The stored map must reproduce `radii['centerline']` exactly, or
+    keeping it buys nothing."""
+    from skeliner._core import _estimate_radius
+
+    comp = _make_components(reference_mesh, with_soma=True)
+    skel = skeletonize(reference_mesh, components=comp, verbose=False)
+    if "centerline" not in skel.radii:
+        pytest.skip("second pass did not run on this mesh")
+
+    lut = np.full(len(reference_mesh.vertices), 0.0)
+    lut[skel.extra["cl_dist_vids"]] = skel.extra["cl_dist_vals"]
+
+    stored = np.asarray(skel.radii["centerline"])
+    for ni in range(1, len(skel.nodes)):  # node 0 is the soma, not a bin
+        d = lut[np.asarray(skel.node2verts[ni], np.int64)]
+        want = _estimate_radius(d, method="trim", trim_fraction=0.05) if d.size else 0.0
+        assert want == pytest.approx(stored[ni], abs=1e-9), f"node {ni}"
+
+
 # ----- verbose timing breakdown -------------------------------------------
 
 
