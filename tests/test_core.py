@@ -138,6 +138,32 @@ def test_preproc_track_with_soma(reference_mesh):
     assert np.linalg.norm(skel.soma.center - mesh_center) < 1e3
 
 
+# ----- verbose timing breakdown -------------------------------------------
+
+
+def test_preproc_track_reports_each_stage_as_it_finishes(reference_mesh, capsys):
+    """One number for the whole neurite loop says nothing about which
+    stage is slow, and `_timed` holds sub-messages until its block ends,
+    so the stages are top-level steps that print when they complete."""
+    comp = _make_components(reference_mesh, with_soma=False)
+    skeletonize(reference_mesh, components=comp, verbose=True)
+    out = capsys.readouterr().out
+
+    stages = [ln for ln in out.splitlines() if ln.lstrip().startswith("↳")]
+    named = {ln.split("…")[0].split("↳")[1].strip() for ln in stages}
+    assert "bin vertices by geodesic distance" in named, named
+    assert "split bins that wrap a branch point" in named, named
+    assert "skeletonize neurites" not in named, "the opaque wrapper is gone"
+    for ln in stages:
+        assert ln.rstrip().endswith(" s"), ln
+
+
+def test_no_breakdown_when_quiet(reference_mesh, capsys):
+    comp = _make_components(reference_mesh, with_soma=False)
+    skeletonize(reference_mesh, components=comp, verbose=False)
+    assert capsys.readouterr().out == ""
+
+
 # ----- branch-band split --------------------------------------------------
 #
 # A geodesic shell that lands on a branch point wraps the parent tube and

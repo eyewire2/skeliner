@@ -1,6 +1,6 @@
 import time
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from importlib import metadata as _metadata
 from typing import Dict, List
 
@@ -63,6 +63,11 @@ def _timed(label: str, *, verbose: bool):
             print(f"      └─ {m}")
 
 
+def _no_stage(_label: str):
+    """Report nothing — the default when a caller wants no progress."""
+    return nullcontext()
+
+
 # -----------------------------------------------------------------------------
 #  Graph helpers
 # -----------------------------------------------------------------------------
@@ -101,12 +106,28 @@ def _dist_vec_for_component(
     seed_arr = np.atleast_1d(np.asarray(seed_vid, dtype=np.int64))
 
     # Map seed mesh-vertex IDs → local indices in *sub*
-    root_idxs = [int(np.where(verts == s)[0][0]) for s in seed_arr]
+    local_of = {int(v): i for i, v in enumerate(verts)}
+    root_idxs = [local_of[int(s)] for s in seed_arr]
 
-    # igraph returns shape (len(source), |verts|)
-    dist_matrix = np.asarray(sub.distances(source=root_idxs, weights="weight"))
-    # Multi-source: take min distance from any seed
-    return dist_matrix.min(axis=0)
+    if len(root_idxs) > 1:
+        # Join every seed to one virtual vertex by a zero-weight edge:
+        # a single Dijkstra from it is the min over all seeds, exactly.
+        # Passing the seeds to igraph as `source=` instead runs one
+        # Dijkstra per seed and builds a (len(seeds), |verts|) matrix
+        # only to take its minimum — seeding a 740k-vertex neurite from
+        # a 78-vertex soma ring costs 11.4 s and 0.46 GB that way,
+        # against 0.3 s here for the same distances.
+        sub.add_vertex()
+        virtual = sub.vcount() - 1
+        sub.add_edges(
+            [(virtual, i) for i in root_idxs],
+            attributes={"weight": [0.0] * len(root_idxs)},
+        )
+        root_idxs = [virtual]
+
+    dist = np.asarray(sub.distances(source=root_idxs, weights="weight")[0])
+    # drop the virtual vertex, which igraph appended last
+    return dist[: len(verts)]
 
 
 def _geodesic_bins(dist_dict: Dict[int, float], step: float) -> List[List[int]]:
@@ -947,6 +968,7 @@ def _skeletonize_component(
     split_min_shell_vertices: int = 50,
     split_max_vertices_per_slice: int | None = None,
     second_pass: bool = True,
+    stage=_no_stage,
 ) -> tuple[
     np.ndarray,
     dict[str, np.ndarray],
@@ -987,231 +1009,245 @@ def _skeletonize_component(
     mesh_vertices = mesh.vertices.view(np.ndarray)
     e_m = float(mesh.edges_unique_length.mean())
 
-    all_shells = _bin_one_component(
-        gsurf,
-        vert_ids,
-        seed_vid,
-        mesh_vertices=mesh_vertices,
-        mean_edge_len=e_m,
-        soma_verts=soma_verts,
-        step_size=step_size,
-        target_shell_count=target_shell_count,
-        min_shell_vertices=min_shell_vertices,
-        max_shell_width_factor=max_shell_width_factor,
-        split_elongated_shells=split_elongated_shells,
-        split_aspect_thr=split_aspect_thr,
-        split_min_shell_vertices=(split_min_shell_vertices),
-        split_max_vertices_per_slice=(split_max_vertices_per_slice),
-    )
-
-    nodes_arr, radii_dict, node2verts, vert2node = _make_nodes(
-        all_shells,
-        mesh_vertices,
-        radius_estimators=radius_estimators,
-        merge_nested=merge_nested,
-        merge_kwargs=merge_kwargs,
-    )
-
-    edges_arr = _edges_from_mesh(
-        mesh.edges_unique,
-        vert2node,
-        n_mesh_verts=len(mesh.vertices),
-    )
-
-    # -- second pass: perpendicular re-binning --------
-    if second_pass and len(nodes_arr) > 1 and edges_arr.size:
-        edges_mst = _build_mst(nodes_arr, edges_arr)
-
-        rebin_shells, vid_cl_dist = _perpendicular_rebin(
-            nodes_arr,
-            edges_mst,
-            node2verts,
-            mesh_vertices,
-            radius_estimators,
-            radii_dict,
+    with stage("bin vertices by geodesic distance"):
+        all_shells = _bin_one_component(
+            gsurf,
+            vert_ids,
+            seed_vid,
+            mesh_vertices=mesh_vertices,
+            mean_edge_len=e_m,
+            soma_verts=soma_verts,
+            step_size=step_size,
+            target_shell_count=target_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=max_shell_width_factor,
+            split_elongated_shells=split_elongated_shells,
+            split_aspect_thr=split_aspect_thr,
+            split_min_shell_vertices=(split_min_shell_vertices),
+            split_max_vertices_per_slice=(split_max_vertices_per_slice),
         )
 
-        # Re-check rings, merge non-rings
-        vert_set = set(int(x) for x in vert_ids)
-        final_shells: List[List[np.ndarray]] = []
-        pending: List[np.ndarray] = []
-        for band in rebin_shells:
-            rings = []
-            frags = []
-            for c in band:
-                if _is_ring(c, gsurf, vert_set):
-                    rings.append(c)
-                else:
-                    frags.append(c)
-            if frags:
-                pending.extend(frags)
-            if rings:
-                final_shells.append(rings)
-
-        if pending:
-            vid_to_ring: dict[int, tuple[int, int]] = {}
-            for bi, band in enumerate(final_shells):
-                for ci, ring in enumerate(band):
-                    for vid in ring:
-                        vid_to_ring[int(vid)] = (bi, ci)
-            for frag in pending:
-                votes: dict[tuple[int, int], int] = {}
-                for vid in frag:
-                    for e in gsurf.incident(int(vid)):
-                        src = gsurf.es[e].source
-                        tgt = gsurf.es[e].target
-                        nbr = tgt if src == int(vid) else src
-                        key = vid_to_ring.get(nbr)
-                        if key is not None:
-                            votes[key] = votes.get(key, 0) + 1
-                if votes:
-                    best = max(votes, key=votes.get)
-                    bi, ci = best
-                    final_shells[bi][ci] = np.concatenate([final_shells[bi][ci], frag])
-                    for vid in frag:
-                        vid_to_ring[int(vid)] = best
-
-        # Arc-length assignment has no notion of the surface: a vertex
-        # whose projection lands near a node is claimed by it even when
-        # it is a micron away across the mesh.  That leaves bins in
-        # several disconnected pieces and drags the node's centroid into
-        # the empty space between them.  Keep each bin's largest
-        # connected piece and hand every stray piece to a bin it
-        # actually touches.  Connectivity is categorical — no threshold.
-        owner_of: dict[int, tuple[int, int]] = {}
-        for bi, band in enumerate(final_shells):
-            for ci, comp in enumerate(band):
-                for vid in comp:
-                    owner_of[int(vid)] = (bi, ci)
-
-        def _pieces(comp):
-            vset = set(int(v) for v in comp)
-            seen: set[int] = set()
-            out: list[list[int]] = []
-            for start in vset:
-                if start in seen:
-                    continue
-                queue = deque([start])
-                seen.add(start)
-                grp = [start]
-                while queue:
-                    u = queue.popleft()
-                    for e in gsurf.incident(u):
-                        src = gsurf.es[e].source
-                        tgt = gsurf.es[e].target
-                        nb = tgt if src == u else src
-                        if nb in vset and nb not in seen:
-                            seen.add(nb)
-                            queue.append(nb)
-                            grp.append(nb)
-                out.append(grp)
-            return sorted(out, key=len, reverse=True)
-
-        # Donating a stray can disconnect the bin that receives it, so a
-        # single pass does not converge — repeat until every bin is one
-        # piece, refreshing ownership each round.
-        for _ in range(8):
-            changed = False
-            for bi, band in enumerate(final_shells):
-                for ci, comp in enumerate(band):
-                    if len(comp) < 2:
-                        continue
-                    parts = _pieces(comp)
-                    if len(parts) < 2:
-                        continue
-                    band[ci] = np.asarray(parts[0], dtype=comp.dtype)
-                    for vid in parts[0]:
-                        owner_of[int(vid)] = (bi, ci)
-                    for stray in parts[1:]:
-                        votes: dict[tuple[int, int], int] = {}
-                        for vid in stray:
-                            for e in gsurf.incident(vid):
-                                src = gsurf.es[e].source
-                                tgt = gsurf.es[e].target
-                                nb = tgt if src == vid else src
-                                key = owner_of.get(nb)
-                                if key is not None and key != (bi, ci):
-                                    votes[key] = votes.get(key, 0) + 1
-                        if not votes:
-                            band[ci] = np.concatenate(
-                                [band[ci], np.asarray(stray, dtype=np.int64)]
-                            )
-                            continue
-                        tb, tc = max(votes, key=lambda k: votes[k])
-                        final_shells[tb][tc] = np.concatenate(
-                            [final_shells[tb][tc], np.asarray(stray, dtype=np.int64)]
-                        )
-                        for vid in stray:
-                            owner_of[int(vid)] = (tb, tc)
-                        changed = True
-            if not changed:
-                break
-
-        # A bin that touches three or more separate neighbourhoods is not
-        # a cross-section: it is the band wrapping a branch point, holding
-        # the parent tube and both children at once.  Averaging points on
-        # diverging tubes puts its node in the notch between them, on or
-        # past the surface.  Split it so each piece wraps one tube.  The
-        # number of neighbourhoods is a count, not a threshold.
-        # One pass, not a loop: the split already sends every vertex to the
-        # tube nearest it, so there is nothing left to cut.  Repeating it
-        # only shaves slivers off, because the pieces of a split are bins
-        # in their own right and each sibling then reads as another
-        # neighbourhood.  For the same reason every decision is made
-        # against a snapshot of ownership taken before any bin is cut, so
-        # the result does not depend on the order bins are visited.
-        snapshot = dict(owner_of)
-        planned: list[tuple[int, int, list[np.ndarray]]] = []
-        for bi, band in enumerate(final_shells):
-            for ci, comp in enumerate(band):
-                if len(comp) < 3:
-                    continue
-                groups = _neighbour_groups(comp, gsurf, snapshot, (bi, ci))
-                if len(groups) < 3:
-                    continue
-                parts = _split_branch_band(comp, groups, gsurf)
-                if len(parts) > 1:
-                    planned.append((bi, ci, parts))
-
-        for bi, ci, parts in planned:
-            band = final_shells[bi]
-            band[ci] = parts[0]
-            for vid in parts[0]:
-                owner_of[int(vid)] = (bi, ci)
-            for extra in parts[1:]:
-                band.append(extra)
-                for vid in extra:
-                    owner_of[int(vid)] = (bi, len(band) - 1)
-
-        # Remake nodes and edges with centerline radii
+    with stage("compute bin centroids and radii"):
         nodes_arr, radii_dict, node2verts, vert2node = _make_nodes(
-            final_shells,
+            all_shells,
             mesh_vertices,
             radius_estimators=radius_estimators,
             merge_nested=merge_nested,
             merge_kwargs=merge_kwargs,
         )
 
-        # Compute centerline radii (perpendicular distance
-        # from each vertex to the skeleton path)
-        cl_radii = np.empty(len(nodes_arr))
-        for ni, n2v in enumerate(node2verts):
-            dists = np.array([vid_cl_dist.get(int(v), 0.0) for v in n2v])
-            if len(dists) > 0:
-                cl_radii[ni] = _estimate_radius(
-                    dists,
-                    method="trim",
-                    trim_fraction=0.05,
-                )
-            else:
-                cl_radii[ni] = 0.0
-        radii_dict["centerline"] = cl_radii
-
+    with stage("derive edges from mesh edges"):
         edges_arr = _edges_from_mesh(
             mesh.edges_unique,
             vert2node,
             n_mesh_verts=len(mesh.vertices),
         )
+
+    # -- second pass: perpendicular re-binning --------
+    if second_pass and len(nodes_arr) > 1 and edges_arr.size:
+        with stage("re-bin perpendicular to the centreline"):
+            edges_mst = _build_mst(nodes_arr, edges_arr)
+
+            rebin_shells, vid_cl_dist = _perpendicular_rebin(
+                nodes_arr,
+                edges_mst,
+                node2verts,
+                mesh_vertices,
+                radius_estimators,
+                radii_dict,
+            )
+
+        with stage("re-check rings, merge non-rings"):
+            # Re-check rings, merge non-rings
+            vert_set = set(int(x) for x in vert_ids)
+            final_shells: List[List[np.ndarray]] = []
+            pending: List[np.ndarray] = []
+            for band in rebin_shells:
+                rings = []
+                frags = []
+                for c in band:
+                    if _is_ring(c, gsurf, vert_set):
+                        rings.append(c)
+                    else:
+                        frags.append(c)
+                if frags:
+                    pending.extend(frags)
+                if rings:
+                    final_shells.append(rings)
+
+            if pending:
+                vid_to_ring: dict[int, tuple[int, int]] = {}
+                for bi, band in enumerate(final_shells):
+                    for ci, ring in enumerate(band):
+                        for vid in ring:
+                            vid_to_ring[int(vid)] = (bi, ci)
+                for frag in pending:
+                    votes: dict[tuple[int, int], int] = {}
+                    for vid in frag:
+                        for e in gsurf.incident(int(vid)):
+                            src = gsurf.es[e].source
+                            tgt = gsurf.es[e].target
+                            nbr = tgt if src == int(vid) else src
+                            key = vid_to_ring.get(nbr)
+                            if key is not None:
+                                votes[key] = votes.get(key, 0) + 1
+                    if votes:
+                        best = max(votes, key=votes.get)
+                        bi, ci = best
+                        final_shells[bi][ci] = np.concatenate(
+                            [final_shells[bi][ci], frag]
+                        )
+                        for vid in frag:
+                            vid_to_ring[int(vid)] = best
+
+        with stage("reunite bins split across the surface"):
+            # Arc-length assignment has no notion of the surface: a vertex
+            # whose projection lands near a node is claimed by it even when
+            # it is a micron away across the mesh.  That leaves bins in
+            # several disconnected pieces and drags the node's centroid into
+            # the empty space between them.  Keep each bin's largest
+            # connected piece and hand every stray piece to a bin it
+            # actually touches.  Connectivity is categorical — no threshold.
+            owner_of: dict[int, tuple[int, int]] = {}
+            for bi, band in enumerate(final_shells):
+                for ci, comp in enumerate(band):
+                    for vid in comp:
+                        owner_of[int(vid)] = (bi, ci)
+
+            def _pieces(comp):
+                vset = set(int(v) for v in comp)
+                seen: set[int] = set()
+                out: list[list[int]] = []
+                for start in vset:
+                    if start in seen:
+                        continue
+                    queue = deque([start])
+                    seen.add(start)
+                    grp = [start]
+                    while queue:
+                        u = queue.popleft()
+                        for e in gsurf.incident(u):
+                            src = gsurf.es[e].source
+                            tgt = gsurf.es[e].target
+                            nb = tgt if src == u else src
+                            if nb in vset and nb not in seen:
+                                seen.add(nb)
+                                queue.append(nb)
+                                grp.append(nb)
+                    out.append(grp)
+                return sorted(out, key=len, reverse=True)
+
+            # Donating a stray can disconnect the bin that receives it, so a
+            # single pass does not converge — repeat until every bin is one
+            # piece, refreshing ownership each round.
+            for _ in range(8):
+                changed = False
+                for bi, band in enumerate(final_shells):
+                    for ci, comp in enumerate(band):
+                        if len(comp) < 2:
+                            continue
+                        parts = _pieces(comp)
+                        if len(parts) < 2:
+                            continue
+                        band[ci] = np.asarray(parts[0], dtype=comp.dtype)
+                        for vid in parts[0]:
+                            owner_of[int(vid)] = (bi, ci)
+                        for stray in parts[1:]:
+                            votes: dict[tuple[int, int], int] = {}
+                            for vid in stray:
+                                for e in gsurf.incident(vid):
+                                    src = gsurf.es[e].source
+                                    tgt = gsurf.es[e].target
+                                    nb = tgt if src == vid else src
+                                    key = owner_of.get(nb)
+                                    if key is not None and key != (bi, ci):
+                                        votes[key] = votes.get(key, 0) + 1
+                            if not votes:
+                                band[ci] = np.concatenate(
+                                    [band[ci], np.asarray(stray, dtype=np.int64)]
+                                )
+                                continue
+                            tb, tc = max(votes, key=lambda k: votes[k])
+                            final_shells[tb][tc] = np.concatenate(
+                                [
+                                    final_shells[tb][tc],
+                                    np.asarray(stray, dtype=np.int64),
+                                ]
+                            )
+                            for vid in stray:
+                                owner_of[int(vid)] = (tb, tc)
+                            changed = True
+                if not changed:
+                    break
+
+        with stage("split bins that wrap a branch point"):
+            # A bin that touches three or more separate neighbourhoods is not
+            # a cross-section: it is the band wrapping a branch point, holding
+            # the parent tube and both children at once.  Averaging points on
+            # diverging tubes puts its node in the notch between them, on or
+            # past the surface.  Split it so each piece wraps one tube.  The
+            # number of neighbourhoods is a count, not a threshold.
+            # One pass, not a loop: the split already sends every vertex to the
+            # tube nearest it, so there is nothing left to cut.  Repeating it
+            # only shaves slivers off, because the pieces of a split are bins
+            # in their own right and each sibling then reads as another
+            # neighbourhood.  For the same reason every decision is made
+            # against a snapshot of ownership taken before any bin is cut, so
+            # the result does not depend on the order bins are visited.
+            snapshot = dict(owner_of)
+            planned: list[tuple[int, int, list[np.ndarray]]] = []
+            for bi, band in enumerate(final_shells):
+                for ci, comp in enumerate(band):
+                    if len(comp) < 3:
+                        continue
+                    groups = _neighbour_groups(comp, gsurf, snapshot, (bi, ci))
+                    if len(groups) < 3:
+                        continue
+                    parts = _split_branch_band(comp, groups, gsurf)
+                    if len(parts) > 1:
+                        planned.append((bi, ci, parts))
+
+            for bi, ci, parts in planned:
+                band = final_shells[bi]
+                band[ci] = parts[0]
+                for vid in parts[0]:
+                    owner_of[int(vid)] = (bi, ci)
+                for extra in parts[1:]:
+                    band.append(extra)
+                    for vid in extra:
+                        owner_of[int(vid)] = (bi, len(band) - 1)
+
+        with stage("recompute centroids and centerline radii"):
+            # Remake nodes and edges with centerline radii
+            nodes_arr, radii_dict, node2verts, vert2node = _make_nodes(
+                final_shells,
+                mesh_vertices,
+                radius_estimators=radius_estimators,
+                merge_nested=merge_nested,
+                merge_kwargs=merge_kwargs,
+            )
+
+            # Compute centerline radii (perpendicular distance
+            # from each vertex to the skeleton path)
+            cl_radii = np.empty(len(nodes_arr))
+            for ni, n2v in enumerate(node2verts):
+                dists = np.array([vid_cl_dist.get(int(v), 0.0) for v in n2v])
+                if len(dists) > 0:
+                    cl_radii[ni] = _estimate_radius(
+                        dists,
+                        method="trim",
+                        trim_fraction=0.05,
+                    )
+                else:
+                    cl_radii[ni] = 0.0
+            radii_dict["centerline"] = cl_radii
+
+        with stage("re-derive edges from mesh edges"):
+            edges_arr = _edges_from_mesh(
+                mesh.edges_unique,
+                vert2node,
+                n_mesh_verts=len(mesh.vertices),
+            )
 
     return (
         nodes_arr,
@@ -1490,36 +1526,48 @@ def _skeletonize_preproc(
 
     mesh_vertices = mesh.vertices.view(np.ndarray)
 
-    with _timed(
-        "↳  skeletonize neurites",
-        verbose=verbose,
-    ) as log:
-        sub_skeletons = []
-        for i, face_idx in enumerate(components.neurites):
-            neurite_verts = np.unique(mesh.faces[face_idx].ravel()).astype(np.int64)
+    # Each stage of the per-neurite work reports itself as a top-level
+    # step, the way `_skeletonize_direct` does.  Wrapping the loop in one
+    # `_timed` instead would report a single number for the slowest part
+    # of the run, and `_timed` holds its sub-messages until the block
+    # ends, so nothing would appear while it was actually working.
+    n_neurites = len(components.neurites)
+    sub_skeletons = []
+    for i, face_idx in enumerate(components.neurites):
+        neurite_verts = np.unique(mesh.faces[face_idx].ravel()).astype(np.int64)
 
-            seed_vid = _pick_neurite_seed(
-                neurite_verts,
-                mesh_vertices,
-                soma,
-            )
+        seed_vid = _pick_neurite_seed(
+            neurite_verts,
+            mesh_vertices,
+            soma,
+        )
 
-            sub = _skeletonize_component(
-                mesh,
-                gsurf,
-                neurite_verts,
-                seed_vid=seed_vid,
-                radius_estimators=radius_estimators,
-                merge_nested=False,
-                step_size=geodesic_step_size,
-                target_shell_count=geodesic_shell_count,
-                min_shell_vertices=min_shell_vertices,
-                max_shell_width_factor=(max_shell_width_factor),
-                split_elongated_shells=False,
-                second_pass=second_pass,
+        tag = f"neurite {i}: " if n_neurites > 1 else ""
+
+        def stage(label, _tag=tag):
+            return _timed(f"↳  {_tag}{label}", verbose=verbose)
+
+        sub = _skeletonize_component(
+            mesh,
+            gsurf,
+            neurite_verts,
+            seed_vid=seed_vid,
+            radius_estimators=radius_estimators,
+            merge_nested=False,
+            step_size=geodesic_step_size,
+            target_shell_count=geodesic_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=(max_shell_width_factor),
+            split_elongated_shells=False,
+            second_pass=second_pass,
+            stage=stage,
+        )
+        sub_skeletons.append(sub)
+        if verbose:
+            print(
+                f"      └─ neurite {i}: {len(neurite_verts):,} verts "
+                f"→ {sub[0].shape[0]:,} nodes"
             )
-            sub_skeletons.append(sub)
-            log(f"neurite {i}: {len(neurite_verts):,} verts → {sub[0].shape[0]} nodes")
 
     # -- assemble skeleton -----------------------------------------
     if has_soma:
