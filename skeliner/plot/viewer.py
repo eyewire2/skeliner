@@ -414,10 +414,10 @@ def _create_app(
 
     # ── Routes ────────────────────────────────────────────────────────
 
-    async def index(request):
+    async def index(_request):
         return HTMLResponse(_get_viewer_html())
 
-    async def get_mesh(request):
+    async def get_mesh(_request):
         if mesh_state["buffers"] is None:
             return JSONResponse(None)
         buf = mesh_state["buffers"]
@@ -425,14 +425,14 @@ def _create_app(
             buf = {**buf, "color": mesh_color}
         return JSONResponse(buf)
 
-    async def get_skeletons(request):
+    async def get_skeletons(_request):
         """Return all loaded skeletons."""
         result = {}
         for name, state in skeleton_states.items():
             result[name] = state["buffers"]
         return JSONResponse(result if result else None)
 
-    async def get_extra_meshes(request):
+    async def get_extra_meshes(_request):
         """Return all extra meshes (for multi-mesh / contact mode)."""
         if not extra_mesh_states:
             return JSONResponse(None)
@@ -445,25 +445,25 @@ def _create_app(
             }
         return JSONResponse(result)
 
-    async def get_contact_sites(request):
+    async def get_contact_sites(_request):
         """Return contact-site overlay data."""
         if _contact_state is None:
             return JSONResponse(None)
         return JSONResponse(_contact_state)
 
-    async def get_state(request):
+    async def get_state(_request):
         if state_path.exists():
             return JSONResponse(json.loads(state_path.read_text(encoding="utf-8")))
         return JSONResponse({})
 
-    async def get_annotations(request):
+    async def get_annotations(_request):
         if annotations_path.exists():
             return JSONResponse(
                 json.loads(annotations_path.read_text(encoding="utf-8"))
             )
         return JSONResponse({})
 
-    async def get_save_availability(request):
+    async def get_save_availability(_request):
         """Return which data is available for saving."""
         return JSONResponse(
             {
@@ -481,7 +481,7 @@ def _create_app(
             }
         )
 
-    async def get_loaded(request):
+    async def get_loaded(_request):
         """Return what's currently loaded."""
         result = {"mesh": None, "skeletons": {}}
         if mesh_state["path"]:
@@ -1016,7 +1016,7 @@ def _create_app(
         state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
         return JSONResponse({"ok": True})
 
-    async def detect_offsets(request):
+    async def detect_offsets(_request):
         """Run offset detection and write results to annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1101,7 +1101,7 @@ def _create_app(
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         return JSONResponse({"ok": True, "nOffsets": len(offsets)})
 
-    async def do_remove_offsets(request):
+    async def do_remove_offsets(_request):
         """Remove detected offsets from the mesh."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1125,7 +1125,7 @@ def _create_app(
 
         return JSONResponse({"ok": True})
 
-    async def save_offsets(request):
+    async def save_offsets(_request):
         """Save detected offsets to a file."""
         cached = mesh_state.get("offsets")
         if not cached:
@@ -1139,7 +1139,7 @@ def _create_app(
             pickle.dump(cached, f)
         return JSONResponse({"ok": True, "path": str(save_path), "n": len(cached)})
 
-    async def load_offsets(request):
+    async def load_offsets(_request):
         """Load previously saved offsets and apply annotations."""
         import pickle
 
@@ -1327,7 +1327,7 @@ def _create_app(
         n_faces = sum(len(h["faces"]) for h in highlights)
         return JSONResponse({"ok": True, "nFaces": n_faces})
 
-    async def detect_fragments(request):
+    async def detect_fragments(_request):
         """Run fragment detection and write results to annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1358,7 +1358,7 @@ def _create_app(
 
         return JSONResponse({"ok": True, "nFaces": len(faces)})
 
-    async def detect_disconnected(request):
+    async def detect_disconnected(_request):
         """Run disconnected-component detection and write results to annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1522,7 +1522,7 @@ def _create_app(
             }
         )
 
-    async def detect_gaps(request):
+    async def detect_gaps(_request):
         """Run gap detection and write results to annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1599,7 +1599,7 @@ def _create_app(
             }
         )
 
-    async def do_remove_gaps(request):
+    async def do_remove_gaps(_request):
         """Bridge all detected gaps."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1668,7 +1668,7 @@ def _create_app(
             }
         )
 
-    async def chunk_grid(request):
+    async def chunk_grid(_request):
         """Compute chunk boundary grid and return as line segments."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1764,7 +1764,7 @@ def _create_app(
             {"ok": True, "segments": segs, "n_boundaries": n_boundaries}
         )
 
-    async def detect_parallel_patches(request):
+    async def detect_parallel_patches(_request):
         """Detect parallel-patch merge artifacts at chunk boundaries."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1838,7 +1838,7 @@ def _create_app(
             }
         )
 
-    async def do_remove_parallel(request):
+    async def do_remove_parallel(_request):
         """Remove parallel-patch artifacts."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1851,8 +1851,11 @@ def _create_app(
         patches = mesh_state.get("parallel_patches")
         n_before = len(mesh.faces)
         new_mesh = await _run_with_log(
-            remove_parallel_patches, mesh,
-            patches=patches, verbose=True, mesh_stats=ms,
+            remove_parallel_patches,
+            mesh,
+            patches=patches,
+            verbose=True,
+            mesh_stats=ms,
         )
 
         # Clear only annotations whose faces were actually removed
@@ -1886,7 +1889,7 @@ def _create_app(
             }
         )
 
-    async def detect_fusions(request):
+    async def detect_fusions(_request):
         """Run fusion detection and write results to annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -1935,7 +1938,7 @@ def _create_app(
             }
         )
 
-    async def detect_rims(request):
+    async def detect_rims(_request):
         """Run rim detection and write results as edge annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2066,7 +2069,7 @@ def _create_app(
         }
         state_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
 
-    async def do_remove_organelles(request):
+    async def do_remove_organelles(_request):
         """Remove organelles from the mesh.
 
         Reuses the cached mask from detect_organelles if available,
@@ -2122,7 +2125,7 @@ def _create_app(
             }
         )
 
-    async def do_remove_fusions(request):
+    async def do_remove_fusions(_request):
         """Remove fusions from the mesh."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2156,7 +2159,7 @@ def _create_app(
             }
         )
 
-    async def do_remove_fragments(request):
+    async def do_remove_fragments(_request):
         """Remove fragments (islands and fins) from the mesh."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2327,8 +2330,7 @@ def _create_app(
 
         if not rescued:
             return JSONResponse(
-                {"ok": False, "error": "No discarded component "
-                 "matches the selection"},
+                {"ok": False, "error": "No discarded component matches the selection"},
                 status_code=400,
             )
 
@@ -2337,9 +2339,7 @@ def _create_app(
 
         # Update annotations: relabel rescued highlights
         if annotations_path.exists():
-            ann = json.loads(
-                annotations_path.read_text(encoding="utf-8")
-            )
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
             rescued_faces = set()
             for r in rescued:
                 rescued_faces.update(r.tolist())
@@ -2347,32 +2347,31 @@ def _create_app(
             for h in ann.get("highlights", []):
                 h_faces = set(h.get("faces", []))
                 if h_faces & rescued_faces:
-                    idx = n_neurites - len(rescued) + \
-                        next(
-                            j for j, r in enumerate(rescued)
+                    idx = (
+                        n_neurites
+                        - len(rescued)
+                        + next(
+                            j
+                            for j, r in enumerate(rescued)
                             if set(r.tolist()) & h_faces
                         )
-                    h["label"] = (
-                        f"neurite {idx} ({len(h['faces']):,}f)"
                     )
+                    h["label"] = f"neurite {idx} ({len(h['faces']):,}f)"
                     h["color"] = [0.2, 0.6, 1.0]
-            annotations_path.write_text(
-                json.dumps(ann), encoding="utf-8"
-            )
+            annotations_path.write_text(json.dumps(ann), encoding="utf-8")
             await broadcast({"type": "annotations_updated"})
 
         n_rescued = sum(len(r) for r in rescued)
-        await _log(
-            f"Rescued {len(rescued)} discarded → neurite "
-            f"({n_rescued:,} faces)"
+        await _log(f"Rescued {len(rescued)} discarded → neurite ({n_rescued:,} faces)")
+        return JSONResponse(
+            {
+                "ok": True,
+                "nRescued": len(rescued),
+                "facesRescued": n_rescued,
+                "nNeurites": len(neurites),
+                "nDiscarded": len(keep_discarded),
+            }
         )
-        return JSONResponse({
-            "ok": True,
-            "nRescued": len(rescued),
-            "facesRescued": n_rescued,
-            "nNeurites": len(neurites),
-            "nDiscarded": len(keep_discarded),
-        })
 
     async def edit_vertices(request):
         """Apply vertex position edits from the transform gizmo."""
@@ -2428,7 +2427,7 @@ def _create_app(
 
         return JSONResponse({"ok": True, "facesEdited": n_faces_edited})
 
-    async def undo_mesh(request):
+    async def undo_mesh(_request):
         """Revert to the previous mesh state."""
         if not _undo_stack:
             return JSONResponse(
@@ -2482,7 +2481,7 @@ def _create_app(
             }
         )
 
-    async def do_break_up_mesh(request):
+    async def do_break_up_mesh(_request):
         """Break mesh at soma: classify components, expand soma + organelles."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2600,14 +2599,12 @@ def _create_app(
                 "ok": True,
                 "nNeurites": len(result.neurites),
                 "nDiscarded": len(result.discarded),
-                "somaVerts": (
-                    len(new_soma.verts) if new_soma is not None else 0
-                ),
+                "somaVerts": (len(new_soma.verts) if new_soma is not None else 0),
                 "orgFaces": int(new_org.sum()),
             }
         )
 
-    async def do_compact_mesh(request):
+    async def do_compact_mesh(_request):
         """Compact mesh: remove degenerate faces, reindex vertices, remap annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2999,9 +2996,7 @@ def _create_app(
         fmt = request.query_params.get("format", "obj")
         prefix = request.query_params.get("prefix", "")
         label = entry.get("label") or f"highlight_{idx}"
-        safe_label = "".join(
-            c if c.isalnum() or c in "-_." else "_" for c in label
-        )
+        safe_label = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
 
         tmp = Path(tempfile.mktemp(suffix=f".{fmt}"))
         loop = asyncio.get_event_loop()
@@ -3058,7 +3053,7 @@ def _create_app(
             },
         )
 
-    async def detect_holes(request):
+    async def detect_holes(_request):
         """Run hole detection and write results to annotations."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -3134,12 +3129,8 @@ def _create_app(
             params["components"] = MeshComponents(
                 soma=mesh_state.get("soma"),
                 organelles=mesh_state["organelles"],
-                neurites=Neurites(
-                    list(mesh_state["neurites"])
-                ),
-                discarded=Discarded(
-                    list(mesh_state.get("discarded") or [])
-                ),
+                neurites=Neurites(list(mesh_state["neurites"])),
+                discarded=Discarded(list(mesh_state.get("discarded") or [])),
             )
 
         skel = await _run_with_log(skeletonize, mesh, verbose=True, **params)
@@ -3482,7 +3473,7 @@ def _create_app(
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def lifespan(app):
+    async def lifespan(_app):
         asyncio.create_task(file_watcher())
         yield
 

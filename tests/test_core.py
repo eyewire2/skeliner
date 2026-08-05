@@ -91,11 +91,7 @@ def _make_components(mesh, *, with_soma: bool):
     comps = list(gsurf.components())
     main = set(max(comps, key=len))
     main_faces = np.array(
-        [
-            fi
-            for fi in range(nF)
-            if all(int(v) in main for v in mesh.faces[fi])
-        ],
+        [fi for fi in range(nF) if all(int(v) in main for v in mesh.faces[fi])],
         dtype=np.int64,
     )
 
@@ -110,12 +106,9 @@ def _make_components(mesh, *, with_soma: bool):
     if with_soma:
         center = mesh.vertices.mean(axis=0)
         r = float(mesh.edges_unique_length.mean()) * 5
-        verts = np.where(
-            np.linalg.norm(
-                mesh.vertices - center, axis=1
-            )
-            < r
-        )[0].astype(np.int64)
+        verts = np.where(np.linalg.norm(mesh.vertices - center, axis=1) < r)[0].astype(
+            np.int64
+        )
         soma = Soma.from_sphere(center, r, verts=verts)
     else:
         soma = None
@@ -131,18 +124,14 @@ def _make_components(mesh, *, with_soma: bool):
 def test_preproc_track_no_soma(reference_mesh):
     """Preprocessing track without soma → valid forest."""
     comp = _make_components(reference_mesh, with_soma=False)
-    skel = skeletonize(
-        reference_mesh, components=comp, verbose=False
-    )
+    skel = skeletonize(reference_mesh, components=comp, verbose=False)
     _assert_skeleton_valid(skel, expect_soma=False)
 
 
 def test_preproc_track_with_soma(reference_mesh):
     """Preprocessing track with soma → valid tree rooted at soma."""
     comp = _make_components(reference_mesh, with_soma=True)
-    skel = skeletonize(
-        reference_mesh, components=comp, verbose=False
-    )
+    skel = skeletonize(reference_mesh, components=comp, verbose=False)
     _assert_skeleton_valid(skel, expect_soma=True)
     # soma center should be close to the mesh centroid
     mesh_center = reference_mesh.vertices.mean(axis=0)
@@ -175,7 +164,7 @@ def _pants():
     """
     n = 8
     parent, e_parent = _ring(0, n)
-    band, e_band = _ring(n, 2 * n)      # wide enough to feed two children
+    band, e_band = _ring(n, 2 * n)  # wide enough to feed two children
     childA, e_a = _ring(3 * n, n)
     childB, e_b = _ring(4 * n, n)
 

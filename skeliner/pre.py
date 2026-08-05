@@ -932,7 +932,6 @@ def fill_holes(
 
 
 def _trace_border_loops(
-    mesh: trimesh.Trimesh,
     sel: set[int],
     edge_to_faces: dict[tuple[int, int], list[int]],
 ) -> list[list[int]]:
@@ -1011,7 +1010,6 @@ def _validate_loop_pair(
 
 
 def _removal_would_sever(
-    mesh: trimesh.Trimesh,
     sel: set[int],
     edge_to_faces: dict[tuple[int, int], list[int]],
 ) -> bool:
@@ -1023,7 +1021,7 @@ def _removal_would_sever(
     annulus that wraps the surface — removing it leaves the far side
     disconnected, severing whatever lies beyond.
     """
-    loops = _trace_border_loops(mesh, sel, edge_to_faces)
+    loops = _trace_border_loops(sel, edge_to_faces)
     return sum(1 for lp in loops if len(lp) >= 3) >= 2
 
 
@@ -1096,7 +1094,6 @@ def _sever_cost(
 
 
 def _expand_tip_to_good_rim(
-    mesh: trimesh.Trimesh,
     tip: list[int],
     edge_to_faces: dict[tuple[int, int], list[int]],
     face_adj: dict[int, set[int]],
@@ -1125,7 +1122,7 @@ def _expand_tip_to_good_rim(
 
     best_loop: list[int] | None = None
     for _ in range(max_iters):
-        loops = _trace_border_loops(mesh, sel, edge_to_faces)
+        loops = _trace_border_loops(sel, edge_to_faces)
         loops = [lp for lp in loops if len(lp) >= 3]
         if loops:
             biggest = max(loops, key=len)
@@ -1145,7 +1142,6 @@ def _expand_tip_to_good_rim(
 
 
 def _expand_selection_per_group(
-    mesh: trimesh.Trimesh,
     sel: list[int] | set[int],
     edge_to_faces: dict[tuple[int, int], list[int]],
     face_adj: dict[int, set[int]],
@@ -1194,7 +1190,6 @@ def _expand_selection_per_group(
     expanded: set[int] = set()
     for grp in groups:
         sub_sel, _ = _expand_tip_to_good_rim(
-            mesh,
             list(grp),
             edge_to_faces,
             face_adj,
@@ -1205,7 +1200,7 @@ def _expand_selection_per_group(
         expanded |= sub_sel
 
     # Re-trace loops on the final merged selection
-    loops = _trace_border_loops(mesh, expanded, edge_to_faces)
+    loops = _trace_border_loops(expanded, edge_to_faces)
     loops = [lp for lp in loops if len(lp) >= 3]
     return expanded, loops
 
@@ -1474,9 +1469,9 @@ def _zipper_stitch(
             remaining_adv = (m - 1) - adv
             if remaining_adv > 0:
                 nxt = (cur + 1) % m
-                closer = float(
-                    np.linalg.norm(loop_pts[nxt] - ring_pts[j + 1])
-                ) < float(np.linalg.norm(loop_pts[cur] - ring_pts[j + 1]))
+                closer = float(np.linalg.norm(loop_pts[nxt] - ring_pts[j + 1])) < float(
+                    np.linalg.norm(loop_pts[cur] - ring_pts[j + 1])
+                )
                 # Force an advance once we can no longer afford to stay, so
                 # all m-1 advances land and the seam covers every rim edge.
                 if remaining_adv >= remaining_dec or closer:
@@ -1597,7 +1592,7 @@ def merge_selected_faces(
     # as remove_gaps's per-side expansion — so the resulting rims
     # converge to matching sizes (`_zipper_stitch` only welds
     # manifoldly when both rims have similar vertex counts).
-    sel, loops = _expand_selection_per_group(mesh, sel_input, edge_to_faces, face_adj)
+    sel, loops = _expand_selection_per_group(sel_input, edge_to_faces, face_adj)
 
     if verbose:
         if len(sel) != len(sel_input):
@@ -2097,10 +2092,7 @@ def find_soma_via_ring_cutoff(
     if nuc is None:
         if verbose:
             dt = time.perf_counter() - _t0
-            print(
-                f"[skeliner.pre] Soma: no nucleus found "
-                f"({dt:.1f}s)"
-            )
+            print(f"[skeliner.pre] Soma: no nucleus found ({dt:.1f}s)")
         return None
     center = nuc["center"]
 
@@ -2126,9 +2118,7 @@ def find_soma_via_ring_cutoff(
         seed_comps = vert_comp[seed_vi]
         valid = seed_comps >= 0
         if valid.any():
-            soma_ci = Counter(
-                seed_comps[valid].tolist()
-            ).most_common(1)[0][0]
+            soma_ci = Counter(seed_comps[valid].tolist()).most_common(1)[0][0]
 
     soma_fi = np.where(labels == soma_ci)[0]
     adj: dict[int, list[int]] = defaultdict(list)
@@ -2147,17 +2137,11 @@ def find_soma_via_ring_cutoff(
     all_soma_verts = np.fromiter(adj.keys(), dtype=np.intp)
     soma_set = set(adj.keys())
     # Keep only seeds that are on the soma component
-    seed_verts = np.array(
-        [v for v in seed_vi if v in soma_set], dtype=np.intp
-    )
+    seed_verts = np.array([v for v in seed_vi if v in soma_set], dtype=np.intp)
     if len(seed_verts) == 0:
         # Fallback: single nearest vertex to nucleus center
         seed_verts = all_soma_verts[
-            np.argmin(
-                np.linalg.norm(
-                    mesh.vertices[all_soma_verts] - center, axis=1
-                )
-            )
+            np.argmin(np.linalg.norm(mesh.vertices[all_soma_verts] - center, axis=1))
         ].reshape(1)
 
     ring_level: dict[int, int] = {}
@@ -2819,17 +2803,12 @@ def break_up_mesh(
         n_disc_faces = sum(len(c) for c in discarded)
         parts = [f"{len(neurites)} neurites"]
         if discarded:
-            parts.append(
-                f"{len(discarded)} discarded ({n_disc_faces:,}f)"
-            )
+            parts.append(f"{len(discarded)} discarded ({n_disc_faces:,}f)")
         if n_trapped:
             parts.append(f"trapped +{n_trapped:,}f")
         if n_soma_absorbed:
             parts.append(f"soma +{n_soma_absorbed:,}f")
-        print(
-            f"[skeliner.pre] break_up_mesh: "
-            f"{', '.join(parts)} ({dt:.1f}s)"
-        )
+        print(f"[skeliner.pre] break_up_mesh: {', '.join(parts)} ({dt:.1f}s)")
 
     org_out = _build_org_output(organelles, organelles_expanded)
     return MeshComponents(
@@ -3984,10 +3963,7 @@ def find_disconnected(
             excluded.append(f"{n_organelle_excluded} organelle")
         if n_enclosed_excluded:
             excluded.append(f"{n_enclosed_excluded} enclosed")
-        exc_str = (
-            f"; excluded {'+'.join(excluded)}"
-            if excluded else ""
-        )
+        exc_str = f"; excluded {'+'.join(excluded)}" if excluded else ""
         print(
             f"[skeliner.pre] Disconnected: "
             f"{len(components)} of {n_total_non_main} "
@@ -4149,8 +4125,7 @@ def find_gaps(
         if verbose:
             dt = time.perf_counter() - _t0
             print(
-                f"[skeliner.pre] Gaps: 0 gaps, "
-                f"no disconnected components ({dt:.1f}s)"
+                f"[skeliner.pre] Gaps: 0 gaps, no disconnected components ({dt:.1f}s)"
             )
         return []
 
@@ -4185,14 +4160,10 @@ def find_gaps(
     # smaller piece's extent (max_bridge_ratio) and never exceed the
     # absolute ceiling.
     bridge_floor = (
-        float(min_bridge_gap)
-        if min_bridge_gap is not None
-        else 8.0 * median_edge
+        float(min_bridge_gap) if min_bridge_gap is not None else 8.0 * median_edge
     )
     bridge_abs_cap = (
-        float(max_bridge_dist)
-        if max_bridge_dist is not None
-        else 75.0 * median_edge
+        float(max_bridge_dist) if max_bridge_dist is not None else 75.0 * median_edge
     )
     if fusion_face_idx:
         fusion_centroids = mesh.triangles_center[fusion_face_idx]
@@ -4202,6 +4173,7 @@ def find_gaps(
             if fusion_clearance is not None
             else 10.0 * median_edge
         )
+
     def _component_verts(fis: np.ndarray) -> np.ndarray:
         verts = np.unique(mesh.faces[fis])
         if not fusion_vert_set:
@@ -4311,9 +4283,7 @@ def find_gaps(
         piece's own extent (and never longer than an absolute ceiling).
         A gap that dwarfs its piece is a floating fragment, not a break.
         """
-        smaller_bbox = min(
-            comp_data[cid_a]["bbox"], comp_data[cid_b]["bbox"]
-        )
+        smaller_bbox = min(comp_data[cid_a]["bbox"], comp_data[cid_b]["bbox"])
         return min(
             bridge_abs_cap,
             max(bridge_floor, max_bridge_ratio * smaller_bbox),
@@ -4353,9 +4323,7 @@ def find_gaps(
     all_cids = [main] + disc_cids
     # edge_info keyed by sorted pair:
     #   (mst_cost, real_dist, a, ia, b, ib, fusion_join)
-    edge_info: dict[
-        tuple[int, int], tuple[float, float, int, int, int, int, bool]
-    ] = {}
+    edge_info: dict[tuple[int, int], tuple[float, float, int, int, int, int, bool]] = {}
 
     kiss_R = kiss_radius * median_edge
 
@@ -4417,10 +4385,7 @@ def find_gaps(
                     masked = np.where(valid, dists, np.inf)
                     filt_min_i = int(np.argmin(masked))
                     filt_dist = float(masked[filt_min_i])
-                    if (
-                        filt_dist > fusion_fallback
-                        and raw_dist >= 1.0
-                    ):
+                    if filt_dist > fusion_fallback and raw_dist >= 1.0:
                         # Filtered gap too far — the
                         # near-fusion connection is the real
                         # reconnection point.
@@ -4604,12 +4569,8 @@ def find_gaps(
             )
         else:
             dist_str = ""
-        cap_str = (
-            f", {n_capped[0]} too-far dropped" if n_capped[0] else ""
-        )
-        rep_str = (
-            f", {n_repaired} stranded re-bridged" if n_repaired else ""
-        )
+        cap_str = f", {n_capped[0]} too-far dropped" if n_capped[0] else ""
+        rep_str = f", {n_repaired} stranded re-bridged" if n_repaired else ""
         print(
             f"[skeliner.pre] Gaps: {len(gaps)} gaps "
             f"across {len(disc)} disconnected components"
@@ -4622,7 +4583,6 @@ def find_gaps(
 def remove_gaps(
     mesh: trimesh.Trimesh,
     *,
-    min_faces: int = 100,
     verbose: bool = False,
     soma: Soma | None = None,
     gaps: list | None = None,
@@ -4639,14 +4599,13 @@ def remove_gaps(
     ----------
     mesh : trimesh.Trimesh
         Input mesh.
-    min_faces : int, default 100
-        Passed to :func:`find_gaps`.
     verbose : bool, default False
         Print progress.
     soma : Soma or None
         Pre-computed soma.
     gaps : list or None
-        Pre-computed gaps from :func:`find_gaps`.
+        Pre-computed gaps from :func:`find_gaps`.  Tuning knobs live on
+        that function; call it yourself and pass the result here.
 
     Returns
     -------
@@ -4669,10 +4628,7 @@ def remove_gaps(
     if not gaps:
         if verbose:
             dt = time.perf_counter() - _t0
-            print(
-                f"[skeliner.pre] remove_gaps: "
-                f"no gaps to bridge ({dt:.1f}s)"
-            )
+            print(f"[skeliner.pre] remove_gaps: no gaps to bridge ({dt:.1f}s)")
         return mesh
 
     # Build edge / face adjacency once
@@ -4712,8 +4668,8 @@ def remove_gaps(
     loop_pairs: list[tuple[list[int], list[int]]] = []
     n_skipped = 0
     for gap_i, (faces_a, faces_b, dist, *_comp_ids) in enumerate(gaps):
-        sel_a, loop_a = _expand_tip_to_good_rim(mesh, faces_a, edge_to_faces, face_adj)
-        sel_b, loop_b = _expand_tip_to_good_rim(mesh, faces_b, edge_to_faces, face_adj)
+        sel_a, loop_a = _expand_tip_to_good_rim(faces_a, edge_to_faces, face_adj)
+        sel_b, loop_b = _expand_tip_to_good_rim(faces_b, edge_to_faces, face_adj)
 
         if loop_a is None or loop_b is None:
             n_skipped += 1
@@ -4735,8 +4691,8 @@ def remove_gaps(
         # the same annular shape strands 4 f and rescues 4,160 f.  Skip
         # only when the stitch costs more than it saves — two face
         # counts, no distance scope and no threshold.
-        sev_a = _removal_would_sever(mesh, sel_a, edge_to_faces)
-        sev_b = _removal_would_sever(mesh, sel_b, edge_to_faces)
+        sev_a = _removal_would_sever(sel_a, edge_to_faces)
+        sev_b = _removal_would_sever(sel_b, edge_to_faces)
         if sev_a or sev_b:
             rescue = _rescue_size(faces_a[0], faces_b[0])
             if (sev_a and _sever_cost(sel_a, face_adj, rescue) > rescue) or (
@@ -4751,10 +4707,7 @@ def remove_gaps(
     if not loop_pairs:
         if verbose:
             dt = time.perf_counter() - _t0
-            print(
-                f"[skeliner.pre] remove_gaps: "
-                f"no valid loop pairs ({dt:.1f}s)"
-            )
+            print(f"[skeliner.pre] remove_gaps: no valid loop pairs ({dt:.1f}s)")
         return mesh
 
     result = _stitch_and_rebuild(mesh, faces_to_remove, loop_pairs)
@@ -4782,10 +4735,7 @@ def remove_gaps(
             parts.append(f"stitched +{n_added:,}f")
         if n_skipped:
             parts.append(f"{n_skipped} skipped")
-        print(
-            f"[skeliner.pre] remove_gaps: "
-            f"{', '.join(parts)} ({dt:.1f}s)"
-        )
+        print(f"[skeliner.pre] remove_gaps: {', '.join(parts)} ({dt:.1f}s)")
 
     return result
 
@@ -5357,16 +5307,11 @@ def find_pocket_mouths(
             # Only apply on the main component — small disconnected
             # components have degenerate boundary topology that
             # produces false positives.
-            on_non_main = (
-                _non_main_mask is not None
-                and _non_main_mask[cluster[0]]
-            )
+            on_non_main = _non_main_mask is not None and _non_main_mask[cluster[0]]
             if not on_non_main:
                 from scipy.spatial import ConvexHull
 
-                bverts = list(
-                    {v for e in boundary_edges for v in e}
-                )
+                bverts = list({v for e in boundary_edges for v in e})
                 if len(bverts) >= 3:
                     pts = verts_arr[bverts]
                     centroid = pts.mean(axis=0)
@@ -5510,10 +5455,7 @@ def find_pocket_organelles(
     if not mouths:
         if verbose:
             dt = time.perf_counter() - _t0
-            print(
-                f"[skeliner.pre] Pocket organelles: "
-                f"0 faces (no mouths) ({dt:.1f}s)"
-            )
+            print(f"[skeliner.pre] Pocket organelles: 0 faces (no mouths) ({dt:.1f}s)")
         return np.zeros(n_faces, dtype=bool)
 
     # Collect all mouth edges and seed faces
@@ -5910,7 +5852,6 @@ def find_organelles(
         _non_main_mask=non_main_mask,
     )
 
-
     # ── 5. Enclosure pass — find organelle interiors connected to
     #       the surface through a narrow neck (articulation face).
     #       Single-pass Tarjan's on a CSR graph tracks subtree size
@@ -5942,14 +5883,12 @@ def find_organelles(
 
         # Build CSR adjacency for non-pocket faces
         _edges = np.empty((len(_pairs) * 2, 2), dtype=np.int64)
-        _edges[:len(_pairs)] = _pairs
-        _edges[len(_pairs):, 0] = _pairs[:, 1]
-        _edges[len(_pairs):, 1] = _pairs[:, 0]
+        _edges[: len(_pairs)] = _pairs
+        _edges[len(_pairs) :, 0] = _pairs[:, 1]
+        _edges[len(_pairs) :, 1] = _pairs[:, 0]
         _ord = np.argsort(_edges[:, 0])
         _dst = _edges[_ord, 1]
-        _usrc, _ucnt = np.unique(
-            _edges[_ord, 0], return_counts=True
-        )
+        _usrc, _ucnt = np.unique(_edges[_ord, 0], return_counts=True)
         _off = np.zeros(len(mesh.faces) + 1, dtype=np.int64)
         _off[_usrc + 1] = _ucnt
         np.cumsum(_off, out=_off)
@@ -5970,9 +5909,7 @@ def find_organelles(
             _disc[_root] = _low[_root] = _tmr
             _tmr += 1
             # stack: (node, parent, edge_cursor)
-            _stk: list[tuple[int, int, int]] = [
-                (int(_root), -1, int(_off[_root]))
-            ]
+            _stk: list[tuple[int, int, int]] = [(int(_root), -1, int(_off[_root]))]
             _ccnt = np.zeros(nF, dtype=np.int8)
             while _stk:
                 u, pu, ei = _stk[-1]
@@ -5983,9 +5920,7 @@ def find_organelles(
                     if _disc[v] < 0:
                         _disc[v] = _low[v] = _tmr
                         _tmr += 1
-                        _stk.append(
-                            (v, u, int(_off[v]))
-                        )
+                        _stk.append((v, u, int(_off[v])))
                     elif v != pu:
                         dv = _disc[v]
                         if _low[u] > dv:
@@ -6003,9 +5938,7 @@ def find_organelles(
                     _sub_tb[pu2] += _sub_tb[u]
                     _ccnt[pu2] += 1
                     is_root = _stk[-1][1] == -1
-                    if lu >= _disc[pu2] and (
-                        not is_root or _ccnt[pu2] > 1
-                    ):
+                    if lu >= _disc[pu2] and (not is_root or _ccnt[pu2] > 1):
                         sz = int(_sub_sz[u])
                         tb = int(_sub_tb[u])
                         pb = int(_sub_pb[u])
@@ -6016,9 +5949,7 @@ def find_organelles(
                             and sz >= min_cluster_size
                             and sz <= _pocket_n
                         ):
-                            _to_claim.append(
-                                (int(u), int(_disc[u]))
-                            )
+                            _to_claim.append((int(u), int(_disc[u])))
 
         # Collect subtree faces for each claim via BFS
         for _u, _d_u in _to_claim:
@@ -6049,10 +5980,7 @@ def find_organelles(
             parts.append(f"{n_structural} structural components")
         if enclosed_count:
             parts.append(f"enclosed +{enclosed_count:,}")
-        print(
-            f"[skeliner.pre] find_organelles: "
-            f"{', '.join(parts)} ({dt_total:.1f}s)"
-        )
+        print(f"[skeliner.pre] find_organelles: {', '.join(parts)} ({dt_total:.1f}s)")
 
     org = Organelles(
         pocket=pocket,
@@ -6071,7 +5999,6 @@ def _find_nonmanifold_fusions(
     radius_multiplier: float = 5.0,
     grow_rings: int = 20,
     min_branch_size: int = 5,
-    verbose: bool = False,
     mesh_stats: MeshStats | None = None,
 ) -> list[list[int]]:
     """Detect non-manifold fusions (shared edges, duplicate faces, pinch vertices)."""
@@ -6097,8 +6024,7 @@ def _find_nonmanifold_fusions(
             mesh,
             radius
             if radius is not None
-            else radius_multiplier
-            * float(np.median(mesh.edges_unique_length)),
+            else radius_multiplier * float(np.median(mesh.edges_unique_length)),
         )
 
     # Signal 1: negative-dot faces at non-manifold edges
@@ -6362,11 +6288,7 @@ def _split_fan_vertices(
     new_verts = list(verts)
     n_split = 0
 
-    check = (
-        candidate_verts
-        if candidate_verts is not None
-        else range(len(verts))
-    )
+    check = candidate_verts if candidate_verts is not None else range(len(verts))
     for vid in check:
         fan = vert_to_face[vid]
         if len(fan) < 2:
@@ -6508,10 +6430,7 @@ def remove_fusions(
         parts = [f"removed {len(all_fusions):,}f"]
         if n_split:
             parts.append(f"split {n_split} fan vertices")
-        print(
-            f"[skeliner.pre] remove_fusions: "
-            f"{', '.join(parts)} ({dt:.1f}s)"
-        )
+        print(f"[skeliner.pre] remove_fusions: {', '.join(parts)} ({dt:.1f}s)")
 
     # Invalidate topology (components split at fan vertices)
     if mesh_stats is not None:
@@ -7113,9 +7032,7 @@ def find_parallel_patches(
         n_faces = sum(len(r["faces"]) for r in results)
         # Compact per-axis summary
         ax_counts = Counter(r["axis"] for r in results)
-        ax_str = ", ".join(
-            f"{'XYZ'[a]}:{c}" for a, c in sorted(ax_counts.items())
-        )
+        ax_str = ", ".join(f"{'XYZ'[a]}:{c}" for a, c in sorted(ax_counts.items()))
         print(
             f"[skeliner.pre] Parallel patches: "
             f"{len(results)} patches, {n_faces:,} faces "
@@ -7853,9 +7770,7 @@ def _stitch_mode_b(mesh, orig_faces, mode_b_faces, patches):
 
     new_faces = np.array(all_new_tris, dtype=np.int64)
     combined = np.vstack([faces, new_faces])
-    return trimesh.Trimesh(
-        vertices=verts, faces=combined, process=False
-    )
+    return trimesh.Trimesh(vertices=verts, faces=combined, process=False)
 
 
 def remove_parallel_patches(
@@ -8049,24 +7964,18 @@ def remove_parallel_patches(
 
     if verbose:
         parts = [
-            f"removed {len(all_removed):,}f "
-            f"({n_a} fold + {n_b} parallel)",
+            f"removed {len(all_removed):,}f ({n_a} fold + {n_b} parallel)",
         ]
         if n_trimmed:
             parts.append(
-                f"trimmed to overlap "
-                f"{n_faces_before_trim:,}→"
-                f"{n_faces_after_trim:,}f"
+                f"trimmed to overlap {n_faces_before_trim:,}→{n_faces_after_trim:,}f"
             )
         if n_orphan:
             parts.append(f"+{n_orphan:,}f orphans removed")
         if n_stitched:
             parts.append(f"+{n_stitched:,}f stitched")
         dt = time.perf_counter() - _t0
-        print(
-            f"[skeliner.pre] remove_parallel_patches: "
-            f"{'; '.join(parts)} ({dt:.1f}s)"
-        )
+        print(f"[skeliner.pre] remove_parallel_patches: {'; '.join(parts)} ({dt:.1f}s)")
 
     return result
 
@@ -8242,19 +8151,12 @@ def preprocess(
 
     # 2. Organelles (also yields mesh_stats for downstream stages)
     with _timed("↳  find organelles", verbose=verbose) as log:
-        org, mesh_stats = find_organelles(
-            mesh, return_mesh_stats=True
-        )
-        log(
-            f"pocket={int(org.pocket.sum()):,}, "
-            f"isolated={int(org.isolated.sum()):,}"
-        )
+        org, mesh_stats = find_organelles(mesh, return_mesh_stats=True)
+        log(f"pocket={int(org.pocket.sum()):,}, isolated={int(org.isolated.sum()):,}")
 
     # 3. Soma
     with _timed("↳  find soma", verbose=verbose) as log:
-        soma = find_soma_via_ring_cutoff(
-            mesh, organelles=org, mesh_stats=mesh_stats
-        )
+        soma = find_soma_via_ring_cutoff(mesh, organelles=org, mesh_stats=mesh_stats)
         if soma is not None:
             log(f"center={soma.center.round(0).tolist()}")
         else:
@@ -8285,16 +8187,12 @@ def preprocess(
         )
         log(f"{len(gaps)} gaps")
         if gaps:
-            mesh = remove_gaps(
-                mesh, gaps=gaps, mesh_stats=mesh_stats
-            )
+            mesh = remove_gaps(mesh, gaps=gaps, mesh_stats=mesh_stats)
 
     # 5. Fusions
     with _timed("↳  remove fusions", verbose=verbose):
         if fusions:
-            mesh = remove_fusions(
-                mesh, fusions=fusions, mesh_stats=mesh_stats
-            )
+            mesh = remove_fusions(mesh, fusions=fusions, mesh_stats=mesh_stats)
 
     # 6. Break up mesh
     with _timed("↳  break up mesh", verbose=verbose) as log:
@@ -8304,15 +8202,12 @@ def preprocess(
     # 7. Compact (optional — remaps everything in MeshComponents)
     if compact:
         with _timed("↳  compact mesh", verbose=verbose):
-            mesh, components = compact_mesh(
-                mesh, components=components
-            )
+            mesh, components = compact_mesh(mesh, components=components)
 
     if verbose:
         dt = time.perf_counter() - _t0
         print(
-            f"[skeliner.pre] preprocessing done "
-            f"({len(mesh.faces):,} faces, {dt:.1f}s)"
+            f"[skeliner.pre] preprocessing done ({len(mesh.faces):,} faces, {dt:.1f}s)"
         )
 
     return mesh, components

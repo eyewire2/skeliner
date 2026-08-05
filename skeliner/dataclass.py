@@ -157,11 +157,13 @@ class Neurites:
 
     def to_npz(self, path: str | Path) -> None:
         from . import io
+
         io.save_neurites_npz(self, path)
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "Neurites":
         from . import io
+
         return io.load_neurites_npz(path)
 
 
@@ -182,11 +184,13 @@ class Discarded:
 
     def to_npz(self, path: str | Path) -> None:
         from . import io
+
         io.save_discarded_npz(self, path)
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "Discarded":
         from . import io
+
         return io.load_discarded_npz(path)
 
 
@@ -203,9 +207,7 @@ class MeshComponents:
     neurites: Neurites
     discarded: Discarded
 
-    def rescue_discarded(
-        self, indices: int | list[int]
-    ) -> None:
+    def rescue_discarded(self, indices: int | list[int]) -> None:
         """Move discarded fragments to neurites, in place.
 
         Parameters
@@ -216,17 +218,17 @@ class MeshComponents:
         if isinstance(indices, int):
             indices = [indices]
         for i in sorted(indices, reverse=True):
-            self.neurites.components.append(
-                self.discarded.components.pop(i)
-            )
+            self.neurites.components.append(self.discarded.components.pop(i))
 
     def to_npz(self, path: str | Path) -> None:
         from . import io
+
         io.save_components_npz(self, path)
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "MeshComponents":
         from . import io
+
         return io.load_components_npz(path)
 
 

@@ -834,9 +834,13 @@ def load_components_npz(path: str | Path) -> MeshComponents:
 
         # Discarded
         n_d = int(z["n_discarded"])
-        discarded = Discarded([z[f"discarded_{i}"].astype(np.int64) for i in range(n_d)])
+        discarded = Discarded(
+            [z[f"discarded_{i}"].astype(np.int64) for i in range(n_d)]
+        )
 
-    return MeshComponents(soma=soma, organelles=organelles, neurites=neurites, discarded=discarded)
+    return MeshComponents(
+        soma=soma, organelles=organelles, neurites=neurites, discarded=discarded
+    )
 
 
 # --------------------------
@@ -1055,9 +1059,7 @@ def _deprecated_alias(old_name: str, new_func):
     return wrapper
 
 
-def save_skeleton(
-    skeleton, path: str | Path, **kwargs
-) -> None:
+def save_skeleton(skeleton, path: str | Path, **kwargs) -> None:
     """Save a skeleton to ``.swc`` or ``.npz``.
 
     The format is inferred from the file extension.
@@ -1071,14 +1073,11 @@ def save_skeleton(
     if ext == ".npz":
         return save_skeleton_npz(skeleton, path, **kwargs)
     raise ValueError(
-        f"Cannot infer skeleton format from "
-        f"extension '{ext}'. Use .swc or .npz."
+        f"Cannot infer skeleton format from extension '{ext}'. Use .swc or .npz."
     )
 
 
-def load_skeleton(
-    path: str | Path, **kwargs
-) -> "Skeleton":
+def load_skeleton(path: str | Path, **kwargs) -> "Skeleton":
     """Load a skeleton from ``.swc`` or ``.npz``.
 
     The format is inferred from the file extension.
@@ -1092,8 +1091,7 @@ def load_skeleton(
     if ext == ".npz":
         return load_skeleton_npz(path, **kwargs)
     raise ValueError(
-        f"Cannot infer skeleton format from "
-        f"extension '{ext}'. Use .swc or .npz."
+        f"Cannot infer skeleton format from extension '{ext}'. Use .swc or .npz."
     )
 
 

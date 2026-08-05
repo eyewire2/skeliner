@@ -1997,15 +1997,9 @@ def diagnose_discarded(
     faces = np.asarray(mesh.faces)
     face_centroids = verts[faces].mean(axis=1)
 
-    big = [
-        (i, d)
-        for i, d in enumerate(components.discarded)
-        if len(d) >= min_faces
-    ]
+    big = [(i, d) for i, d in enumerate(components.discarded) if len(d) >= min_faces]
     if not big:
-        print(
-            f"No discarded fragments \u2265 {min_faces} faces"
-        )
+        print(f"No discarded fragments \u2265 {min_faces} faces")
         return None
 
     n_rows = len(big)

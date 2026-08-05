@@ -113,9 +113,7 @@ def _two_cylinders(separation=200.0):
 
 def _cylinder_at(radius, height, z_center, sections):
     """Cylinder along z, centred at ``z_center``."""
-    c = trimesh.creation.cylinder(
-        radius=radius, height=height, sections=sections
-    )
+    c = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
     c.vertices[:, 2] += z_center
     return c
 
@@ -158,11 +156,13 @@ def _main_debris_piece():
     edge, so the debris is left with no bridge even though its 43 nm
     edge to the piece is well inside the same cap.
     """
-    return _combine([
-        _cylinder_at(20, 2000, 0, 48),      # main,   z -1000..1000
-        _cylinder_at(4, 60, 1130, 8),       # debris, z  1100..1160
-        _cylinder_at(20, 600, 1500, 32),    # piece,  z  1200..1800
-    ])
+    return _combine(
+        [
+            _cylinder_at(20, 2000, 0, 48),  # main,   z -1000..1000
+            _cylinder_at(4, 60, 1130, 8),  # debris, z  1100..1160
+            _cylinder_at(20, 600, 1500, 32),  # piece,  z  1200..1800
+        ]
+    )
 
 
 def _main_relay_piece():
@@ -173,11 +173,13 @@ def _main_relay_piece():
     peels a tip patch off each end of every bridge, so it is erased and
     the chain routed through it breaks.
     """
-    return _combine([
-        _cylinder_at(20, 2000, 0, 48),      # main,  z -1000..1000
-        _cylinder_at(10, 100, 1150, 8),     # relay, z  1100..1200 (32f)
-        _cylinder_at(20, 600, 1600, 32),    # piece, z  1300..1900
-    ])
+    return _combine(
+        [
+            _cylinder_at(20, 2000, 0, 48),  # main,  z -1000..1000
+            _cylinder_at(10, 100, 1150, 8),  # relay, z  1100..1200 (32f)
+            _cylinder_at(20, 600, 1600, 32),  # piece, z  1300..1900
+        ]
+    )
 
 
 def _sphere_with_internal():
@@ -481,16 +483,12 @@ class TestFindGaps:
         # size-ratio gate (absolute ceiling lifted)
         assert (
             len(
-                pre.find_gaps(
-                    mesh, max_bridge_ratio=10.0, max_bridge_dist=float("inf")
-                )
+                pre.find_gaps(mesh, max_bridge_ratio=10.0, max_bridge_dist=float("inf"))
             )
             == 1
         )
         assert (
-            pre.find_gaps(
-                mesh, max_bridge_ratio=1.0, max_bridge_dist=float("inf")
-            )
+            pre.find_gaps(mesh, max_bridge_ratio=1.0, max_bridge_dist=float("inf"))
             == []
         )
         # absolute ceiling gate (ratio lifted)
@@ -498,9 +496,7 @@ class TestFindGaps:
         # small-gap floor forces a bridge regardless of ratio
         assert (
             len(
-                pre.find_gaps(
-                    mesh, min_bridge_gap=5000.0, max_bridge_dist=float("inf")
-                )
+                pre.find_gaps(mesh, min_bridge_gap=5000.0, max_bridge_dist=float("inf"))
             )
             == 1
         )
@@ -539,9 +535,7 @@ class TestFindGaps:
         mesh = _main_relay_piece()
 
         # relay_min_faces=0 restores the old behaviour: chain through it
-        old = pre.find_gaps(
-            mesh, relay_min_faces=0, kiss_penalty=0.0, **PINNED_CAP
-        )
+        old = pre.find_gaps(mesh, relay_min_faces=0, kiss_penalty=0.0, **PINNED_CAP)
         assert {(int(g[3]), int(g[4])) for g in old} == {(-1, 1), (0, 1)}
 
         # default: the piece bridges straight to main

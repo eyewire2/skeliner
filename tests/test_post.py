@@ -195,7 +195,9 @@ def test_reroot_clears_duplicate_roots_and_fills_gaps():
     nodes = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], float)
     edges = np.array([[0, 1], [1, 2]], np.int64)
     radii = {"median": np.array([1.0, 1.0, 1.0])}
-    ntype = np.array([-1, -1, 4], np.int8)  # duplicate roots, gap on index 1 after reroot
+    ntype = np.array(
+        [-1, -1, 4], np.int8
+    )  # duplicate roots, gap on index 1 after reroot
     skel = Skeleton(
         soma=Soma.from_sphere(nodes[0], 1.0, verts=None),
         nodes=nodes,

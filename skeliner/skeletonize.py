@@ -96,21 +96,15 @@ def _dist_vec_for_component(
     shortest path).
     """
     # Build a dedicated sub-graph (much smaller than gsurf)
-    sub = gsurf.induced_subgraph(
-        verts, implementation="create_from_scratch"
-    )
+    sub = gsurf.induced_subgraph(verts, implementation="create_from_scratch")
 
     seed_arr = np.atleast_1d(np.asarray(seed_vid, dtype=np.int64))
 
     # Map seed mesh-vertex IDs → local indices in *sub*
-    root_idxs = [
-        int(np.where(verts == s)[0][0]) for s in seed_arr
-    ]
+    root_idxs = [int(np.where(verts == s)[0][0]) for s in seed_arr]
 
     # igraph returns shape (len(source), |verts|)
-    dist_matrix = np.asarray(
-        sub.distances(source=root_idxs, weights="weight")
-    )
+    dist_matrix = np.asarray(sub.distances(source=root_idxs, weights="weight"))
     # Multi-source: take min distance from any seed
     return dist_matrix.min(axis=0)
 
@@ -317,9 +311,7 @@ def _split_branch_band(
         return [np.asarray(comp, dtype=np.int64)]
     if orphans:
         big = max(range(len(out)), key=lambda i: len(out[i]))
-        out[big] = np.concatenate(
-            [out[big], np.asarray(orphans, dtype=np.int64)]
-        )
+        out[big] = np.concatenate([out[big], np.asarray(orphans, dtype=np.int64)])
     return out
 
 
@@ -390,7 +382,6 @@ def _bin_one_component(
     split_aspect_thr: float = 3.0,
     split_min_shell_vertices: int = 50,
     split_max_vertices_per_slice: int | None = None,
-
 ) -> List[List[np.ndarray]]:
     """Bin one connected surface component into geodesic shells.
 
@@ -424,10 +415,7 @@ def _bin_one_component(
 
     # -- geodesic distance from seed to every vertex in component --
     dist_vec = _dist_vec_for_component(gsurf, verts, seed_vid)
-    dist_sub = {
-        int(vid): float(d)
-        for vid, d in zip(verts, dist_vec)
-    }
+    dist_sub = {int(vid): float(d) for vid, d in zip(verts, dist_vec)}
     if not dist_sub:
         return []
 
@@ -440,10 +428,7 @@ def _bin_one_component(
 
     # increase step until at least one non-empty shell
     shells: List[List[int]] = []
-    while (
-        not any(shells)
-        and step < e_m * max_shell_width_factor
-    ):
+    while not any(shells) and step < e_m * max_shell_width_factor:
         shells = _geodesic_bins(dist_sub, step)
         step *= 1.5
 
@@ -451,9 +436,7 @@ def _bin_one_component(
     component_shells: List[List[np.ndarray]] = []
     pending_frags: List[np.ndarray] = []
     for shell_verts in shells:
-        inner = [
-            vid for vid in shell_verts if vid not in exclude
-        ]
+        inner = [vid for vid in shell_verts if vid not in exclude]
         if not inner:
             continue
 
@@ -462,22 +445,14 @@ def _bin_one_component(
         for comp in sub.components():
             if len(comp) < min_shell_vertices:
                 continue
-            comp_idx = np.fromiter(
-                (inner[i] for i in comp), dtype=np.int64
-            )
-            if (
-                split_elongated_shells and len(comp) < 1500
-            ):  # hard-coded, might be soma
+            comp_idx = np.fromiter((inner[i] for i in comp), dtype=np.int64)
+            if split_elongated_shells and len(comp) < 1500:  # hard-coded, might be soma
                 for part in _split_comp_if_elongated(
                     comp_idx,
                     v,
                     aspect_thr=split_aspect_thr,
-                    min_shell_vertices=(
-                        split_min_shell_vertices
-                    ),
-                    max_vertices_per_slice=(
-                        split_max_vertices_per_slice
-                    ),
+                    min_shell_vertices=(split_min_shell_vertices),
+                    max_vertices_per_slice=(split_max_vertices_per_slice),
                 ):
                     comps.append(part)
             else:
@@ -575,10 +550,7 @@ def _bin_geodesic_shells(
     v = mesh.vertices.view(np.ndarray)
     e_m = float(mesh.edges_unique_length.mean())
 
-    comp_vertices = [
-        np.asarray(c, dtype=np.int64)
-        for c in gsurf.components()
-    ]
+    comp_vertices = [np.asarray(c, dtype=np.int64) for c in gsurf.components()]
     all_shells: List[List[np.ndarray]] = []
 
     for cid, verts in enumerate(comp_vertices):
@@ -601,12 +573,8 @@ def _bin_geodesic_shells(
             max_shell_width_factor=max_shell_width_factor,
             split_elongated_shells=split_elongated_shells,
             split_aspect_thr=split_aspect_thr,
-            split_min_shell_vertices=(
-                split_min_shell_vertices
-            ),
-            split_max_vertices_per_slice=(
-                split_max_vertices_per_slice
-            ),
+            split_min_shell_vertices=(split_min_shell_vertices),
+            split_max_vertices_per_slice=(split_max_vertices_per_slice),
         )
         all_shells.extend(shells)
 
@@ -817,9 +785,7 @@ def _perpendicular_rebin(
     n_skel = len(nodes_arr)
     if n_skel < 2 or edges_mst.size == 0:
         return [[n2v] for n2v in node2verts], {
-            int(v): i
-            for i, n2v in enumerate(node2verts)
-            for v in n2v
+            int(v): i for i, n2v in enumerate(node2verts) for v in n2v
         }
 
     # -- skeleton adjacency & degree --
@@ -830,10 +796,7 @@ def _perpendicular_rebin(
         adj[b].add(a)
 
     degree = np.array([len(adj[i]) for i in range(n_skel)])
-    anchors = set(
-        i for i in range(n_skel)
-        if degree[i] != 2
-    )
+    anchors = set(i for i in range(n_skel) if degree[i] != 2)
 
     # -- dissolve branch-point bins --
     donated: dict[tuple[int, int], list[int]] = {}
@@ -868,9 +831,7 @@ def _perpendicular_rebin(
                 if len(nexts) != 1:
                     break
                 prev, cur = cur, nexts[0]
-                visited_edges.add(
-                    (min(prev, cur), max(prev, cur))
-                )
+                visited_edges.add((min(prev, cur), max(prev, cur)))
                 chain.append(cur)
             chains.append(chain)
 
@@ -879,12 +840,8 @@ def _perpendicular_rebin(
     r_key = radius_estimators[0]
     r_ref = radii_dict[r_key]
 
-    new_node2verts: list[list[int]] = [
-        [] for _ in range(n_skel)
-    ]
-    centerline_dists: list[list[float]] = [
-        [] for _ in range(n_skel)
-    ]
+    new_node2verts: list[list[int]] = [[] for _ in range(n_skel)]
+    centerline_dists: list[list[float]] = [[] for _ in range(n_skel)]
     assigned = np.zeros(len(mesh_vertices), dtype=bool)
 
     for chain in chains:
@@ -898,9 +855,7 @@ def _perpendicular_rebin(
                 all_vids_set.update(donated[key])
             else:
                 all_vids_set.update(int(v) for v in node2verts[ni])
-        all_vids = [
-            v for v in all_vids_set if not assigned[v]
-        ]
+        all_vids = [v for v in all_vids_set if not assigned[v]]
         if not all_vids:
             continue
 
@@ -908,15 +863,9 @@ def _perpendicular_rebin(
         all_pts = mesh_vertices[all_vids_arr]
 
         # Piecewise-linear skeleton path
-        path_pts = np.array(
-            [nodes_arr[n] for n in chain]
-        )
-        seg_lens = np.linalg.norm(
-            np.diff(path_pts, axis=0), axis=1
-        )
-        arc_cum = np.concatenate(
-            ([0.0], np.cumsum(seg_lens))
-        )
+        path_pts = np.array([nodes_arr[n] for n in chain])
+        seg_lens = np.linalg.norm(np.diff(path_pts, axis=0), axis=1)
+        arc_cum = np.concatenate(([0.0], np.cumsum(seg_lens)))
 
         # Project each vertex onto the path
         best_dist = np.full(len(all_vids), np.inf)
@@ -939,18 +888,13 @@ def _perpendicular_rebin(
             best_t[closer] = arc_at[closer]
 
         # Radius-weighted assignment
-        node_arcs = np.array(
-            [arc_cum[i] for i in range(len(chain))]
-        )
+        node_arcs = np.array([arc_cum[i] for i in range(len(chain))])
         r_floor = np.median(r_ref[r_ref > 0]) * 0.01
         node_radii = np.array(
-            [max(r_ref[chain[i]], r_floor)
-             for i in range(len(chain))]
+            [max(r_ref[chain[i]], r_floor) for i in range(len(chain))]
         )
 
-        arc_diffs = np.abs(
-            best_t[:, None] - node_arcs[None, :]
-        )
+        arc_diffs = np.abs(best_t[:, None] - node_arcs[None, :])
         weighted = arc_diffs / node_radii[None, :]
         nearest_idx = np.argmin(weighted, axis=1)
 
@@ -973,16 +917,12 @@ def _perpendicular_rebin(
     for ni in range(n_skel):
         vids = new_node2verts[ni]
         if vids:
-            shells.append(
-                [np.asarray(vids, dtype=np.int64)]
-            )
+            shells.append([np.asarray(vids, dtype=np.int64)])
 
     # Per-vertex centerline distance map
     vid_cl_dist: dict[int, float] = {}
     for ni in range(n_skel):
-        for v, d in zip(
-            new_node2verts[ni], centerline_dists[ni]
-        ):
+        for v, d in zip(new_node2verts[ni], centerline_dists[ni]):
             vid_cl_dist[int(v)] = d
 
     return shells, vid_cl_dist
@@ -1060,22 +1000,16 @@ def _skeletonize_component(
         max_shell_width_factor=max_shell_width_factor,
         split_elongated_shells=split_elongated_shells,
         split_aspect_thr=split_aspect_thr,
-        split_min_shell_vertices=(
-            split_min_shell_vertices
-        ),
-        split_max_vertices_per_slice=(
-            split_max_vertices_per_slice
-        ),
+        split_min_shell_vertices=(split_min_shell_vertices),
+        split_max_vertices_per_slice=(split_max_vertices_per_slice),
     )
 
-    nodes_arr, radii_dict, node2verts, vert2node = (
-        _make_nodes(
-            all_shells,
-            mesh_vertices,
-            radius_estimators=radius_estimators,
-            merge_nested=merge_nested,
-            merge_kwargs=merge_kwargs,
-        )
+    nodes_arr, radii_dict, node2verts, vert2node = _make_nodes(
+        all_shells,
+        mesh_vertices,
+        radius_estimators=radius_estimators,
+        merge_nested=merge_nested,
+        merge_kwargs=merge_kwargs,
     )
 
     edges_arr = _edges_from_mesh(
@@ -1129,15 +1063,11 @@ def _skeletonize_component(
                         nbr = tgt if src == int(vid) else src
                         key = vid_to_ring.get(nbr)
                         if key is not None:
-                            votes[key] = (
-                                votes.get(key, 0) + 1
-                            )
+                            votes[key] = votes.get(key, 0) + 1
                 if votes:
                     best = max(votes, key=votes.get)
                     bi, ci = best
-                    final_shells[bi][ci] = np.concatenate(
-                        [final_shells[bi][ci], frag]
-                    )
+                    final_shells[bi][ci] = np.concatenate([final_shells[bi][ci], frag])
                     for vid in frag:
                         vid_to_ring[int(vid)] = best
 
@@ -1204,14 +1134,12 @@ def _skeletonize_component(
                                     votes[key] = votes.get(key, 0) + 1
                         if not votes:
                             band[ci] = np.concatenate(
-                                [band[ci],
-                                 np.asarray(stray, dtype=np.int64)]
+                                [band[ci], np.asarray(stray, dtype=np.int64)]
                             )
                             continue
                         tb, tc = max(votes, key=lambda k: votes[k])
                         final_shells[tb][tc] = np.concatenate(
-                            [final_shells[tb][tc],
-                             np.asarray(stray, dtype=np.int64)]
+                            [final_shells[tb][tc], np.asarray(stray, dtype=np.int64)]
                         )
                         for vid in stray:
                             owner_of[int(vid)] = (tb, tc)
@@ -1238,9 +1166,7 @@ def _skeletonize_component(
             for ci, comp in enumerate(band):
                 if len(comp) < 3:
                     continue
-                groups = _neighbour_groups(
-                    comp, gsurf, snapshot, (bi, ci)
-                )
+                groups = _neighbour_groups(comp, gsurf, snapshot, (bi, ci))
                 if len(groups) < 3:
                     continue
                 parts = _split_branch_band(comp, groups, gsurf)
@@ -1258,27 +1184,23 @@ def _skeletonize_component(
                     owner_of[int(vid)] = (bi, len(band) - 1)
 
         # Remake nodes and edges with centerline radii
-        nodes_arr, radii_dict, node2verts, vert2node = (
-            _make_nodes(
-                final_shells,
-                mesh_vertices,
-                radius_estimators=radius_estimators,
-                merge_nested=merge_nested,
-                merge_kwargs=merge_kwargs,
-            )
+        nodes_arr, radii_dict, node2verts, vert2node = _make_nodes(
+            final_shells,
+            mesh_vertices,
+            radius_estimators=radius_estimators,
+            merge_nested=merge_nested,
+            merge_kwargs=merge_kwargs,
         )
 
         # Compute centerline radii (perpendicular distance
         # from each vertex to the skeleton path)
         cl_radii = np.empty(len(nodes_arr))
         for ni, n2v in enumerate(node2verts):
-            dists = np.array(
-                [vid_cl_dist.get(int(v), 0.0)
-                 for v in n2v]
-            )
+            dists = np.array([vid_cl_dist.get(int(v), 0.0) for v in n2v])
             if len(dists) > 0:
                 cl_radii[ni] = _estimate_radius(
-                    dists, method="trim",
+                    dists,
+                    method="trim",
                     trim_fraction=0.05,
                 )
             else:
@@ -1384,11 +1306,7 @@ def _stitch_to_soma(
     r_soma = soma.spherical_radius
 
     # -- node 0 = soma --
-    soma_verts_arr = (
-        soma.verts
-        if soma.verts is not None
-        else np.empty(0, np.int64)
-    )
+    soma_verts_arr = soma.verts if soma.verts is not None else np.empty(0, np.int64)
     all_nodes = [soma.center.reshape(1, 3)]
     radii_parts: list[dict[str, np.ndarray]] = []
     all_n2v: list[np.ndarray] = [soma_verts_arr]
@@ -1407,29 +1325,15 @@ def _stitch_to_soma(
         all_edges.append(edges + offset)
 
         # stem edge: soma → closest node
-        dists = np.linalg.norm(
-            nodes - soma.center, axis=1
-        )
+        dists = np.linalg.norm(nodes - soma.center, axis=1)
         root = int(np.argmin(dists)) + offset
-        all_edges.append(
-            np.array([[0, root]], dtype=np.int64)
-        )
+        all_edges.append(np.array([[0, root]], dtype=np.int64))
 
         offset += len(nodes)
 
-    nodes_arr = (
-        np.vstack(all_nodes)
-        if all_nodes
-        else np.empty((0, 3), np.float64)
-    )
-    radii_dict = _concat_radii(
-        radii_parts, radius_estimators, lead_value=r_soma
-    )
-    edges_arr = (
-        np.vstack(all_edges)
-        if all_edges
-        else np.empty((0, 2), np.int64)
-    )
+    nodes_arr = np.vstack(all_nodes) if all_nodes else np.empty((0, 3), np.float64)
+    radii_dict = _concat_radii(radii_parts, radius_estimators, lead_value=r_soma)
+    edges_arr = np.vstack(all_edges) if all_edges else np.empty((0, 2), np.int64)
     edges_arr = np.sort(edges_arr, axis=1)
     edges_arr = np.unique(edges_arr, axis=0)
 
@@ -1461,9 +1365,7 @@ def _pick_neurite_seed(
     neurite centroid.
     """
     if soma is not None and soma.verts is not None:
-        boundary = np.intersect1d(
-            neurite_verts, soma.verts
-        )
+        boundary = np.intersect1d(neurite_verts, soma.verts)
         if boundary.size > 1:
             return boundary
         if boundary.size == 1:
@@ -1477,9 +1379,7 @@ def _pick_neurite_seed(
 
     # no soma — seed at centroid of the neurite
     centroid = mesh_vertices[neurite_verts].mean(axis=0)
-    dists = np.linalg.norm(
-        mesh_vertices[neurite_verts] - centroid, axis=1
-    )
+    dists = np.linalg.norm(mesh_vertices[neurite_verts] - centroid, axis=1)
     return int(neurite_verts[np.argmin(dists)])
 
 
@@ -1523,17 +1423,9 @@ def _concatenate_sub_skeletons(
             all_edges.append(edges + offset)
         offset += len(nodes)
 
-    nodes_arr = (
-        np.vstack(all_nodes)
-        if all_nodes
-        else np.empty((0, 3), np.float64)
-    )
+    nodes_arr = np.vstack(all_nodes) if all_nodes else np.empty((0, 3), np.float64)
     radii_dict = _concat_radii(radii_parts, radius_estimators)
-    edges_arr = (
-        np.vstack(all_edges)
-        if all_edges
-        else np.empty((0, 2), np.int64)
-    )
+    edges_arr = np.vstack(all_edges) if all_edges else np.empty((0, 2), np.int64)
     if edges_arr.size:
         edges_arr = np.sort(edges_arr, axis=1)
         edges_arr = np.unique(edges_arr, axis=0)
@@ -1593,9 +1485,7 @@ def _skeletonize_preproc(
             f"{soma_tag})"
         )
 
-    with _timed(
-        "↳  build surface graph", verbose=verbose
-    ):
+    with _timed("↳  build surface graph", verbose=verbose):
         gsurf = _surface_graph(mesh)
 
     mesh_vertices = mesh.vertices.view(np.ndarray)
@@ -1605,12 +1495,8 @@ def _skeletonize_preproc(
         verbose=verbose,
     ) as log:
         sub_skeletons = []
-        for i, face_idx in enumerate(
-            components.neurites
-        ):
-            neurite_verts = np.unique(
-                mesh.faces[face_idx].ravel()
-            ).astype(np.int64)
+        for i, face_idx in enumerate(components.neurites):
+            neurite_verts = np.unique(mesh.faces[face_idx].ravel()).astype(np.int64)
 
             seed_vid = _pick_neurite_seed(
                 neurite_verts,
@@ -1628,18 +1514,12 @@ def _skeletonize_preproc(
                 step_size=geodesic_step_size,
                 target_shell_count=geodesic_shell_count,
                 min_shell_vertices=min_shell_vertices,
-                max_shell_width_factor=(
-                    max_shell_width_factor
-                ),
+                max_shell_width_factor=(max_shell_width_factor),
                 split_elongated_shells=False,
                 second_pass=second_pass,
             )
             sub_skeletons.append(sub)
-            log(
-                f"neurite {i}: "
-                f"{len(neurite_verts):,} verts "
-                f"→ {sub[0].shape[0]} nodes"
-            )
+            log(f"neurite {i}: {len(neurite_verts):,} verts → {sub[0].shape[0]} nodes")
 
     # -- assemble skeleton -----------------------------------------
     if has_soma:
@@ -1653,9 +1533,7 @@ def _skeletonize_preproc(
                 node2verts,
                 vert2node,
                 edges_arr,
-            ) = _stitch_to_soma(
-                sub_skeletons, soma, radius_estimators
-            )
+            ) = _stitch_to_soma(sub_skeletons, soma, radius_estimators)
     else:
         with _timed(
             "↳  concatenate neurites",
@@ -1667,9 +1545,7 @@ def _skeletonize_preproc(
                 node2verts,
                 vert2node,
                 edges_arr,
-            ) = _concatenate_sub_skeletons(
-                sub_skeletons, radius_estimators
-            )
+            ) = _concatenate_sub_skeletons(sub_skeletons, radius_estimators)
 
     # -- global MST --
     with _timed(
@@ -1683,14 +1559,8 @@ def _skeletonize_preproc(
 
     if verbose:
         total = time.perf_counter() - _global_start
-        print(
-            f"{'TOTAL':<49}"
-            f"… {total:.2f} s"
-        )
-        print(
-            f"({len(nodes_arr):,} nodes, "
-            f"{edges_mst.shape[0]:,} edges)"
-        )
+        print(f"{'TOTAL':<49}… {total:.2f} s")
+        print(f"({len(nodes_arr):,} nodes, {edges_mst.shape[0]:,} edges)")
 
     ntype = np.zeros(len(nodes_arr), np.int8)
     if has_soma:
@@ -1709,20 +1579,15 @@ def _skeletonize_preproc(
             # extreme vertex not in any neurite — pick
             # the closest skeleton node instead
             dists = np.linalg.norm(
-                nodes_arr
-                - mesh_vertices[root_vid],
+                nodes_arr - mesh_vertices[root_vid],
                 axis=1,
             )
             root_nid = int(np.argmin(dists))
         if root_nid != 0:
             # swap node 0 and root_nid
-            nodes_arr[[0, root_nid]] = (
-                nodes_arr[[root_nid, 0]]
-            )
+            nodes_arr[[0, root_nid]] = nodes_arr[[root_nid, 0]]
             for k in radii_dict:
-                radii_dict[k][[0, root_nid]] = (
-                    radii_dict[k][[root_nid, 0]]
-                )
+                radii_dict[k][[0, root_nid]] = radii_dict[k][[root_nid, 0]]
             node2verts[0], node2verts[root_nid] = (
                 node2verts[root_nid],
                 node2verts[0],
@@ -1735,9 +1600,7 @@ def _skeletonize_preproc(
             vert2node = rebuild_vert2node(node2verts)
         # placeholder soma at the root
         r0 = float(list(radii_dict.values())[0][0])
-        soma = Soma.from_sphere(
-            nodes_arr[0], r0, verts=None
-        )
+        soma = Soma.from_sphere(nodes_arr[0], r0, verts=None)
 
     return Skeleton(
         nodes=nodes_arr,
@@ -1749,9 +1612,7 @@ def _skeletonize_preproc(
         vert2node=vert2node,
         meta={
             "skeliner_version": _SKELINER_VERSION,
-            "skeletonized_at": time.strftime(
-                "%Y-%m-%dT%H:%M:%S"
-            ),
+            "skeletonized_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "unit": unit,
             "id": id,
         },
@@ -1842,16 +1703,11 @@ def _skeletonize_direct(
         mesh_vertices = mesh.vertices.view(np.ndarray)
 
         # -- resolve soma_init_guess → soma_seed_point ----
-        if (
-            soma_seed_point is None
-            and soma_init_guess is not None
-        ):
+        if soma_seed_point is None and soma_init_guess is not None:
             if soma_init_guess == "nucleus":
                 from .pre import find_nucleus_center
 
-                nuc = find_nucleus_center(
-                    mesh, verbose=verbose
-                )
+                nuc = find_nucleus_center(mesh, verbose=verbose)
                 if nuc is not None:
                     soma_seed_point = nuc["center"]
             elif "-" in soma_init_guess:
@@ -1864,8 +1720,7 @@ def _skeletonize_direct(
             seed_vid = int(
                 np.argmin(
                     np.linalg.norm(
-                        mesh_vertices
-                        - np.asarray(soma_seed_point),
+                        mesh_vertices - np.asarray(soma_seed_point),
                         axis=1,
                     )
                 )

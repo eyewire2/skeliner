@@ -964,12 +964,6 @@ def _voxelize_union(
     edges = skel.edges.astype(np.int64, copy=False)
 
     # ---------------- helpers ----------------
-    def _idx_range(lo_e, hi_e):
-        """Index range [i0,i1] (clipped) for an axis."""
-        i0 = int(max(0, np.floor((lo_e - lo) / h)))
-        i1 = int(min([nx - 1, ny - 1, nz - 1]))  # overwritten per-axis
-        return i0, i1
-
     def _range_x(x0, x1):
         i0 = int(max(0, np.floor((x0 - lo[0]) / h)))
         i1 = int(min(nx - 1, np.floor((x1 - lo[0]) / h)))

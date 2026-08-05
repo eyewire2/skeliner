@@ -6,6 +6,7 @@ IO round-trip smoke tests.
 * save to SWC & NPZ
 * reload and compare a few coarse features
 """
+
 from pathlib import Path
 
 import numpy as np
@@ -14,16 +15,23 @@ import pytest
 from skeliner import Skeleton, Soma, dx, skeletonize
 from skeliner.dataclass import MeshStats, Organelles
 from skeliner.io import (
-    load_mesh, load_skeleton_npz, load_soma_npz, load_skeleton_swc,
-    save_soma_npz, save_organelles_npz, load_organelles_npz,
-    save_mesh_stats_npz, load_mesh_stats_npz,
+    load_mesh,
+    load_skeleton_npz,
+    load_soma_npz,
+    load_skeleton_swc,
+    save_soma_npz,
+    save_organelles_npz,
+    load_organelles_npz,
+    save_mesh_stats_npz,
+    load_mesh_stats_npz,
 )
 
-SAMPLES_DIR = Path(__file__).parent / "data" 
+SAMPLES_DIR = Path(__file__).parent / "data"
 
 SAMPLE_SWCS = [
     "60427.swc",
 ]
+
 
 @pytest.fixture(scope="session")
 def reference_mesh():
@@ -63,6 +71,7 @@ def test_io_roundtrip(reference_mesh, tmp_path):
         rtol=1e-4,
     )
 
+
 # ------------------------------------------------------------------------
 #  Helper
 # ------------------------------------------------------------------------
@@ -78,7 +87,7 @@ def _edges_equal(a: np.ndarray, b: np.ndarray) -> bool:
     # sort rows to make order irrelevant
     a = a[np.lexsort(a.T[::-1])]
     b = b[np.lexsort(b.T[::-1])]
-    return np.array_equal(a, b)          # exact – they are integers
+    return np.array_equal(a, b)  # exact – they are integers
 
 
 # ------------------------------------------------------------------------
@@ -101,31 +110,30 @@ def test_swc_roundtrip_exact(fname: str, tmp_path: Path):
     skel_rt = load_skeleton_swc(out_path)
 
     # 4 · compare ­­­—­­ geometry ------------------------------------------------
-    assert np.allclose(
-        skel_rt.nodes, skel_ref.nodes, rtol=1e-6, atol=0.0
-    ), "XYZ coordinates changed"
+    assert np.allclose(skel_rt.nodes, skel_ref.nodes, rtol=1e-6, atol=0.0), (
+        "XYZ coordinates changed"
+    )
 
     for k in skel_ref.radii:
-        assert np.allclose(
-            skel_rt.radii[k], skel_ref.radii[k], rtol=1e-6, atol=0.0
-        ), f"radius column '{k}' changed"
+        assert np.allclose(skel_rt.radii[k], skel_ref.radii[k], rtol=1e-6, atol=0.0), (
+            f"radius column '{k}' changed"
+        )
 
     # topology ----------------------------------------------------------
     assert _edges_equal(skel_rt.edges, skel_ref.edges), "edge list changed"
 
     # node-type labels --------------------------------------------------
-    assert np.array_equal(
-        skel_rt.ntype, skel_ref.ntype
-    ), "ntype vector changed"
+    assert np.array_equal(skel_rt.ntype, skel_ref.ntype), "ntype vector changed"
 
     # soma geometry (allow rounding) ------------------------------------
     assert np.isclose(
         skel_rt.soma.equiv_radius, skel_ref.soma.equiv_radius, rtol=1e-6
     ), "soma radius changed"
 
-    assert np.allclose(
-        skel_rt.soma.center, skel_ref.soma.center, rtol=1e-6
-    ), "soma center changed"
+    assert np.allclose(skel_rt.soma.center, skel_ref.soma.center, rtol=1e-6), (
+        "soma center changed"
+    )
+
 
 def test_skeleton_roundtrip(tmp_path, reference_mesh):
     skel0 = skeletonize(reference_mesh, verbose=False)
@@ -133,7 +141,7 @@ def test_skeleton_roundtrip(tmp_path, reference_mesh):
     skel0.to_swc(out)
     skel1 = load_skeleton_swc(out)
 
-    assert np.allclose(skel0.nodes,  skel1.nodes,  rtol=1e-6)
+    assert np.allclose(skel0.nodes, skel1.nodes, rtol=1e-6)
     assert _edges_equal(skel0.edges, skel1.edges)
     assert np.allclose(skel0.r, skel1.r, rtol=1e-6)
 
@@ -144,8 +152,12 @@ def test_skeleton_roundtrip(tmp_path, reference_mesh):
 def test_soma_npz_roundtrip_with_verts(tmp_path):
     """Full ellipsoid soma with verts survives save/load."""
     R = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]], dtype=np.float64)
-    soma = Soma(center=[10, 20, 30], axes=[5, 4, 3], R=R,
-                verts=np.array([0, 7, 42, 999], dtype=np.int64))
+    soma = Soma(
+        center=[10, 20, 30],
+        axes=[5, 4, 3],
+        R=R,
+        verts=np.array([0, 7, 42, 999], dtype=np.int64),
+    )
 
     path = tmp_path / "soma_verts"
     soma.to_npz(path)
@@ -200,16 +212,18 @@ def test_soma_npz_nucleus_roundtrip(tmp_path):
         "center": np.array([100.0, 200.0, 300.0]),
         "peak_r": 1500.0,
         "z_range": (280.0, 340.0),
-        "slices": np.array([
-            [280, 101, 201, 1200],
-            [290, 102, 202, 1400],
-            [300, 100, 200, 1500],
-            [310, 99, 199, 1300],
-            [340, 98, 198, 1000],
-        ], dtype=np.float64),
+        "slices": np.array(
+            [
+                [280, 101, 201, 1200],
+                [290, 102, 202, 1400],
+                [300, 100, 200, 1500],
+                [310, 99, 199, 1300],
+                [340, 98, 198, 1000],
+            ],
+            dtype=np.float64,
+        ),
     }
-    soma = Soma(center=[10, 20, 30], axes=[5, 4, 3], R=np.eye(3),
-                nucleus=nucleus)
+    soma = Soma(center=[10, 20, 30], axes=[5, 4, 3], R=np.eye(3), nucleus=nucleus)
     path = tmp_path / "soma_nuc.npz"
     save_soma_npz(soma, path)
 
@@ -233,7 +247,7 @@ def test_soma_npz_nucleus_none(tmp_path):
 # ------------------------------------------------------------------------
 #  Skeleton classmethod round-trips
 # ------------------------------------------------------------------------
-def test_skeleton_from_swc(tmp_path):
+def test_skeleton_from_swc():
     """Skeleton.from_swc matches load_skeleton_swc."""
     src = SAMPLES_DIR / "60427.swc"
     skel_func = load_skeleton_swc(src)
@@ -291,9 +305,14 @@ def test_organelles_npz_backward_compat(tmp_path):
     # Simulate old format: no expanded key, with leftover mesh_stats fields
     path = tmp_path / "org_old.npz"
     face_comp = np.zeros(nF, dtype=np.int64)
-    np.savez_compressed(path, pocket=pocket, isolated=isolated,
-                        outward_dots=np.zeros(nF), face_comp=face_comp,
-                        main_ci=np.array(0))
+    np.savez_compressed(
+        path,
+        pocket=pocket,
+        isolated=isolated,
+        outward_dots=np.zeros(nF),
+        face_comp=face_comp,
+        main_ci=np.array(0),
+    )
 
     loaded = load_organelles_npz(path)
     assert np.array_equal(loaded.pocket, pocket)
@@ -336,12 +355,8 @@ def test_mesh_stats_npz_face_count_validation(tmp_path):
     save_mesh_stats_npz(stats, path)
 
     # Build a tetrahedron mesh (4 faces) — does not match nF=50
-    verts = np.array(
-        [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64
-    )
-    faces = np.array(
-        [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], dtype=np.int64
-    )
+    verts = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64)
+    faces = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], dtype=np.int64)
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
     with pytest.raises(ValueError, match="stale"):
