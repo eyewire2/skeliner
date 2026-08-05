@@ -491,3 +491,208 @@ def _dx():
     from skeliner import dx
 
     return dx
+
+
+# ── /rescue_as_neurite ────────────────────────────────────────────────
+#
+# The neurite/discarded split is an automatic size threshold.  Rescuing
+# overrides it, and because the split is re-derived on every break and
+# every reassignment the override has to be replayed or it vanishes.
+
+
+@pytest.fixture
+def rescue_client(tmp_path, monkeypatch):
+    """A viewer serving a tube plus a speck the threshold discards."""
+    from starlette.testclient import TestClient
+
+    from skeliner import pre
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+
+    tube = trimesh.creation.cylinder(radius=50.0, height=1000.0, sections=64)
+    tube = tube.subdivide()
+    speck = trimesh.creation.box(extents=[8.0, 8.0, 8.0])
+    speck.apply_translation([500.0, 0.0, 0.0])
+    mesh = trimesh.util.concatenate([tube, speck])
+
+    empty = np.zeros(len(mesh.faces), dtype=bool)
+    org = Organelles(pocket=empty.copy(), isolated=empty.copy(), expanded=empty.copy())
+    comp = pre.break_up_mesh(mesh, None, org)
+    assert len(comp.discarded) == 1, "fixture must produce something to rescue"
+
+    app = _create_app(preload_mesh=mesh, port=8914)
+    with TestClient(app) as client:
+        state = _mesh_state_of(app)
+        state["mesh"] = mesh
+        state["soma"] = None
+        state["organelles"] = org
+        state["neurites"] = comp.neurites
+        state["discarded"] = comp.discarded
+        yield client, state, comp.discarded[0]
+
+
+def test_rescuing_promotes_the_whole_fragment(rescue_client):
+    client, state, speck = rescue_client
+    n_before = len(state["neurites"])
+
+    r = client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["nRescued"] == 1
+    assert body["facesRescued"] == len(speck)
+    assert body["nDiscarded"] == 0
+    assert len(state["neurites"]) == n_before + 1
+    assert len(state["discarded"]) == 0
+
+
+def test_rescuing_relabels_and_does_not_recompute(rescue_client):
+    """A rescue changes which list a component sits in, nothing else.
+
+    Driven by a partition ``break_up_mesh`` would *not* reproduce: if the
+    route re-derived, these hand-split neurites would be replaced by
+    freshly computed ones and the split would vanish.
+    """
+    client, state, speck = rescue_client
+    whole = state["neurites"][0]
+    split = [whole[: len(whole) // 2], whole[len(whole) // 2 :]]
+    state["neurites"] = Neurites([a.copy() for a in split])
+
+    r = client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+    assert r.status_code == 200
+
+    survived = [n for n in state["neurites"] if set(n.tolist()) != set(speck.tolist())]
+    assert len(survived) == 2, "the hand-made split was recomputed away"
+    assert all(
+        np.array_equal(np.sort(a), np.sort(b))
+        for a, b in zip(sorted(survived, key=len), sorted(split, key=len))
+    )
+
+
+def test_rescuing_leaves_the_stored_inputs_alone(rescue_client):
+    client, state, speck = rescue_client
+    mesh, soma, org = state["mesh"], state["soma"], state["organelles"]
+
+    client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+
+    assert state["mesh"] is mesh
+    assert state["soma"] is soma
+    assert state["organelles"] is org
+
+
+def test_the_rescued_fragment_is_an_ordinary_neurite(rescue_client):
+    client, state, speck = rescue_client
+    client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+
+    matches = [n for n in state["neurites"] if set(n.tolist()) == set(speck.tolist())]
+    assert len(matches) == 1, "the fragment should be in the neurites, once"
+    assert not hasattr(state["neurites"], "rescued"), (
+        "nothing on the result may record that it was ever discarded"
+    )
+
+
+def test_a_later_reassignment_does_not_undo_the_rescue(rescue_client):
+    """The bug this exists to prevent.
+
+    A reassignment re-derives the components, and a rescue that lived
+    only in the neurites list was silently dropped by that re-derive.
+    """
+    client, state, speck = rescue_client
+    client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+
+    sel = [int(f) for f in state["neurites"][0][:32]]
+    assert (
+        client.post("/reassign_preview", json={"faces": sel, "to": "organelle"}).json()[
+            "nDiscarded"
+        ]
+        == 0
+    ), "the preview already re-derives"
+
+    applied = client.post("/reassign_apply").json()
+    assert applied["nDiscarded"] == 0
+    assert any(set(n.tolist()) == set(speck.tolist()) for n in state["neurites"])
+
+
+def test_re_breaking_does_not_undo_the_rescue(rescue_client):
+    client, state, speck = rescue_client
+    client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+
+    r = client.post("/break_up_mesh")
+    assert r.status_code == 200
+    assert r.json()["nDiscarded"] == 0
+
+
+def test_the_override_is_recorded_as_face_ids(rescue_client):
+    client, state, speck = rescue_client
+    assert len(state["rescued"]) == 0
+    client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+    assert set(state["rescued"].tolist()) == set(speck.tolist())
+
+
+def test_the_labels_left_behind_name_the_right_components(rescue_client):
+    """A rescue republishes every component, so no label can go stale."""
+    client, state, speck = rescue_client
+    client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+
+    ann = client.get("/annotations").json()
+    labels = [h["label"] for h in ann["highlights"]]
+    assert not any(lbl.startswith("discarded ") for lbl in labels)
+    n_neurites = sum(lbl.startswith("neurite ") for lbl in labels)
+    assert n_neurites == len(state["neurites"])
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ({"faces": []}, "No faces selected"),
+        ({"faces": [0]}, "No discarded component matches"),
+    ],
+)
+def test_rescue_rejects_bad_input(rescue_client, body, expected):
+    client, state, speck = rescue_client
+    # face 0 belongs to the tube, not to the speck
+    r = client.post("/rescue_as_neurite", json=body)
+    assert r.status_code == 400
+    assert expected in r.json()["error"]
+
+
+def test_rescue_is_refused_when_nothing_was_discarded(rescue_client):
+    client, state, speck = rescue_client
+    state["discarded"] = Discarded([])
+    r = client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+    assert r.status_code == 400
+    assert "No discarded components" in r.json()["error"]
+
+
+def test_compacting_carries_the_override_through_the_reindex(rescue_client):
+    """Compaction renumbers every face, so the stored ids must move too.
+
+    Driven through a real removal first: on an already-clean mesh
+    compaction drops nothing, the face map is the identity, and a test
+    that only checks the ids survived would pass without them ever being
+    remapped.
+    """
+    client, state, speck = rescue_client
+    client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+
+    mesh_before = state["mesh"]
+    want = mesh_before.vertices[mesh_before.faces[speck]].mean(axis=1)
+    ids_before = set(state["rescued"].tolist())
+
+    # Degenerate some tube faces, which sit *before* the speck, so
+    # compacting them away shifts every id the override holds.
+    doomed = [int(f) for f in state["neurites"][0][:40]]
+    assert client.post("/remove_selected", json={"faces": doomed}).status_code == 200
+    assert client.post("/compact_mesh").status_code == 200
+
+    assert len(state["mesh"].faces) < len(mesh_before.faces), "nothing was compacted"
+    ids_after = set(state["rescued"].tolist())
+    assert ids_after and ids_after != ids_before, "the ids were never remapped"
+
+    # Same triangles, whatever they are now called.
+    mesh_after = state["mesh"]
+    got = mesh_after.vertices[mesh_after.faces[sorted(ids_after)]].mean(axis=1)
+    assert np.allclose(np.sort(got, axis=0), np.sort(want, axis=0))
+
+    # And the override still does its job on the renumbered mesh.
+    assert client.post("/break_up_mesh").json()["nDiscarded"] == 0

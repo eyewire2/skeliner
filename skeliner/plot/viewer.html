@@ -409,7 +409,7 @@
                         id="modeSkelBtn"
                         class="mode-btn"
                         style="margin-left: 4px"
-                        title="Edit how the arbor is partitioned into bins — needs Skeletonize first"
+                        title="Edit how the neurites are partitioned into bins — needs Skeletonize first"
                     >
                         Edit Partition
                     </button>
@@ -466,12 +466,21 @@
                         style="margin-left: 4px"
                         title="Release from soma and organelles — connectivity decides which neurite it joins"
                     >
-                        Arbor
+                        Neurites
                     </button>
                     <span id="reassignPending" style="display: none; margin-left: 12px">
                         <button id="reassignApplyBtn">Apply</button>
                         <button id="reassignCancelBtn" style="margin-left: 4px">Cancel</button>
                     </span>
+                </div>
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <span
+                        style="color: #888"
+                        title="The neurite/discarded split is an automatic size threshold. Double-click a fragment in the 3D view to select it, then promote it — the override stays in force through later re-derives."
+                        >Discarded fragments:</span
+                    >
+                    <button id="hlRescue" style="margin-left: 4px" disabled>→ Neurites</button>
+                    <span id="rescueHint" style="margin-left: 10px; color: #888"></span>
                 </div>
             </div>
 
@@ -634,7 +643,6 @@
             <div>
                 <span class="label">Highlighted: </span><span class="value" id="hlCount">0</span>
                 <button id="hlClear" style="font-size: 11px; cursor: pointer">Clear</button>
-                <button id="hlRescue" style="font-size: 11px; cursor: pointer; display: none; margin-left: 6px">→ Neurite</button>
             </div>
             <div
                 id="reassignSummary"
@@ -858,7 +866,6 @@ let meshCentroid = [0, 0, 0];
                     manualHighlightFaces.clear();
                     rebuildManualHighlight();
                     syncManualHighlight();
-                    document.getElementById("hlRescue").style.display = "none";
                 });
                 document.getElementById("hlRescue").addEventListener("click", runRescueAsNeurite);
                 document.getElementById("hlSaveBtn").addEventListener("click", saveHighlightAsAnnotation);
@@ -1754,8 +1761,6 @@ let meshCentroid = [0, 0, 0];
                     const verb = allSelected ? "Deselected" : "Selected";
                     document.getElementById("selDetail").innerHTML =
                         `<div>${verb}: <b>${label}</b> (${manualHighlightFaces.size} faces total)</div>`;
-                    const isDiscarded = !allSelected && label.startsWith("discarded ");
-                    document.getElementById("hlRescue").style.display = isDiscarded ? "inline-block" : "none";
                     return;
                 }
             }
@@ -2054,7 +2059,7 @@ let meshCentroid = [0, 0, 0];
                 return scopeMask === null || scopeMask[faceIndex] === 1;
             }
 
-            // Discarded components are fragments the arbor already lost — all
+            // Discarded components are fragments the neurites already lost — all
             // but the wrongly-discarded ones are disconnected, and reassigning
             // a disconnected fragment cannot connect it to anything.  There
             // can be dozens, so they collapse into one chip that acts on the
@@ -2193,6 +2198,55 @@ let meshCentroid = [0, 0, 0];
                 if (editMode) renderScopeChips();
             }
 
+            // ── Rescue discarded fragments ───────────────────────────────
+            // The neurite/discarded split is an automatic size threshold and
+            // it is sometimes wrong.  Touching a fragment anywhere claims all
+            // of it: the threshold discards whole components, so half a
+            // rescue would not mean anything.
+            function discardedFragmentsHit() {
+                if (!manualHighlightFaces.size) return [];
+                return componentHighlights()
+                    .filter(({ g }) => isDiscarded(g))
+                    .filter(({ g }) => g.faces.some((f) => manualHighlightFaces.has(f)))
+                    .map(({ g }) => g);
+            }
+
+            // The hint carries the gesture, because there is nothing on
+            // screen that suggests it: the row acts on the *highlight*
+            // selection, and lighting a scope chip only makes a component
+            // pickable.  Double-click takes a whole component in one go,
+            // which is the only thing a rescue can mean.
+            function refreshRescueRow() {
+                const btn = document.getElementById("hlRescue");
+                const hint = document.getElementById("rescueHint");
+                if (!btn || !hint) return;
+                const hit = discardedFragmentsHit();
+                btn.disabled = hit.length === 0;
+                if (hit.length) {
+                    const nf = hit.reduce((s, g) => s + g.faces.length, 0);
+                    hint.textContent =
+                        `${hit.length} fragment${hit.length > 1 ? "s" : ""}` +
+                        ` · ${nf.toLocaleString()} faces`;
+                    return;
+                }
+                if (manualHighlightFaces.size) {
+                    hint.textContent = "selection touches no discarded fragment";
+                    return;
+                }
+                const discarded = componentHighlights().filter(({ g }) =>
+                    isDiscarded(g),
+                );
+                if (!discarded.length) {
+                    hint.textContent = "none — run Break first";
+                } else if (!discarded.some(({ i }) => scopeHas(i))) {
+                    // Scope is a pick filter, so an unlit fragment cannot be
+                    // selected at all and the double-click just does nothing.
+                    hint.textContent = "out of scope — light their chip first";
+                } else {
+                    hint.textContent = "double-click one in the 3D view";
+                }
+            }
+
             // ── Reassign faces between components ────────────────────────
             // Preview then apply, like every other pair in this panel.  The
             // preview re-derives on the server, so what is drawn here is
@@ -2275,7 +2329,7 @@ let meshCentroid = [0, 0, 0];
                     return;
                 }
 
-                // Leaving the arbor and joining it are opposite moves; colour
+                // Leaving the neurites and joining them are opposite moves; colour
                 // them so the majority-rule fringe is visible as the part of
                 // the change nobody drew.
                 drawReassignOverlay(data.leaving, [0.9, 0.3, 0.9]);
@@ -2291,7 +2345,7 @@ let meshCentroid = [0, 0, 0];
                     `<div><b>${data.nSelected.toLocaleString()}</b> selected → ` +
                     `<b>${data.target}</b></div>` +
                     `<div style="color:#888">${data.leaving.length.toLocaleString()} leave, ` +
-                    `${data.entering.length.toLocaleString()} join the arbor</div>` +
+                    `${data.entering.length.toLocaleString()} join the neurites</div>` +
                     effects +
                     `<div style="color:#888">→ ${data.nNeurites} neurites, ` +
                     `${data.nDiscarded} discarded</div>`;
@@ -2519,7 +2573,7 @@ let meshCentroid = [0, 0, 0];
             }
 
             async function runRescueAsNeurite() {
-                if (manualHighlightFaces.size === 0) return;
+                if (!discardedFragmentsHit().length) return;
                 const data = await _runAction(
                     document.getElementById("hlRescue"),
                     () => fetch("/rescue_as_neurite", {
@@ -2904,6 +2958,9 @@ let meshCentroid = [0, 0, 0];
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify(payload),
                     }).catch(() => {});
+                // Every selection change funnels through here, so the rescue
+                // row cannot fall out of step with what is selected.
+                refreshRescueRow();
             }
 
             // ── Transform (edit mesh) ─────────────────────────────────────
@@ -3502,6 +3559,7 @@ let meshCentroid = [0, 0, 0];
                 currentAnnotations = annotations;
                 updateHighlightsPanel();
                 resetScope();
+                refreshRescueRow();
                 if (!annotations) return;
                 // Face highlights
                 if (annotations.highlights) {

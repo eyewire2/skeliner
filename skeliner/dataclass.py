@@ -211,7 +211,9 @@ class MeshComponents:
     """Result of :func:`~skeliner.pre.break_up_mesh`.
 
     Holds the four classified pieces of a neuron mesh after breaking
-    at the soma and organelle boundaries.
+    at the soma and organelle boundaries.  Only *soma* and *organelles*
+    are stored inputs; *neurites* and *discarded* are derived from them
+    by :func:`~skeliner.pre.break_up_mesh`.
     """
 
     soma: "Soma | None"
@@ -222,15 +224,26 @@ class MeshComponents:
     def rescue_discarded(self, indices: int | list[int]) -> None:
         """Move discarded fragments to neurites, in place.
 
+        The neurite/discarded split is *derived* — see
+        :func:`~skeliner.pre.break_up_mesh` — so this move lasts only
+        until the next re-derive.  To make it stick, pass the fragments'
+        faces to that function as ``rescued=``.
+
         Parameters
         ----------
         indices : int or list[int]
             Index (or indices) into ``self.discarded`` to rescue.
         """
-        if isinstance(indices, int):
-            indices = [indices]
-        for i in sorted(indices, reverse=True):
-            self.neurites.components.append(self.discarded.components.pop(i))
+        if isinstance(indices, (int, np.integer)):
+            indices = [int(indices)]
+        # Pop from the back so the earlier indices stay valid, then
+        # append in the original order: `discarded` is sorted by
+        # descending size, and so is `neurites`.
+        moved = [
+            self.discarded.components.pop(i) for i in sorted(indices, reverse=True)
+        ]
+        for comp in reversed(moved):
+            self.neurites.components.append(comp)
 
     def to_npz(self, path: str | Path) -> None:
         from . import io

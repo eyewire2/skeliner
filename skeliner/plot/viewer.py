@@ -306,6 +306,11 @@ def _create_app(
         "gap_clusters": None,  # cached from detect_gaps
         "hole_loops": None,  # cached from detect_holes
         "pending_reassignment": None,  # previewed, not yet committed
+        # Faces the user rescued from the discard threshold.  Input
+        # state, like soma and organelles: the neurite/discarded split
+        # is re-derived on every break and reassignment, so an override
+        # that lived on the result would be undone by the next one.
+        "rescued": np.empty(0, dtype=np.int64),
     }
 
     def _organelle_mask(org) -> np.ndarray | None:
@@ -567,6 +572,7 @@ def _create_app(
                 mesh_state["soma"] = None
                 mesh_state["organelles"] = None
                 mesh_state["mesh_stats"] = None
+                mesh_state["rescued"] = np.empty(0, dtype=np.int64)
                 annotations_path.write_text("{}", encoding="utf-8")
                 await broadcast({"type": "all_skeletons_removed"})
 
@@ -740,6 +746,10 @@ def _create_app(
                 mesh_state["organelles"] = comp.organelles
                 mesh_state["neurites"] = comp.neurites
                 mesh_state["discarded"] = comp.discarded
+                # The file's split is already whatever its author decided;
+                # an override left over from another mesh would name
+                # unrelated faces.
+                mesh_state["rescued"] = np.empty(0, dtype=np.int64)
 
                 # Build annotations
                 ann = {}
@@ -2350,8 +2360,24 @@ def _create_app(
         )
 
     async def do_rescue_as_neurite(request):
-        """Move selected discarded faces to neurites."""
-        from skeliner.dataclass import Neurites, Discarded
+        """Promote the discarded fragments the selection touches to neurites.
+
+        A relabel, not a re-derive.  The components in hand were already
+        computed from this soma and these organelle masks, and a rescue
+        changes neither — only which list a component sits in.  Running
+        ``break_up_mesh`` again would recompute every component to reach
+        the same face sets (235 ms on a 110k-face cell), and would quietly
+        replace the components of a loaded ``components.npz`` with
+        freshly derived ones.
+
+        The override is recorded so the *next* re-derive — a reassignment
+        or a re-break — reapplies it, which is the part a plain list move
+        cannot do on its own.
+        """
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
 
         body = await request.json()
         sel_faces = set(body.get("faces", []))
@@ -2368,61 +2394,32 @@ def _create_app(
                 status_code=400,
             )
 
-        neurites = list(mesh_state.get("neurites") or [])
-        keep_discarded = []
-        rescued = []
-
-        for d_arr in discarded:
-            d_set = set(d_arr.tolist())
-            if d_set & sel_faces:
-                neurites.append(d_arr)
-                rescued.append(d_arr)
-            else:
-                keep_discarded.append(d_arr)
-
-        if not rescued:
+        # Touching a fragment anywhere claims all of it: the threshold
+        # discards whole components, so a partial rescue has no meaning.
+        hit = [i for i, d in enumerate(discarded) if sel_faces.intersection(d.tolist())]
+        if not hit:
             return JSONResponse(
                 {"ok": False, "error": "No discarded component matches the selection"},
                 status_code=400,
             )
 
-        mesh_state["neurites"] = Neurites(neurites)
-        mesh_state["discarded"] = Discarded(keep_discarded)
+        components = _current_components()
+        faces = np.concatenate([components.discarded[i] for i in hit])
+        components.rescue_discarded(hit)
 
-        # Update annotations: relabel rescued highlights
-        if annotations_path.exists():
-            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
-            rescued_faces = set()
-            for r in rescued:
-                rescued_faces.update(r.tolist())
-            n_neurites = len(neurites)
-            for h in ann.get("highlights", []):
-                h_faces = set(h.get("faces", []))
-                if h_faces & rescued_faces:
-                    idx = (
-                        n_neurites
-                        - len(rescued)
-                        + next(
-                            j
-                            for j, r in enumerate(rescued)
-                            if set(r.tolist()) & h_faces
-                        )
-                    )
-                    h["label"] = f"neurite {idx} ({len(h['faces']):,}f)"
-                    h["color"] = [0.2, 0.6, 1.0]
-            annotations_path.write_text(json.dumps(ann), encoding="utf-8")
-            await broadcast({"type": "annotations_updated"})
+        mesh_state["rescued"] = np.union1d(
+            np.asarray(mesh_state["rescued"], dtype=np.int64),
+            faces.astype(np.int64, copy=False),
+        )
+        # Component ids shift when one leaves the discarded list, so a
+        # preview named against the old numbering no longer means anything.
+        mesh_state["pending_reassignment"] = None
+        out = _publish_components(components)
+        await broadcast({"type": "annotations_updated"})
 
-        n_rescued = sum(len(r) for r in rescued)
-        await _log(f"Rescued {len(rescued)} discarded → neurite ({n_rescued:,} faces)")
+        await _log(f"Rescued {len(hit)} discarded → neurites ({len(faces):,} faces)")
         return JSONResponse(
-            {
-                "ok": True,
-                "nRescued": len(rescued),
-                "facesRescued": n_rescued,
-                "nNeurites": len(neurites),
-                "nDiscarded": len(keep_discarded),
-            }
+            {"ok": True, "nRescued": len(hit), "facesRescued": len(faces), **out}
         )
 
     async def edit_vertices(request):
@@ -2633,7 +2630,9 @@ def _create_app(
         mesh = mesh_state["mesh"]
 
         def _run():
-            return break_up_mesh(mesh, soma, org, verbose=True)
+            return break_up_mesh(
+                mesh, soma, org, rescued=mesh_state["rescued"], verbose=True
+            )
 
         result = await _run_with_log(_run)
         # Breaking up redefines the components a pending reassignment was
@@ -2653,7 +2652,7 @@ def _create_app(
         )
 
     async def reassign_preview(request):
-        """Preview handing the selected faces to soma / organelle / arbor."""
+        """Preview handing the selected faces to soma / organelle / neurites."""
         from skeliner.pre import preview_reassignment
 
         if mesh_state["mesh"] is None:
@@ -2683,7 +2682,14 @@ def _create_app(
         components = _current_components()
 
         def _run():
-            return preview_reassignment(mesh, components, sel, to=target, verbose=True)
+            return preview_reassignment(
+                mesh,
+                components,
+                sel,
+                to=target,
+                rescued=mesh_state["rescued"],
+                verbose=True,
+            )
 
         try:
             r = await _run_with_log(_run)
@@ -2815,6 +2821,13 @@ def _create_app(
         mesh_state["organelles"] = components.organelles
         mesh_state["neurites"] = components.neurites
         mesh_state["discarded"] = components.discarded
+        # Remapped rather than cleared with the derived state below: a
+        # rescue is something the user decided and cannot be recovered
+        # by re-running anything, so it is kept like soma and organelles.
+        old_rescued = np.asarray(mesh_state["rescued"], dtype=np.int64)
+        old_rescued = old_rescued[old_rescued < n_faces_before]
+        mapped = face_map[old_rescued]
+        mesh_state["rescued"] = mapped[mapped >= 0]
         mesh_state["mesh_stats"] = None
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None
@@ -3377,7 +3390,7 @@ def _create_app(
                     {
                         "ok": False,
                         "error": "That face belongs to no bin — soma, organelle "
-                        "or discarded surface is not part of the arbor.",
+                        "and discarded surface are not part of the neurites.",
                     },
                     status_code=400,
                 )

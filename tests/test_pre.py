@@ -1150,6 +1150,113 @@ class TestPreviewReassignment:
         assert set(sel.tolist()) <= set(back.entering.tolist())
 
 
+# ── rescuing a discarded fragment ────────────────────────────────────
+
+
+def _tube_with_speck():
+    """A tube plus a speck small enough for the 95% rule to discard.
+
+    The threshold keeps components until the cumulative face count
+    reaches 95% of the total, so the speck has to be under 1/19th of the
+    tube for this to be a rescue test rather than a no-op.
+    """
+    tube = _cylinder_at(50.0, 1000.0, 0.0, 64).subdivide()
+    speck = trimesh.creation.box(extents=[8.0, 8.0, 8.0])
+    speck.apply_translation([500.0, 0.0, 0.0])
+    mesh = _combine([tube, speck])
+    z = np.zeros(len(mesh.faces), dtype=bool)
+    org = Organelles(pocket=z.copy(), isolated=z.copy(), expanded=z.copy())
+    return mesh, org
+
+
+class TestRescued:
+    def test_the_speck_is_discarded_without_an_override(self):
+        mesh, org = _tube_with_speck()
+        c = pre.break_up_mesh(mesh, None, org)
+        assert len(c.neurites) == 1
+        assert len(c.discarded) == 1
+
+    def test_an_override_keeps_it(self):
+        mesh, org = _tube_with_speck()
+        speck = pre.break_up_mesh(mesh, None, org).discarded[0]
+        c = pre.break_up_mesh(mesh, None, org, rescued=speck)
+        assert len(c.discarded) == 0
+        assert len(c.neurites) == 2
+
+    def test_one_face_claims_the_whole_fragment(self):
+        # The threshold discards whole components, so naming any face of
+        # one is enough to keep all of it.
+        mesh, org = _tube_with_speck()
+        speck = pre.break_up_mesh(mesh, None, org).discarded[0]
+        c = pre.break_up_mesh(mesh, None, org, rescued=speck[:1])
+        assert len(c.discarded) == 0
+        assert set(c.neurites[1].tolist()) == set(speck.tolist())
+
+    def test_a_rescued_fragment_is_an_ordinary_neurite(self):
+        # Nothing on the result records that it was ever discarded.
+        mesh, org = _tube_with_speck()
+        speck = pre.break_up_mesh(mesh, None, org).discarded[0]
+        c = pre.break_up_mesh(mesh, None, org, rescued=speck)
+        assert not hasattr(c, "rescued")
+        assert not hasattr(c.neurites, "rescued")
+
+    def test_neurites_stay_sorted_by_size(self):
+        mesh, org = _tube_with_speck()
+        speck = pre.break_up_mesh(mesh, None, org).discarded[0]
+        c = pre.break_up_mesh(mesh, None, org, rescued=speck)
+        sizes = [len(x) for x in c.neurites]
+        assert sizes == sorted(sizes, reverse=True)
+
+    def test_an_override_naming_nothing_discarded_changes_nothing(self):
+        mesh, org = _tube_with_speck()
+        plain = pre.break_up_mesh(mesh, None, org)
+        c = pre.break_up_mesh(mesh, None, org, rescued=plain.neurites[0][:5])
+        assert [len(x) for x in c.neurites] == [len(x) for x in plain.neurites]
+        assert [len(x) for x in c.discarded] == [len(x) for x in plain.discarded]
+
+    def test_out_of_range_face_ids_are_ignored(self):
+        mesh, org = _tube_with_speck()
+        nF = len(mesh.faces)
+        c = pre.break_up_mesh(mesh, None, org, rescued=[nF + 10, -1])
+        assert len(c.discarded) == 1
+
+    def test_rescue_discarded_moves_it_but_does_not_make_it_stick(self):
+        # The dataclass method is a plain list move; durability is the
+        # caller's job, via the override.  Pinning that down because the
+        # difference is exactly what used to be lost.
+        mesh, org = _tube_with_speck()
+        c = pre.break_up_mesh(mesh, None, org)
+        c.rescue_discarded(0)
+        assert len(c.neurites) == 2 and len(c.discarded) == 0
+        again = pre.break_up_mesh(mesh, None, org)
+        assert len(again.discarded) == 1
+
+    def test_rescue_discarded_keeps_neurites_sorted(self):
+        c = _components([[0, 1, 2, 3], [4, 5, 6]], [[7, 8], [9]])
+        c.rescue_discarded([0, 1])
+        sizes = [len(x) for x in c.neurites]
+        assert sizes == sorted(sizes, reverse=True)
+        assert len(c.discarded) == 0
+
+    def test_a_reassignment_re_derive_does_not_undo_a_rescue(self):
+        # preview_reassignment runs the real break_up_mesh, which is
+        # where a rescue used to vanish.
+        mesh, org = _tube_with_speck()
+        speck = pre.break_up_mesh(mesh, None, org).discarded[0]
+        c = pre.break_up_mesh(mesh, None, org, rescued=speck)
+
+        # Same edit, nowhere near the speck; the override is the only
+        # difference between the two.
+        elsewhere = [int(c.neurites[0][0])]
+        lost = pre.preview_reassignment(mesh, c, elsewhere, to="organelle")
+        assert len(lost.components.discarded) == 1
+
+        kept = pre.preview_reassignment(
+            mesh, c, elsewhere, to="organelle", rescued=speck
+        )
+        assert len(kept.components.discarded) == 0
+
+
 # ── Smoke test on real data ──────────────────────────────────────────
 
 

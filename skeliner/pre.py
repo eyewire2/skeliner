@@ -2753,6 +2753,7 @@ def break_up_mesh(
     soma: Soma | None,
     organelles: Organelles,
     *,
+    rescued=None,
     verbose: bool = False,
 ) -> MeshComponents:
     """Break the mesh using soma and organelles, classify the pieces.
@@ -2764,7 +2765,8 @@ def break_up_mesh(
       without crossing organelle faces (topologically trapped).
     - **missed soma** — reachable, but boundary is mostly soma faces.
     - **neurite** — reachable, large enough to be a real branch.
-    - **discarded** — reachable, but too small (below auto threshold).
+    - **discarded** — reachable, but too small (below auto threshold),
+      unless it carries a face named in *rescued*.
 
     The discard threshold is auto-inferred: components are sorted by
     size descending; once the cumulative face count reaches 95% of
@@ -2784,6 +2786,12 @@ def break_up_mesh(
         Pass ``None`` if the mesh has no soma.
     organelles : Organelles
         From :func:`find_organelles`.
+    rescued : array-like of int, optional
+        Face ids the user has declared arbor.  A component that the
+        threshold would discard is kept as a neurite instead if it
+        carries one of them.  Passed through to the result, so the
+        override survives being re-derived; the neurite/discarded split
+        is derived state and a plain mutation of it would not.
     verbose : bool
 
     Returns
@@ -2797,6 +2805,12 @@ def break_up_mesh(
     faces = np.asarray(mesh.faces)
     verts = mesh.vertices
     nF = len(faces)
+
+    rescued_fi = (
+        np.empty(0, dtype=np.int64)
+        if rescued is None
+        else np.unique(np.asarray(rescued, dtype=np.int64))
+    )
 
     # Mesh-mutating steps (e.g. remove_gaps) may have appended faces
     # since find_organelles ran. The new faces are stitch geometry, never
@@ -2931,12 +2945,26 @@ def break_up_mesh(
     neurites = neurite_candidates[:split_idx]
     discarded = neurite_candidates[split_idx:]
 
+    # --- re-apply the hand overrides the threshold knows nothing about ---
+    promoted: list[np.ndarray] = []
+    if len(rescued_fi) and discarded:
+        keep = np.zeros(nF, dtype=bool)
+        keep[rescued_fi[(rescued_fi >= 0) & (rescued_fi < nF)]] = True
+        still_discarded: list[np.ndarray] = []
+        for comp in discarded:
+            (promoted if keep[comp].any() else still_discarded).append(comp)
+        if promoted:
+            discarded = still_discarded
+            neurites = sorted(neurites + promoted, key=len, reverse=True)
+
     if verbose:
         dt = time.perf_counter() - _t0
         n_disc_faces = sum(len(c) for c in discarded)
         parts = [f"{len(neurites)} neurites"]
         if discarded:
             parts.append(f"{len(discarded)} discarded ({n_disc_faces:,}f)")
+        if promoted:
+            parts.append(f"rescued {len(promoted)}")
         if n_trapped:
             parts.append(f"trapped +{n_trapped:,}f")
         if n_soma_absorbed:
@@ -3051,6 +3079,7 @@ def preview_reassignment(
     faces,
     *,
     to: str,
+    rescued=None,
     verbose: bool = False,
 ) -> Reassignment:
     """Work out what assigning *faces* to *to* would do, without doing it.
@@ -3092,6 +3121,10 @@ def preview_reassignment(
         ``'soma'`` adds the faces' vertices to the soma; ``'organelle'``
         sets them in :attr:`~skeliner.dataclass.Organelles.manual`;
         ``'remainder'`` releases them from both, back to the arbor.
+    rescued : array-like of int, optional
+        Threshold overrides in force, passed straight to
+        :func:`break_up_mesh`.  Without them the re-derive this preview
+        runs would silently re-discard fragments the user had rescued.
     verbose : bool
         Passed to :func:`break_up_mesh`.
 
@@ -3163,7 +3196,7 @@ def preview_reassignment(
     leaving = np.flatnonzero(before_arbor & ~after_arbor)
     entering = np.flatnonzero(~before_arbor & after_arbor)
 
-    after = break_up_mesh(mesh, new_soma, new_org, verbose=verbose)
+    after = break_up_mesh(mesh, new_soma, new_org, rescued=rescued, verbose=verbose)
 
     return Reassignment(
         target=to,
