@@ -267,6 +267,22 @@
                 opacity: 1;
                 border-color: #7af;
             }
+            /* Some of the group lit, not all. */
+            #scopeChips button[data-on="mixed"] {
+                opacity: 0.8;
+                border-color: #57a;
+                border-style: dashed;
+            }
+            #scopeChips button.scope-expander {
+                padding: 2px 5px;
+                margin-left: 2px;
+                opacity: 0.8;
+            }
+            #scopeChips .scope-sub {
+                border-left: 1px solid #555;
+                margin-left: 6px;
+                padding-left: 4px;
+            }
             #scopeChips .chip-swatch {
                 display: inline-block;
                 width: 8px;
@@ -1952,6 +1968,53 @@ let meshCentroid = [0, 0, 0];
                 return scopeMask === null || scopeMask[faceIndex] === 1;
             }
 
+            // Discarded components are fragments the arbor already lost — all
+            // but the wrongly-discarded ones are disconnected, and reassigning
+            // a disconnected fragment cannot connect it to anything.  There
+            // can be dozens, so they collapse into one chip that acts on the
+            // whole set, and expand only when asked.
+            let discardedExpanded = false;
+
+            function isDiscarded(g) {
+                return (g.label || "").startsWith("discarded ");
+            }
+
+            function makeScopeChip(label, color, indices, { sub = false } = {}) {
+                const on = indices.filter((i) => scopeHas(i)).length;
+                const btn = document.createElement("button");
+                btn.dataset.on =
+                    on === indices.length ? "1" : on === 0 ? "0" : "mixed";
+                btn.title =
+                    indices.length > 1
+                        ? "click to toggle all, double-click for this group alone"
+                        : "click to toggle, double-click for this one alone";
+                if (sub) btn.classList.add("scope-sub");
+                const sw = document.createElement("span");
+                sw.className = "chip-swatch";
+                sw.style.background = `rgb(${Math.round(color[0] * 255)},${Math.round(
+                    color[1] * 255,
+                )},${Math.round(color[2] * 255)})`;
+                btn.appendChild(sw);
+                btn.appendChild(document.createTextNode(label));
+
+                const all = componentHighlights().map((x) => x.i);
+                btn.addEventListener("click", () => {
+                    // First click materialises the implicit "everything", so
+                    // toggling one chip off leaves the rest lit.
+                    if (scopeOn === null) scopeOn = new Set(all);
+                    if (on === indices.length) for (const i of indices) scopeOn.delete(i);
+                    else for (const i of indices) scopeOn.add(i);
+                    rebuildScopeMask();
+                    renderScopeChips();
+                });
+                btn.addEventListener("dblclick", () => {
+                    scopeOn = new Set(indices);
+                    rebuildScopeMask();
+                    renderScopeChips();
+                });
+                return btn;
+            }
+
             function renderScopeChips() {
                 const host = document.getElementById("scopeChips");
                 host.innerHTML = "";
@@ -1962,35 +2025,62 @@ let meshCentroid = [0, 0, 0];
                     return;
                 }
 
-                for (const { g, i } of groups) {
-                    const c = g.color || [1, 1, 1];
-                    const btn = document.createElement("button");
-                    btn.dataset.on = scopeHas(i) ? "1" : "0";
-                    btn.title = "click to toggle, double-click for this one alone";
-                    const sw = document.createElement("span");
-                    sw.className = "chip-swatch";
-                    sw.style.background = `rgb(${Math.round(c[0] * 255)},${Math.round(
-                        c[1] * 255,
-                    )},${Math.round(c[2] * 255)})`;
-                    btn.appendChild(sw);
-                    btn.appendChild(
-                        document.createTextNode((g.label || `group ${i}`).split(" (")[0]),
+                const discarded = groups.filter(({ g }) => isDiscarded(g));
+                const named = groups.filter(({ g }) => !isDiscarded(g));
+
+                for (const { g, i } of named) {
+                    host.appendChild(
+                        makeScopeChip(
+                            (g.label || `group ${i}`).split(" (")[0],
+                            g.color || [1, 1, 1],
+                            [i],
+                        ),
                     );
-                    btn.addEventListener("click", () => {
-                        // First click materialises the implicit "everything",
-                        // so toggling one chip off leaves the rest lit.
-                        if (scopeOn === null) scopeOn = new Set(groups.map((x) => x.i));
-                        if (scopeOn.has(i)) scopeOn.delete(i);
-                        else scopeOn.add(i);
-                        rebuildScopeMask();
+                }
+
+                // One of them is just a component; only a pile needs collapsing.
+                if (discarded.length === 1) {
+                    const { g, i } = discarded[0];
+                    host.appendChild(
+                        makeScopeChip(
+                            (g.label || "discarded").split(" (")[0],
+                            g.color || [0.5, 0.5, 0.5],
+                            [i],
+                        ),
+                    );
+                } else if (discarded.length > 1) {
+                    const idx = discarded.map((x) => x.i);
+                    host.appendChild(
+                        makeScopeChip(
+                            `discarded ×${discarded.length}`,
+                            discarded[0].g.color || [0.5, 0.5, 0.5],
+                            idx,
+                        ),
+                    );
+                    const expander = document.createElement("button");
+                    expander.className = "scope-expander";
+                    expander.textContent = discardedExpanded ? "▾" : "▸";
+                    expander.title = discardedExpanded
+                        ? "collapse the discarded fragments"
+                        : "list the discarded fragments";
+                    expander.addEventListener("click", () => {
+                        discardedExpanded = !discardedExpanded;
                         renderScopeChips();
                     });
-                    btn.addEventListener("dblclick", () => {
-                        scopeOn = new Set([i]);
-                        rebuildScopeMask();
-                        renderScopeChips();
-                    });
-                    host.appendChild(btn);
+                    host.appendChild(expander);
+
+                    if (discardedExpanded) {
+                        for (const { g, i } of discarded) {
+                            host.appendChild(
+                                makeScopeChip(
+                                    (g.label || `discarded ${i}`).split(" (")[0],
+                                    g.color || [0.5, 0.5, 0.5],
+                                    [i],
+                                    { sub: true },
+                                ),
+                            );
+                        }
+                    }
                 }
 
                 const lit = scopeOn === null ? groups.length : scopeOn.size;
