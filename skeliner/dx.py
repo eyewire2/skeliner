@@ -24,6 +24,8 @@ __skeleton__ = [
     "distance",
     "node_summary",
     "extract_neurites",
+    "neurite_names",
+    "neurite_nodes",
     "neurites_out_of_bounds",
     "volume",
     "total_path_length",
@@ -1040,6 +1042,72 @@ def extract_neurites(
         stack.extend(children[v])
 
     return sorted(out)
+
+
+def neurite_names(skel) -> Dict[int, str]:
+    """The names the neurites had when this skeleton was built.
+
+    ``{index: label}``, empty when the neurites were unnamed or the
+    skeleton did not come from the preprocessing track.  Recorded because
+    ``ntype`` cannot carry it — "dendrite 0" and "dendrite 1" are both
+    code 3.
+
+    Examples
+    --------
+    >>> skel.dx.neurite_names()
+    {0: 'dendrite 0', 1: 'dendrite 1', 2: 'axon'}
+    """
+    labels = (skel.meta or {}).get("neurite_labels")
+    return {} if labels is None else {i: str(x) for i, x in enumerate(labels)}
+
+
+def neurite_nodes(skel, which: int | str) -> np.ndarray:
+    """The nodes belonging to one neurite, by index or by name.
+
+    ``ntype`` groups neurites by *kind*, which is not the same question:
+    two dendrites share code 3.  This resolves a single neurite.
+
+    Parameters
+    ----------
+    skel
+        A :class:`skeliner.Skeleton` from the preprocessing track.
+    which : int or str
+        The neurite's position, or the name it was given.
+
+    Returns
+    -------
+    np.ndarray
+        Node ids, ascending.  The soma is never included: it belongs to no
+        neurite, and under the >=2-of-3 face rule a junction face carries
+        soma vertices, so it would otherwise be claimed by whichever
+        neurite touches it.
+
+    Examples
+    --------
+    >>> skel.dx.neurite_nodes("axon")
+    array([412, 413, 414, ...])
+    """
+    owner = (skel.extra or {}).get("node2neurite")
+    if owner is None:
+        raise KeyError(
+            "this skeleton has no per-node neurite map — it was built from "
+            "unnamed neurites, or not by the preprocessing track"
+        )
+
+    if isinstance(which, str):
+        names = neurite_names(skel)
+        hits = [i for i, label in names.items() if label == which]
+        if not hits:
+            raise KeyError(
+                f"no neurite called {which!r}; have {sorted(names.values())}"
+            )
+        if len(hits) > 1:
+            raise KeyError(f"{len(hits)} neurites are called {which!r}: {hits}")
+        index = hits[0]
+    else:
+        index = int(which)
+
+    return np.flatnonzero(np.asarray(owner) == index)
 
 
 def neurites_out_of_bounds(

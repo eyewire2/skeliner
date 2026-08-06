@@ -1849,7 +1849,10 @@ def diagnose_components(
             zorder=1,
         )
 
-        # Neurite face centroids — cycled palette
+        # Neurite face centroids — cycled palette.  The legend carries the
+        # names once they are given: this figure is how you decide which
+        # neurite is the axon, so it has to be able to show the answer.
+        labels = neurites.labels if hasattr(neurites, "labels") else None
         for i, nf in enumerate(neurites):
             if len(nf) == 0:
                 continue
@@ -1863,7 +1866,7 @@ def diagnose_components(
                 alpha=0.4,
                 rasterized=True,
                 zorder=2,
-                label=f"neurite {i}",
+                label=f"[{i}] {labels[i]}" if labels is not None else f"neurite {i}",
             )
 
         # Organelle face centroids (excluding soma overlap)

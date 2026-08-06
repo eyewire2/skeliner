@@ -248,6 +248,86 @@ class Neurites:
             swc_type_for(label) if swc_type is None else int(swc_type)
         )
 
+    def rename(self, names, *, swc_types=None) -> "Neurites":
+        """Name several neurites at once, in place.
+
+        Parameters
+        ----------
+        names : Mapping[int, str] or Sequence[str]
+            ``{0: "axon", 2: "dendrite 1"}`` names those two and leaves the
+            rest at their defaults; a sequence names them in order and must
+            have one entry per component.
+        swc_types : Mapping[int, int] or Sequence[int], optional
+            Explicit codes, in the same shape.  Anything not given is
+            defaulted from the name by :func:`swc_type_for`.
+
+        Returns
+        -------
+        Neurites
+            *self*, so this chains off ``components.neurites``.
+
+        Examples
+        --------
+        >>> components.neurites.rename(["dendrite 0", "dendrite 1", "axon"])
+        >>> components.neurites.rename({2: "axon"})
+        """
+        n = len(self.components)
+        if hasattr(names, "items"):
+            pairs = {int(k): str(v) for k, v in names.items()}
+        else:
+            names = list(names)
+            if len(names) != n:
+                raise ValueError(
+                    f"expected one name per component ({n}), got {len(names)}"
+                )
+            pairs = {i: str(v) for i, v in enumerate(names)}
+
+        if swc_types is None:
+            codes = {}
+        elif hasattr(swc_types, "items"):
+            codes = {int(k): int(v) for k, v in swc_types.items()}
+        else:
+            swc_types = list(swc_types)
+            if len(swc_types) != n:
+                raise ValueError(
+                    f"expected one code per component ({n}), got {len(swc_types)}"
+                )
+            codes = {i: int(v) for i, v in enumerate(swc_types)}
+
+        for i, label in pairs.items():
+            self.name(i, label, swc_type=codes.get(i))
+        return self
+
+    def index_of(self, label: str) -> int:
+        """The position of the neurite called *label*.
+
+        Raises ``KeyError`` if nothing is called that, or if two are —
+        names are free text and nothing enforces that they are unique, so
+        an ambiguous lookup is an error rather than a silent first match.
+        """
+        if self.labels is None:
+            raise KeyError("these neurites have no names")
+        hits = [i for i, x in enumerate(self.labels) if x == label]
+        if not hits:
+            raise KeyError(f"no neurite called {label!r}; have {self.labels}")
+        if len(hits) > 1:
+            raise KeyError(f"{len(hits)} neurites are called {label!r}: {hits}")
+        return hits[0]
+
+    def summary(self) -> str:
+        """One line per neurite: index, name, SWC code, face count."""
+        rows = []
+        for i, comp in enumerate(self.components):
+            if self.labels is None:
+                rows.append(f"  [{i}] {len(comp):>9,} f")
+            else:
+                rows.append(
+                    f"  [{i}] {len(comp):>9,} f  {self.labels[i]} "
+                    f"(SWC {self.swc_types[i]})"
+                )
+        head = f"{len(self.components)} neurites"
+        return "\n".join([head, *rows]) if rows else head
+
     def clear_names(self) -> None:
         """Drop every name, back to the unnamed state."""
         self.labels = None

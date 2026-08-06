@@ -584,3 +584,95 @@ def test_the_swc_type_column_is_what_was_named(tmp_path):
     ]
     assert types[0] == 1, "the soma"
     assert set(types[1:]) == {2, 3}
+
+
+# ── the scripting API for naming ──────────────────────────────────────
+
+
+def test_rename_takes_a_sequence():
+    n = Neurites([np.arange(4), np.arange(4, 8), np.arange(8, 12)])
+    n.rename(["dendrite 0", "dendrite 1", "axon"])
+    assert n.labels == ["dendrite 0", "dendrite 1", "axon"]
+    assert n.swc_types == [3, 3, 2]
+
+
+def test_rename_takes_a_mapping_and_leaves_the_rest_alone():
+    n = Neurites([np.arange(4), np.arange(4, 8), np.arange(8, 12)])
+    n.rename({2: "axon"})
+    assert n.labels == ["neurite 0", "neurite 1", "axon"]
+    assert n.swc_types == [0, 0, 2]
+
+
+def test_rename_returns_self_so_it_chains():
+    n = Neurites([np.arange(4)])
+    assert n.rename(["axon"]) is n
+
+
+def test_rename_takes_explicit_codes():
+    n = Neurites([np.arange(4), np.arange(4, 8)])
+    n.rename(["odd one", "axon"], swc_types=[5, 2])
+    assert n.swc_types == [5, 2]
+
+
+def test_a_sequence_of_the_wrong_length_is_an_error():
+    n = Neurites([np.arange(4), np.arange(4, 8)])
+    with pytest.raises(ValueError, match="one name per component"):
+        n.rename(["axon"])
+    with pytest.raises(ValueError, match="one code per component"):
+        n.rename(["a", "b"], swc_types=[2])
+
+
+def test_index_of_finds_a_neurite_by_name():
+    n = Neurites([np.arange(4), np.arange(4, 8)])
+    n.rename(["dendrite 0", "axon"])
+    assert n.index_of("axon") == 1
+
+
+def test_index_of_refuses_an_ambiguous_or_missing_name():
+    """Names are free text and nothing enforces uniqueness, so a silent
+    first match would be the wrong answer half the time."""
+    n = Neurites([np.arange(4), np.arange(4, 8)])
+    n.rename(["axon", "axon"])
+    with pytest.raises(KeyError, match="2 neurites are called"):
+        n.index_of("axon")
+    with pytest.raises(KeyError, match="no neurite called"):
+        n.index_of("dendrite 9")
+    with pytest.raises(KeyError, match="no names"):
+        Neurites([np.arange(4)]).index_of("axon")
+
+
+def test_summary_shows_the_names_and_codes():
+    n = Neurites([np.arange(4), np.arange(4, 8)])
+    assert "2 neurites" in n.summary()
+    assert "axon" not in n.summary()
+    n.rename({1: "axon"})
+    assert "axon (SWC 2)" in n.summary()
+
+
+def test_dx_resolves_a_neurite_by_name_and_by_index():
+    mesh, comp = _ball_with_two_processes()
+    comp.neurites.rename(["axon", "dendrite 1"])
+    skel = skeletonize(mesh, components=comp, verbose=False)
+
+    assert skel.dx.neurite_names() == {0: "axon", 1: "dendrite 1"}
+    by_name = skel.dx.neurite_nodes("axon")
+    by_index = skel.dx.neurite_nodes(0)
+    assert np.array_equal(by_name, by_index)
+    assert 0 not in by_name.tolist(), "the soma belongs to no neurite"
+    assert set(skel.ntype[by_name].tolist()) == {2}
+
+
+def test_dx_neurite_helpers_on_an_unnamed_skeleton():
+    mesh, comp = _ball_with_two_processes()
+    skel = skeletonize(mesh, components=comp, verbose=False)
+    assert skel.dx.neurite_names() == {}
+    with pytest.raises(KeyError, match="no per-node neurite map"):
+        skel.dx.neurite_nodes(0)
+
+
+def test_dx_neurite_nodes_refuses_an_unknown_name():
+    mesh, comp = _ball_with_two_processes()
+    comp.neurites.rename(["axon", "dendrite 1"])
+    skel = skeletonize(mesh, components=comp, verbose=False)
+    with pytest.raises(KeyError, match="no neurite called"):
+        skel.dx.neurite_nodes("apical")
