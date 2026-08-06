@@ -84,7 +84,7 @@ Problem (2) is adressed using ray‑casting to remove inner vertices of the mesh
 This is computationally expensive, so per default it is only done for nodes that have many vertices.
 This can be controlled via the `min_verts_q_outer` parameter.
 
-You can use sk.post.calibrate_radii to improve it:
+You can use `sk.post.calibrate_radii` to improve it:
 
 ```python
 import skeliner as sk
@@ -106,6 +106,21 @@ sk.post.calibrate_radii(
     store_key="calibrated",
 )
 ```
+
+### Mesh preprocessing
+
+It's highly recommended to run the auto mesh preprocessing pipeline before skeletonization, as the raw mesh full of 
+artifacts that might bias the geodedic binning. 
+
+```
+import skeliner as sk
+
+mesh = sk.io.load_mesh("cellA.obj")  # or trimesh.load_mesh directly
+mesh, components = sk.preprocess(mesh, compact=True, verbose=True)
+skel_preproc = sk.skeletonize(mesh=mesh, components=components, verbose=True)
+```
+
+But it will of course take longer time to produce the skeleton. 
 
 ### Find contact sites between two cells (skeleton + mesh)
 
