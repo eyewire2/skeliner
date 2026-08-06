@@ -1256,6 +1256,19 @@ class TestRescued:
         )
         assert len(kept.components.discarded) == 0
 
+    def test_a_full_preprocess_does_not_undo_a_rescue(self):
+        # Same hazard one level up: preprocess ends in break_up_mesh, so a
+        # one-click re-run would re-discard what the user kept.
+        mesh, org = _tube_with_speck()
+        speck = pre.break_up_mesh(mesh, None, org).discarded[0]
+
+        _, lost = pre.preprocess(mesh)
+        assert len(lost.discarded) == 1, "fixture must have something to lose"
+
+        _, kept = pre.preprocess(mesh, rescued=speck)
+        assert len(kept.discarded) == 0
+        assert len(kept.neurites) == 2
+
 
 # ── Smoke test on real data ──────────────────────────────────────────
 

@@ -249,6 +249,14 @@
             #detect-panel button[data-state="error"] {
                 border-color: #a44 !important;
             }
+            /* The skeleton is derived from the mesh and the components; when
+               either moves under it, the button that re-derives says so.  The
+               three data-state colours carry !important so a run in progress
+               still wins over this. */
+            #detect-panel button[data-stale="1"] {
+                border-color: #e08a3c;
+                color: #ffca8a;
+            }
             /* Mode selector — which stage of the workflow the panel is for.
                A mode that can be entered without noticing is worse than no
                mode, because the same lasso gesture then means two things. */
@@ -380,50 +388,37 @@
         </div>
 
         <div id="detect-panel">
-            <!-- Always visible: the mode, plus what is not stage-specific. -->
-            <div
-                style="
-                    white-space: nowrap;
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                "
-            >
-                <span>
-                    <span style="color: #888">Mode:</span>
-                    <button
-                        id="modePreprocessBtn"
-                        class="mode-btn"
-                        style="margin-left: 4px"
-                        data-active="1"
-                        title="Run the automatic pipeline"
-                    >
-                        Preprocess
-                    </button>
-                    <button
-                        id="modeEditBtn"
-                        class="mode-btn"
-                        style="margin-left: 4px"
-                        title="Hand faces between components — needs Break first"
-                    >
-                        Edit Mesh
-                    </button>
-                    <button
-                        id="modeSkelBtn"
-                        class="mode-btn"
-                        style="margin-left: 4px"
-                        title="Edit the bins the neurites are partitioned into, and the edges between them — needs Skeletonize first"
-                    >
-                        Edit Skeleton
-                    </button>
-                    <span style="color: #888; margin-left: 12px">Path:</span>
-                    <button id="findPathBtn" style="margin-left: 4px">Edge</button>
-                    <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
-                </span>
-                <span style="margin-left: 12px">
-                    <button id="undoBtn" style="margin-right: 4px">Undo</button>
-                    <button id="saveBtn">Save</button>
-                </span>
+            <!-- Which stage of the workflow the rows below belong to, and
+                 nothing else.  A verb parked on this row reads as part of
+                 the mode selector; the ones that work in every mode live in
+                 the footer at the bottom of the panel instead. -->
+            <div style="white-space: nowrap">
+                <span style="color: #888">Mode:</span>
+                <button
+                    id="modePreprocessBtn"
+                    class="mode-btn"
+                    style="margin-left: 4px"
+                    data-active="1"
+                    title="Run the automatic pipeline"
+                >
+                    Preprocess
+                </button>
+                <button
+                    id="modeEditBtn"
+                    class="mode-btn"
+                    style="margin-left: 4px"
+                    title="Hand faces between components — needs Break first"
+                >
+                    Edit Mesh
+                </button>
+                <button
+                    id="modeSkelBtn"
+                    class="mode-btn"
+                    style="margin-left: 4px"
+                    title="Edit the bins the neurites are partitioned into, and the edges between them — needs Skeletonize first"
+                >
+                    Edit Skeleton
+                </button>
             </div>
 
             <div id="preprocess-rows">
@@ -435,9 +430,6 @@
                     <button id="detectGapsBtn" style="margin-left: 4px">Gaps</button>
                     <button id="detectSomaBtn" style="margin-left: 4px">Soma</button>
                     <button id="detectDisconnectedBtn" style="margin-left: 4px">Disconnected</button>
-                    <span style="color: #888; margin-left: 12px">Skeleton:</span>
-                    <button id="skeletonizeBtn" style="margin-left: 4px">Skeletonize</button>
-                    <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
                 </div>
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span style="color: #888">Remove:</span>
@@ -450,6 +442,21 @@
                     <button id="hlRemove" style="margin-left: 4px">Remove</button>
                     <button id="breakUpMeshBtn" style="margin-left: 4px">Break</button>
                     <button id="compactMeshBtn" style="margin-left: 4px">Compact</button>
+                    <!-- Every button on these two rows, in one call — so it
+                         reads as their summary, at the end of them, rather
+                         than as a step of its own before them. -->
+                    <span
+                        style="color: #888; margin-left: 12px"
+                        title="pre.preprocess() — the two rows above in one call, in pipeline order"
+                        >Auto:</span
+                    >
+                    <button
+                        id="preprocessBtn"
+                        style="margin-left: 4px"
+                        title="Run pre.preprocess(): parallel patches → organelles → soma → fusions → disconnected → gaps → break up mesh.&#10;Keeps rescued fragments. Leaves the mesh uncompacted — press Compact after if you want it."
+                    >
+                        Run
+                    </button>
                 </div>
             </div>
 
@@ -489,7 +496,7 @@
 
             <div id="editskel-rows" style="display: none">
                 <div style="white-space: nowrap; margin-top: 4px">
-                    <span style="color: #888">Skeleton:</span>
+                    <span style="color: #888" title="Which loaded skeleton the bin and edge edits below act on">Editing:</span>
                     <select id="binSkelSel" style="font-size: 11px; margin-left: 4px"></select>
                     <label
                         style="margin-left: 10px"
@@ -560,6 +567,53 @@
                         white-space: normal;
                     "
                 ></div>
+            </div>
+
+            <!-- Everything that works in every mode.  Skeletonize is the
+                 odd one out among the pipeline verbs: it does not change the
+                 mesh or the components, it *derives* from them, so it is
+                 wanted at the end of each of the three stages rather than
+                 inside one of them.  Path only reads.  Undo and Save are the
+                 session's.
+                 Last in the panel on purpose — the panel is anchored to its
+                 bottom edge and grows upward, so a footer keeps the same
+                 screen position while the rows above it change height with
+                 the mode. -->
+            <div
+                id="always-rows"
+                style="
+                    white-space: nowrap;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-top: 6px;
+                    padding-top: 6px;
+                    border-top: 1px solid #3a3a3a;
+                "
+            >
+                <span>
+                    <span style="color: #888">Skeleton:</span>
+                    <button
+                        id="skeletonizeBtn"
+                        style="margin-left: 4px"
+                        title="Derive a skeleton from the current mesh and components — available in every mode, since every mode changes something it is derived from"
+                    >
+                        Skeletonize
+                    </button>
+                    <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
+                    <span id="skelStaleHint" style="margin-left: 8px; color: #e08a3c"></span>
+                    <span
+                        style="color: #888; margin-left: 12px"
+                        title="Shortest path between two picked faces or two picked nodes — a fusion shows up as a path that should not exist"
+                        >Path:</span
+                    >
+                    <button id="findPathBtn" style="margin-left: 4px">Edge</button>
+                    <button id="findPathVertBtn" style="margin-left: 4px">Vertex</button>
+                </span>
+                <span style="margin-left: 12px">
+                    <button id="undoBtn" style="margin-right: 4px">Undo</button>
+                    <button id="saveBtn">Save</button>
+                </span>
             </div>
         </div>
 
@@ -1001,6 +1055,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("skelCancelBtn").addEventListener("click", runSkelCancel);
                 document.getElementById("scopeAllBtn").addEventListener("click", () => setScopeAll(true));
                 document.getElementById("scopeNoneBtn").addEventListener("click", () => setScopeAll(false));
+                document.getElementById("preprocessBtn").addEventListener("click", runPreprocess);
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
                 document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
                 document
@@ -1518,6 +1573,10 @@ let meshCentroid = [0, 0, 0];
                     if (document.getElementById("binSkelSel").value === name)
                         fetchEdgeSupport();
                 }
+                // For the same reason: `stale` rides in on this message, and
+                // an undo that restores the very mesh a skeleton was built
+                // from clears it again.
+                refreshSkeletonizeCue();
             }
 
             function buildTubes(name) {
@@ -1960,12 +2019,73 @@ let meshCentroid = [0, 0, 0];
                 btn.disabled = state === "running";
             }
 
+            // ── "Skeletonize me" ─────────────────────────────────────────
+            // A re-skeletonize reads two things, and only one of them has a
+            // staleness signal.  Mesh changes have `_skel_is_stale`, which
+            // compares mesh identity server-side and arrives on every
+            // skeleton_loaded.  Component changes do not: reassigning faces
+            // rewrites components.neurites while leaving the mesh object
+            // untouched, so the server's check correctly says nothing — and
+            // that is exactly the case that sends the user looking for the
+            // button.  So the client remembers those itself, from the routes
+            // it called.
+            //
+            // This is a cue, not a guard.  The guard is the server's and is
+            // unchanged: /bin and /export_skeleton 409 on a stale skeleton
+            // whatever this button looks like.  A route missing from the set
+            // below therefore costs a missing hint, not a wrong edit.
+            const COMPONENT_ROUTES = new Set([
+                "/preprocess",
+                "/detect_soma",
+                "/detect_organelles",
+                "/break_up_mesh",
+                "/reassign_apply",
+                "/rescue_as_neurite",
+            ]);
+            let componentsChanged = false;
+
+            function refreshSkeletonizeCue() {
+                const btn = document.getElementById("skeletonizeBtn");
+                const hint = document.getElementById("skelStaleHint");
+                if (!btn || !hint) return;
+                const names = Object.keys(skelGroups);
+                const meshMoved = names.some((n) => skelGroups[n].stale);
+                if (names.length === 0 || !(meshMoved || componentsChanged)) {
+                    delete btn.dataset.stale;
+                    hint.textContent = "";
+                    return;
+                }
+                btn.dataset.stale = "1";
+                // The green "done" describes a skeleton that no longer
+                // matches what is on screen, so it goes with it.
+                if (btn.dataset.state === "done") delete btn.dataset.state;
+                hint.textContent = meshMoved
+                    ? componentsChanged
+                        ? "mesh + components changed"
+                        : "mesh changed"
+                    : "components changed";
+            }
+
+            function noteSkeletonInputs(url) {
+                let path;
+                try {
+                    path = new URL(url, window.location.origin).pathname;
+                } catch (e) {
+                    return;
+                }
+                if (path === "/skeletonize") componentsChanged = false;
+                else if (COMPONENT_ROUTES.has(path)) componentsChanged = true;
+                else return;
+                refreshSkeletonizeCue();
+            }
+
             async function _runAction(btn, fetchFn) {
                 setBtnState(btn, "running");
                 try {
                     const resp = await fetchFn();
                     const data = await resp.json();
                     setBtnState(btn, resp.ok ? "done" : "error");
+                    if (resp.ok) noteSkeletonInputs(resp.url);
                     return data;
                 } catch (e) {
                     setBtnState(btn, "error");
@@ -2045,6 +2165,21 @@ let meshCentroid = [0, 0, 0];
                     document.getElementById("undoBtn"),
                     () => fetch("/undo", { method: "POST" }),
                 );
+            }
+
+            // The whole pipeline in one call.  Server-side it is literally
+            // pre.preprocess(), so this cannot drift from the library; the
+            // per-step buttons below stay for when a run needs watching or a
+            // step needs different arguments.
+            // The run's own progress and its summary line already arrive over
+            // the WebSocket into #log-status, so there is nothing for a hint
+            // beside the button to add.
+            async function runPreprocess() {
+                const data = await _runAction(
+                    document.getElementById("preprocessBtn"),
+                    () => fetch("/preprocess", { method: "POST" }),
+                );
+                if (data && data.ok) fetchAnnotations();
             }
 
             async function runBreakUpMesh() {
@@ -4912,6 +5047,7 @@ let meshCentroid = [0, 0, 0];
                             if (opt) opt.remove();
                         }
                         updateLoadedPanel();
+                        refreshSkeletonizeCue();
                         if (Object.keys(skelGroups).length === 0 && !meshObj)
                             document.getElementById("empty-hint").style.display = "block";
                     } else if (msg.type === "all_skeletons_removed") {
@@ -4921,6 +5057,7 @@ let meshCentroid = [0, 0, 0];
                             .querySelectorAll('#pickTarget option[value^="skel:"]')
                             .forEach((o) => o.remove());
                         updateLoadedPanel();
+                        refreshSkeletonizeCue();
                         if (!meshObj) document.getElementById("empty-hint").style.display = "block";
                     } else if (msg.type === "log") {
                         showLogStatus(msg.text);

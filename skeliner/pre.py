@@ -8496,6 +8496,7 @@ def compact_mesh(
 def preprocess(
     mesh: trimesh.Trimesh,
     *,
+    rescued=None,
     compact: bool = False,
     verbose: bool = False,
 ) -> tuple[trimesh.Trimesh, MeshComponents]:
@@ -8517,6 +8518,11 @@ def preprocess(
     ----------
     mesh : trimesh.Trimesh
         Input mesh.
+    rescued : array-like of int, optional
+        Face ids the caller has declared arbor, passed through to
+        :func:`break_up_mesh` in step 6.  The neurite/discarded split is
+        re-derived from scratch here, so an override that is not fed back
+        in is undone by the run.
     compact : bool, default False
         If True, run :func:`compact_mesh` as a final step to drop
         unreferenced vertices and degenerate faces.  This invalidates
@@ -8595,7 +8601,7 @@ def preprocess(
 
     # 6. Break up mesh
     with _timed("↳  break up mesh", verbose=verbose) as log:
-        components = break_up_mesh(mesh, soma, org)
+        components = break_up_mesh(mesh, soma, org, rescued=rescued)
         log(f"{len(components.neurites)} neurites")
 
     # 7. Compact (optional — remaps everything in MeshComponents)

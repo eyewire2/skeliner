@@ -2640,6 +2640,51 @@ def _create_app(
         mesh_state["pending_reassignment"] = None
         return JSONResponse({"ok": True, **_publish_components(result)})
 
+    async def do_preprocess(_request):
+        """Run the whole pipeline in one call.
+
+        This *is* ``pre.preprocess`` rather than the panel's buttons pressed
+        in order by the server, so the viewer and the library cannot drift
+        into two pipelines wearing one name.  It differs from pressing the
+        buttons in one way worth knowing: the soma comes from
+        ``find_soma_via_ring_cutoff``, which is the pipeline's choice, while
+        the Soma button defaults to ``z_contour``.
+
+        Left uncompacted.  ``compact_mesh`` reindexes faces, and annotations,
+        the rescue list and every loaded skeleton are all stated in face ids;
+        ``/compact_mesh`` already remaps them, so compaction stays the
+        separate button it is instead of being duplicated here.
+        """
+        if mesh_state["mesh"] is None:
+            return JSONResponse(
+                {"ok": False, "error": "No mesh loaded"}, status_code=400
+            )
+
+        from skeliner.pre import preprocess
+
+        mesh = mesh_state["mesh"]
+        n_before = len(mesh.faces)
+
+        # An override the user has already made is input to this run, not a
+        # casualty of it — break_up_mesh re-derives the neurite/discarded
+        # split from scratch and would otherwise re-discard what they rescued.
+        new_mesh, components = await _run_with_log(
+            preprocess, mesh, rescued=mesh_state["rescued"], verbose=True
+        )
+
+        await _apply_new_mesh(new_mesh)
+        # _apply_new_mesh drops the caches keyed to the mesh it replaced;
+        # these two are keyed to it as well, and the run has already consumed
+        # and removed what they name.
+        mesh_state["mesh_stats"] = None
+        mesh_state["gap_clusters"] = None
+        out = _publish_components(components)
+        await _log(
+            f"Preprocess: {n_before:,} → {len(new_mesh.faces):,} faces, "
+            f"{out['nNeurites']} neurites, {out['nDiscarded']} discarded"
+        )
+        return JSONResponse({"ok": True, **out})
+
     def _current_components():
         """A MeshComponents view of what the viewer currently holds."""
         from skeliner.dataclass import Discarded, MeshComponents, Neurites
@@ -4377,6 +4422,7 @@ def _create_app(
             Route("/edit_vertices", edit_vertices, methods=["POST"]),
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/break_up_mesh", do_break_up_mesh, methods=["POST"]),
+            Route("/preprocess", do_preprocess, methods=["POST"]),
             Route("/reassign_preview", reassign_preview, methods=["POST"]),
             Route("/reassign_apply", reassign_apply, methods=["POST"]),
             Route("/reassign_cancel", reassign_cancel, methods=["POST"]),

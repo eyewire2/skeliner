@@ -622,6 +622,75 @@ def test_re_breaking_does_not_undo_the_rescue(rescue_client):
     assert r.json()["nDiscarded"] == 0
 
 
+# ── /preprocess ───────────────────────────────────────────────────────
+#
+# The whole pipeline in one call.  It ends in break_up_mesh like the
+# routes above, so it inherits their hazard: a re-derive that does not
+# replay the override undoes it.
+
+
+def test_preprocess_runs_the_whole_pipeline(rescue_client):
+    client, state, speck = rescue_client
+    state["neurites"] = None
+    state["discarded"] = None
+
+    r = client.post("/preprocess")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["nNeurites"] >= 1
+    assert state["neurites"] is not None
+    assert len(state["neurites"]) == body["nNeurites"]
+
+
+def test_preprocess_does_not_undo_the_rescue(rescue_client):
+    """The one-click run is a from-scratch re-derive, which is exactly
+    when a rescue that is not fed back in disappears."""
+    client, state, speck = rescue_client
+    client.post("/rescue_as_neurite", json={"faces": [int(speck[0])]})
+    assert len(state["rescued"]) > 0
+
+    r = client.post("/preprocess")
+    assert r.status_code == 200
+    assert r.json()["nDiscarded"] == 0
+    assert any(set(n.tolist()) == set(speck.tolist()) for n in state["neurites"])
+
+
+def test_preprocess_drops_the_caches_keyed_to_the_replaced_mesh(rescue_client):
+    """Every cache names faces of the mesh the run replaced, and the run
+    has already consumed and removed what they point at."""
+    client, state, speck = rescue_client
+    state["mesh_stats"] = object()
+    state["gap_clusters"] = [object()]
+    state["fusion_clusters"] = [object()]
+
+    assert client.post("/preprocess").status_code == 200
+
+    assert state["mesh_stats"] is None
+    assert state["gap_clusters"] is None
+    assert state["fusion_clusters"] is None
+
+
+def test_preprocess_leaves_the_mesh_uncompacted(rescue_client):
+    """Compaction reindexes faces, and the rescue list, the annotations
+    and any loaded skeleton are all stated in face ids.  /compact_mesh
+    remaps them; this route does not compact so it need not."""
+    client, state, speck = rescue_client
+    n_before = len(state["mesh"].faces)
+
+    assert client.post("/preprocess").status_code == 200
+
+    assert len(state["mesh"].faces) == n_before
+
+
+def test_preprocess_refuses_without_a_mesh(rescue_client):
+    client, state, _ = rescue_client
+    state["mesh"] = None
+    r = client.post("/preprocess")
+    assert r.status_code == 400
+    assert "No mesh loaded" in r.json()["error"]
+
+
 def test_the_override_is_recorded_as_face_ids(rescue_client):
     client, state, speck = rescue_client
     assert len(state["rescued"]) == 0
