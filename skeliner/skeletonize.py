@@ -1726,6 +1726,30 @@ def _skeletonize_preproc(
         r0 = float(list(radii_dict.values())[0][0])
         soma = Soma.from_sphere(nodes_arr[0], r0, verts=None)
 
+    # -- carry the neurites' hand-given SWC codes onto their nodes --
+    # Read through `vert2node` rather than by re-deriving the node ranges:
+    # the assembly lays sub-skeletons down in order, but skips any that came
+    # out empty, so an index into `components.neurites` is not an index into
+    # the node blocks.  Ownership is exact and needs no such assumption.
+    #
+    # Node 0 is excluded: under the >=2-of-3 face rule a face at the soma
+    # junction carries soma vertices, so a neurite's vertex set reaches node
+    # 0, and stamping it would retype the soma as a dendrite.
+    if components.neurites.swc_types is not None:
+        for face_idx, code in zip(
+            components.neurites.components, components.neurites.swc_types
+        ):
+            if not code:
+                continue
+            nids = {
+                vert2node[int(v)]
+                for v in np.unique(mesh.faces[face_idx].ravel())
+                if int(v) in vert2node
+            }
+            nids.discard(0)
+            if nids:
+                ntype[np.fromiter(nids, dtype=np.int64, count=len(nids))] = code
+
     return Skeleton(
         nodes=nodes_arr,
         radii=radii_dict,

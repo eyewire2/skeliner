@@ -1527,3 +1527,202 @@ def test_splitting_off_a_whole_bin_is_refused_by_the_route(bin_client):
     )
     assert r.status_code == 400
     assert "leave something behind" in r.json()["error"]
+
+
+# ── naming neurites ───────────────────────────────────────────────────
+#
+# The last step of the workflow: a name sits at a position in `neurites`,
+# and every re-derive rebuilds that list, so break_up_mesh returns
+# neurites unnamed and a re-break drops the names on purpose.
+
+
+def test_naming_a_neurite_reaches_the_component(reassign_client):
+    client, state, neurites = reassign_client
+    assert state["neurites"].named is False
+
+    r = client.post("/name_neurite", json={"index": 0, "label": "axon"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["labels"][0] == "axon"
+    assert body["swcTypes"][0] == 2, "the code is read from the leading word"
+    assert state["neurites"].labels[0] == "axon"
+
+
+def test_an_explicit_code_beats_the_name(reassign_client):
+    client, state, _ = reassign_client
+    r = client.post(
+        "/name_neurite", json={"index": 0, "label": "the odd one", "swcType": 2}
+    )
+    assert r.json()["swcTypes"][0] == 2
+
+
+def test_the_name_reaches_the_annotation_label(reassign_client):
+    client, state, _ = reassign_client
+    client.post("/name_neurite", json={"index": 0, "label": "dendrite 1"})
+
+    ann = client.get("/annotations").json()
+    named = [h for h in ann["highlights"] if h.get("neurite") == 0]
+    assert len(named) == 1
+    assert named[0]["label"].startswith("dendrite 1 (")
+
+
+def test_every_neurite_highlight_carries_its_index(reassign_client):
+    """The page names a neurite back by index; once renamed the label no
+    longer carries one, and position in `highlights` depends on the soma."""
+    client, state, _ = reassign_client
+    client.post("/name_neurite", json={"index": 0, "label": "axon"})
+
+    ann = client.get("/annotations").json()
+    idx = [h["neurite"] for h in ann["highlights"] if "neurite" in h]
+    assert idx == list(range(len(state["neurites"])))
+
+
+def test_re_breaking_drops_the_names(reassign_client):
+    """Not a limitation to route around: a re-derive re-sorts, splits and
+    merges, so a surviving name would sit on different surface."""
+    client, state, _ = reassign_client
+    client.post("/name_neurite", json={"index": 0, "label": "axon"})
+    assert state["neurites"].named is True
+
+    assert client.post("/break_up_mesh").status_code == 200
+    assert state["neurites"].named is False
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ({"index": 0, "label": "   "}, "cannot be empty"),
+        ({"index": 10**6, "label": "axon"}, "out of range"),
+        ({"label": "axon"}, "index must be an integer"),
+    ],
+)
+def test_name_neurite_rejects_bad_input(reassign_client, body, expected):
+    client, _, _ = reassign_client
+    r = client.post("/name_neurite", json=body)
+    assert r.status_code == 400
+    assert expected in r.json()["error"]
+
+
+def test_naming_before_a_break_is_refused(reassign_client):
+    client, state, _ = reassign_client
+    state["neurites"] = Neurites([])
+    r = client.post("/name_neurite", json={"index": 0, "label": "axon"})
+    assert r.status_code == 400
+    assert "break_up_mesh" in r.json()["error"]
+
+
+def _skeleton_of(client):
+    """The Skeleton the app is holding, reached the way the fixture does."""
+    for route in client.app.routes:
+        fn = getattr(route, "endpoint", None)
+        for cell in getattr(fn, "__closure__", None) or ():
+            val = cell.cell_contents
+            if (
+                isinstance(val, dict)
+                and val
+                and all(isinstance(v, dict) and "skeleton" in v for v in val.values())
+            ):
+                return next(iter(val.values()))["skeleton"]
+    raise AssertionError("could not reach skeleton_states")
+
+
+@pytest.fixture
+def named_client(tmp_path, monkeypatch):
+    """A viewer serving a soma with one process each way.
+
+    The reassign fixture's tube is too small to bin into any node at all —
+    its skeleton is the soma alone — so a test about node types needs its
+    own mesh.  Asserted below, since a skeleton with no arbor nodes would
+    pass an ntype test vacuously.
+    """
+    from starlette.testclient import TestClient
+
+    from skeliner import pre
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+
+    parts = [trimesh.creation.icosphere(subdivisions=4, radius=100.0)]
+    for sign in (1, -1):
+        tube = trimesh.creation.cylinder(radius=15.0, height=900.0, sections=24)
+        tube = tube.subdivide().subdivide()
+        tube.apply_translation([0.0, 0.0, sign * 520.0])
+        parts.append(tube)
+    verts, faces, n = [], [], 0
+    for part in parts:
+        verts.append(part.vertices)
+        faces.append(part.faces + n)
+        n += len(part.vertices)
+    mesh = trimesh.Trimesh(
+        vertices=np.vstack(verts), faces=np.vstack(faces), process=False
+    )
+
+    z = np.zeros(len(mesh.faces), bool)
+    org = Organelles(pocket=z.copy(), isolated=z.copy(), expanded=z.copy())
+    sv = np.flatnonzero(np.linalg.norm(mesh.vertices, axis=1) <= 105.0)
+    soma = Soma.fit(mesh.vertices[sv], verts=sv)
+    pieces = pre._face_components_fast(
+        np.asarray(mesh.faces),
+        np.flatnonzero(
+            pre._usable_face_mask(mesh)
+            & ~pre.soma_face_mask(np.asarray(mesh.faces), sv)
+            & ~org.mask
+        ),
+    )
+    assert len(pieces) == 2, "fixture must give one component per process"
+    comp = pre.break_up_mesh(
+        mesh, soma, org, rescued=np.concatenate([p[:1] for p in pieces])
+    )
+    assert len(comp.neurites) == 2
+
+    app = _create_app(preload_mesh=mesh, port=8916)
+    state = _mesh_state_of(app)
+    with TestClient(app) as client:
+        state["mesh"] = mesh
+        state["soma"] = comp.soma
+        state["organelles"] = comp.organelles
+        state["neurites"] = comp.neurites
+        state["discarded"] = comp.discarded
+        yield client, state
+
+
+def test_the_fixture_bins_into_arbor_nodes(named_client):
+    """Guards every ntype assertion below from passing vacuously."""
+    client, _ = named_client
+    assert client.post("/skeletonize", json={}).status_code == 200
+    assert len(_skeleton_of(client).nodes) > 1
+
+
+def test_the_name_reaches_the_skeleton_through_the_route(named_client):
+    """The whole point of naming, driven the way the page drives it.
+
+    /skeletonize rebuilds MeshComponents from mesh_state, and a version
+    that rebuilt a bare Neurites dropped the names on the way — every
+    neurite exported as SWC type 0 however it had been named, with
+    nothing anywhere saying so.
+    """
+    client, state = named_client
+    assert (
+        client.post("/name_neurite", json={"index": 0, "label": "axon"}).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/name_neurite", json={"index": 1, "label": "dendrite 1"}
+        ).status_code
+        == 200
+    )
+
+    assert client.post("/skeletonize", json={}).status_code == 200
+
+    ntype = _skeleton_of(client).ntype
+    assert ntype[0] == 1, "the soma must not be retyped by the junction fringe"
+    assert set(ntype[1:].tolist()) == {2, 3}
+
+
+def test_an_unnamed_neurite_skeletonizes_to_undefined(named_client):
+    client, state = named_client
+    assert client.post("/skeletonize", json={}).status_code == 200
+    ntype = _skeleton_of(client).ntype
+    assert ntype[0] == 1
+    assert set(ntype[1:].tolist()) == {0}

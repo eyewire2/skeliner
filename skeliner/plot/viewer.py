@@ -2608,13 +2608,20 @@ def _create_app(
             [0.0, 0.9, 0.9],
             [1.0, 0.2, 0.6],
         ]
+        labels = result.neurites.labels
         for i, nf in enumerate(result.neurites):
             c = neurite_colors[i % len(neurite_colors)]
+            name = labels[i] if labels is not None else f"neurite {i}"
             highlights.append(
                 {
                     "faces": nf.tolist(),
                     "color": c,
-                    "label": f"neurite {i} ({len(nf):,}f)",
+                    "label": f"{name} ({len(nf):,}f)",
+                    # Which neurite this is, for the page to name it back.
+                    # Once renamed the label no longer carries the index,
+                    # and position in `highlights` depends on whether there
+                    # is a soma — neither is something to parse.
+                    "neurite": i,
                 }
             )
 
@@ -2684,6 +2691,65 @@ def _create_app(
         # previewed against, so that preview no longer means anything.
         mesh_state["pending_reassignment"] = None
         return JSONResponse({"ok": True, **_publish_components(result)})
+
+    async def name_neurite(request):
+        """Give one neurite a name, and the SWC code it exports as.
+
+        The last step of the workflow, not a part of it: a name is pinned
+        to a position in ``neurites``, and every re-derive rebuilds that
+        list — re-sorted by size, with pieces split and merged — so
+        ``break_up_mesh`` returns neurites unnamed and any break, release
+        or Auto run drops the names.  That is the intended behaviour, not
+        a limitation to work around: a name carried across a re-derive
+        would sit on different surface without saying so.
+        """
+        neurites = mesh_state.get("neurites")
+        if not neurites:
+            return JSONResponse(
+                {"ok": False, "error": "Run break_up_mesh first"}, status_code=400
+            )
+
+        body = await _body_of(request)
+        try:
+            index = int(body["index"])
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse(
+                {"ok": False, "error": "index must be an integer"}, status_code=400
+            )
+        label = str(body.get("label", "")).strip()
+        if not label:
+            return JSONResponse(
+                {"ok": False, "error": "A name cannot be empty"}, status_code=400
+            )
+        if not -len(neurites) <= index < len(neurites):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"neurite {index} out of range for {len(neurites)}",
+                },
+                status_code=400,
+            )
+
+        raw_type = body.get("swcType")
+        try:
+            neurites.name(
+                index, label, swc_type=None if raw_type is None else int(raw_type)
+            )
+        except (TypeError, ValueError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+        out = _publish_components(_current_components())
+        await _log(
+            f"neurite {index} is '{label}' (SWC type {neurites.swc_types[index]})"
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "labels": list(neurites.labels),
+                "swcTypes": list(neurites.swc_types),
+                **out,
+            }
+        )
 
     async def do_preprocess(request):
         """Run the whole pipeline in one call.
@@ -3398,10 +3464,21 @@ def _create_app(
                 Neurites,
             )
 
+            # Copy the component lists, but carry the names across with
+            # them: they are what the skeleton reads to set `ntype`, and
+            # rebuilding a bare Neurites here silently exported every
+            # neurite as type 0 no matter what it had been called.
+            src = mesh_state["neurites"]
+            labels = getattr(src, "labels", None)
+            swc_types = getattr(src, "swc_types", None)
             params["components"] = MeshComponents(
                 soma=mesh_state.get("soma"),
                 organelles=mesh_state["organelles"],
-                neurites=Neurites(list(mesh_state["neurites"])),
+                neurites=Neurites(
+                    list(src),
+                    labels=None if labels is None else list(labels),
+                    swc_types=None if swc_types is None else list(swc_types),
+                ),
                 discarded=Discarded(list(mesh_state.get("discarded") or [])),
             )
 
@@ -4511,6 +4588,7 @@ def _create_app(
             Route("/undo", undo_mesh, methods=["POST"]),
             Route("/break_up_mesh", do_break_up_mesh, methods=["POST"]),
             Route("/preprocess", do_preprocess, methods=["POST"]),
+            Route("/name_neurite", name_neurite, methods=["POST"]),
             Route("/reassign_preview", reassign_preview, methods=["POST"]),
             Route("/reassign_apply", reassign_apply, methods=["POST"]),
             Route("/reassign_cancel", reassign_cancel, methods=["POST"]),

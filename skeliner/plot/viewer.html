@@ -2211,6 +2211,30 @@ let meshCentroid = [0, 0, 0];
                 return Number.isFinite(v) && v >= 0 ? v : 0;
             }
 
+            // Name a neurite component.  The SWC code is left to the server,
+            // which reads it from the name's leading word — "dendrite 2" is
+            // type 3, "axon" is 2 — so the page never has to hold a second
+            // copy of that mapping.
+            async function nameNeurite(index, label) {
+                const resp = await fetch("/name_neurite", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ index, label }),
+                });
+                const data = await resp.json().catch(() => null);
+                if (!data || !data.ok) {
+                    showLogStatus(
+                        `Could not name neurite ${index}: ` +
+                            ((data && data.error) || "request failed"),
+                    );
+                    updateHighlightsPanel();
+                    return;
+                }
+                // The republish rewrites every highlight, so the panel is
+                // refreshed from the server rather than patched here.
+                fetchAnnotations();
+            }
+
             async function runPreprocess() {
                 const data = await _runAction(
                     document.getElementById("preprocessBtn"),
@@ -4748,6 +4772,16 @@ let meshCentroid = [0, 0, 0];
                                 "font-size:11px;width:100px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:1px 3px;";
                             const commit = () => {
                                 const newName = input.value.trim();
+                                // Renaming a *neurite* is not an annotation
+                                // edit — it names the component, which is
+                                // what skeletonize reads to set the SWC
+                                // type.  The new label comes back from the
+                                // server's republish, so it cannot drift
+                                // from what the component actually holds.
+                                if (newName && Number.isInteger(group.neurite)) {
+                                    nameNeurite(group.neurite, newName);
+                                    return;
+                                }
                                 if (newName) group.label = newName;
                                 syncAnnotationsToServer();
                                 updateHighlightsPanel();

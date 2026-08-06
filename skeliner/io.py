@@ -704,6 +704,9 @@ def save_neurites_npz(
     }
     for i, comp in enumerate(neurites.components):
         payload[f"c{i}"] = np.asarray(comp, dtype=np.int64)
+    if neurites.labels is not None:
+        payload["labels"] = np.asarray(neurites.labels, dtype=np.str_)
+        payload["swc_types"] = np.asarray(neurites.swc_types, dtype=np.int16)
     save_fn = np.savez_compressed if compress else np.savez
     save_fn(path, **payload)
 
@@ -714,7 +717,9 @@ def load_neurites_npz(path: str | Path) -> Neurites:
     with np.load(path, allow_pickle=False) as z:
         n = int(z["n"])
         components = [z[f"c{i}"].astype(np.int64) for i in range(n)]
-    return Neurites(components)
+        labels = [str(x) for x in z["labels"]] if "labels" in z else None
+        swc_types = [int(x) for x in z["swc_types"]] if "swc_types" in z else None
+    return Neurites(components, labels=labels, swc_types=swc_types)
 
 
 def save_discarded_npz(
@@ -792,6 +797,13 @@ def save_components_npz(
     payload["n_neurites"] = np.array(len(components.neurites.components))
     for i, comp in enumerate(components.neurites.components):
         payload[f"neurite_{i}"] = np.asarray(comp, dtype=np.int64)
+    if components.neurites.labels is not None:
+        payload["neurite_labels"] = np.asarray(
+            components.neurites.labels, dtype=np.str_
+        )
+        payload["neurite_swc_types"] = np.asarray(
+            components.neurites.swc_types, dtype=np.int16
+        )
 
     # Discarded
     payload["n_discarded"] = np.array(len(components.discarded.components))
@@ -838,7 +850,17 @@ def load_components_npz(path: str | Path) -> MeshComponents:
 
         # Neurites
         n_n = int(z["n_neurites"])
-        neurites = Neurites([z[f"neurite_{i}"].astype(np.int64) for i in range(n_n)])
+        neurites = Neurites(
+            [z[f"neurite_{i}"].astype(np.int64) for i in range(n_n)],
+            labels=(
+                [str(x) for x in z["neurite_labels"]] if "neurite_labels" in z else None
+            ),
+            swc_types=(
+                [int(x) for x in z["neurite_swc_types"]]
+                if "neurite_swc_types" in z
+                else None
+            ),
+        )
 
         # Discarded
         n_d = int(z["n_discarded"])

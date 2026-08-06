@@ -148,15 +148,110 @@ class Organelles:
 # -----------------------------------------------------------------------------
 # Neurites / Discarded / MeshComponents dataclasses
 # -----------------------------------------------------------------------------
+#: SWC structure codes, by the leading word of a neurite's name.  Only the
+#: standard ones are here; anything else resolves to 0 ("undefined"), which
+#: is what every neurite exports as today.
+SWC_TYPES: dict[str, int] = {
+    "soma": 1,
+    "axon": 2,
+    "dendrite": 3,
+    "basal": 3,
+    "apical": 4,
+    "custom": 5,
+    "unspecified": 6,
+    "glia": 7,
+}
+
+
+def swc_type_for(label: str) -> int:
+    """The SWC code a neurite name implies, or 0 if it implies none.
+
+    Reads the leading word, so ``"dendrite 2"`` and ``"apical tuft"`` work
+    and an index can distinguish two neurites of the same kind.  Only ever
+    a *default*: the code is stored explicitly beside the name, because a
+    name is free text and an export that silently retypes itself when
+    someone writes "Axon (?)" is worse than one that asks.
+    """
+    head = label.strip().lower().split()
+    return SWC_TYPES.get(head[0], 0) if head else 0
+
+
 @dataclass(slots=True)
 class Neurites:
     """Neurite components from :func:`~skeliner.pre.break_up_mesh`.
 
     Each element of *components* is a face-index array for one neurite,
     sorted by descending face count.
+
+    *labels* and *swc_types* are the hand-given identity of each neurite —
+    ``"dendrite 1"``, ``"axon"`` — and the SWC structure code it exports
+    as.  Both are ``None`` on anything :func:`~skeliner.pre.break_up_mesh`
+    produces, which is the whole design: a name is pinned to a *position*
+    in this list, and a re-derive re-sorts by size, splits and merges, so
+    a name that survived one would end up on a different piece of surface.
+    Naming is therefore the last step, after the mesh is final; if you have
+    to break the mesh again, the names go and you name it again.
     """
 
     components: list[np.ndarray]
+    labels: list[str] | None = None
+    swc_types: list[int] | None = None
+
+    def __post_init__(self) -> None:
+        n = len(self.components)
+        if (self.labels is None) != (self.swc_types is None):
+            raise ValueError("labels and swc_types must be given together")
+        if self.labels is None:
+            return
+        if len(self.labels) != n or len(self.swc_types) != n:
+            raise ValueError(
+                f"labels and swc_types must have one entry per component "
+                f"(got {len(self.labels)}, {len(self.swc_types)} for {n})"
+            )
+        self.labels = [str(x) for x in self.labels]
+        self.swc_types = [int(x) for x in self.swc_types]
+
+    @property
+    def named(self) -> bool:
+        return self.labels is not None
+
+    def name(
+        self,
+        index: int,
+        label: str,
+        *,
+        swc_type: int | None = None,
+    ) -> None:
+        """Name one neurite, in place.
+
+        Naming any neurite names them all: the rest default to
+        ``neurite {i}`` with code 0, so ``labels`` never has holes and the
+        skeleton always has a code to stamp.
+
+        Parameters
+        ----------
+        index : int
+            Position in ``components``.
+        label : str
+            Free text, e.g. ``"dendrite 1"``.
+        swc_type : int, optional
+            The SWC code.  Defaults to :func:`swc_type_for` of *label*.
+        """
+        n = len(self.components)
+        if not -n <= index < n:
+            raise IndexError(f"neurite index {index} out of range for {n}")
+        if self.labels is None:
+            self.labels = [f"neurite {i}" for i in range(n)]
+            self.swc_types = [0] * n
+        self.labels[index] = str(label)
+        self.swc_types[index] = (
+            swc_type_for(label) if swc_type is None else int(swc_type)
+        )
+
+    def clear_names(self) -> None:
+        """Drop every name, back to the unnamed state."""
+        self.labels = None
+        self.swc_types = None
 
     def __len__(self) -> int:
         return len(self.components)
@@ -244,6 +339,12 @@ class MeshComponents:
         ]
         for comp in reversed(moved):
             self.neurites.components.append(comp)
+            # Appending leaves the existing positions alone, so the names
+            # already given still point at the same surface; the new
+            # arrival just needs one of its own.
+            if self.neurites.labels is not None:
+                self.neurites.labels.append(f"neurite {len(self.neurites.labels)}")
+                self.neurites.swc_types.append(0)
 
     def to_npz(self, path: str | Path) -> None:
         from . import io

@@ -10,6 +10,7 @@ from pathlib import Path
 import igraph as ig
 import numpy as np
 import pytest
+import trimesh
 
 from skeliner import skeletonize
 from skeliner.dataclass import (
@@ -362,3 +363,152 @@ def test_trim_means_the_same_thing_everywhere():
     assert radii["trim"][0] == pytest.approx(
         _estimate_radius(d, method="trim", trim_fraction=TRIM_FRACTION)
     )
+
+
+# ── naming neurites, and the SWC type it carries ──────────────────────
+#
+# Names live at a *position* in Neurites.components, and a re-derive
+# re-sorts by size, splits and merges, so a name that survived one would
+# land on different surface.  Naming is therefore terminal: everything
+# break_up_mesh produces is unnamed, and re-breaking drops the names.
+
+
+def test_break_up_mesh_produces_unnamed_neurites():
+    from skeliner import pre
+    from skeliner.dataclass import Organelles
+
+    mesh = trimesh.creation.cylinder(radius=50.0, height=1000.0, sections=16)
+    z = np.zeros(len(mesh.faces), bool)
+    org = Organelles(pocket=z.copy(), isolated=z.copy(), expanded=z.copy())
+    c = pre.break_up_mesh(mesh, None, org)
+    assert c.neurites.named is False
+    assert c.neurites.labels is None and c.neurites.swc_types is None
+
+
+@pytest.mark.parametrize(
+    "label, code",
+    [
+        ("axon", 2),
+        ("dendrite 1", 3),
+        ("Apical tuft", 4),
+        ("basal 2", 3),
+        ("something else", 0),
+        ("", 0),
+    ],
+)
+def test_swc_type_is_read_from_the_leading_word(label, code):
+    from skeliner.dataclass import swc_type_for
+
+    assert swc_type_for(label) == code
+
+
+def test_naming_one_neurite_names_them_all():
+    """No holes: the skeleton always has a code to stamp."""
+    n = Neurites([np.arange(4), np.arange(4, 8), np.arange(8, 12)])
+    n.name(1, "axon")
+    assert n.labels == ["neurite 0", "axon", "neurite 2"]
+    assert n.swc_types == [0, 2, 0]
+
+
+def test_an_explicit_code_overrides_the_name():
+    n = Neurites([np.arange(4)])
+    n.name(0, "the weird one", swc_type=2)
+    assert n.swc_types == [2]
+
+
+def test_clear_names_goes_back_to_unnamed():
+    n = Neurites([np.arange(4)])
+    n.name(0, "axon")
+    n.clear_names()
+    assert n.named is False
+
+
+def test_labels_and_types_must_agree_with_the_components():
+    with pytest.raises(ValueError, match="one entry per component"):
+        Neurites([np.arange(4)], labels=["a", "b"], swc_types=[2, 3])
+    with pytest.raises(ValueError, match="together"):
+        Neurites([np.arange(4)], labels=["a"])
+
+
+def test_names_survive_the_npz_round_trip(tmp_path):
+    from skeliner import io
+
+    n = Neurites([np.arange(4), np.arange(4, 8)])
+    n.name(0, "axon")
+    n.name(1, "dendrite 1")
+    io.save_neurites_npz(n, tmp_path / "n.npz")
+    back = io.load_neurites_npz(tmp_path / "n.npz")
+    assert back.labels == ["axon", "dendrite 1"]
+    assert back.swc_types == [2, 3]
+
+
+def test_an_unnamed_npz_round_trips_as_unnamed(tmp_path):
+    from skeliner import io
+
+    io.save_neurites_npz(Neurites([np.arange(4)]), tmp_path / "n.npz")
+    assert io.load_neurites_npz(tmp_path / "n.npz").named is False
+
+
+def _ball_with_two_processes():
+    """A soma with one process each way, long enough to bin into nodes."""
+    ball = trimesh.creation.icosphere(subdivisions=4, radius=100.0)
+    parts = [ball]
+    for sign in (1, -1):
+        tube = trimesh.creation.cylinder(radius=15.0, height=900.0, sections=24)
+        tube = tube.subdivide().subdivide()
+        tube.apply_translation([0.0, 0.0, sign * 520.0])
+        parts.append(tube)
+    verts, faces, n = [], [], 0
+    for p in parts:
+        verts.append(p.vertices)
+        faces.append(p.faces + n)
+        n += len(p.vertices)
+    mesh = trimesh.Trimesh(
+        vertices=np.vstack(verts), faces=np.vstack(faces), process=False
+    )
+
+    from skeliner import pre
+    from skeliner.dataclass import Organelles
+
+    z = np.zeros(len(mesh.faces), bool)
+    org = Organelles(pocket=z.copy(), isolated=z.copy(), expanded=z.copy())
+    sv = np.flatnonzero(np.linalg.norm(mesh.vertices, axis=1) <= 105.0)
+    soma = Soma.fit(mesh.vertices[sv], verts=sv)
+    pieces = pre._face_components_fast(
+        np.asarray(mesh.faces),
+        np.flatnonzero(
+            pre._usable_face_mask(mesh)
+            & ~pre.soma_face_mask(np.asarray(mesh.faces), sv)
+            & ~org.mask
+        ),
+    )
+    assert len(pieces) == 2, "fixture must give one component per process"
+    claim = np.concatenate([p[:1] for p in pieces])
+    return mesh, pre.break_up_mesh(mesh, soma, org, rescued=claim)
+
+
+def test_unnamed_neurites_skeletonize_to_undefined():
+    mesh, comp = _ball_with_two_processes()
+    skel = skeletonize(mesh, components=comp, verbose=False)
+    assert skel.ntype[0] == 1, "node 0 is the soma"
+    assert set(skel.ntype[1:].tolist()) == {0}
+
+
+def test_a_named_neurite_stamps_its_code_on_its_nodes():
+    mesh, comp = _ball_with_two_processes()
+    comp.neurites.name(0, "axon")
+    comp.neurites.name(1, "dendrite 1")
+    skel = skeletonize(mesh, components=comp, verbose=False)
+
+    assert skel.ntype[0] == 1, "the soma must not be retyped by the fringe"
+    assert set(skel.ntype[1:].tolist()) == {2, 3}
+    assert (skel.ntype == 2).sum() > 0 and (skel.ntype == 3).sum() > 0
+
+
+def test_a_zero_code_leaves_its_nodes_alone():
+    """A name with no SWC meaning is still a name — it just does not type."""
+    mesh, comp = _ball_with_two_processes()
+    comp.neurites.name(0, "the weird one")
+    comp.neurites.name(1, "axon")
+    skel = skeletonize(mesh, components=comp, verbose=False)
+    assert set(skel.ntype[1:].tolist()) == {0, 2}
