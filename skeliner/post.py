@@ -14,8 +14,10 @@ from ._core import (
     _bridge_gaps,
     _build_mst,
     _detect_soma,
+    _estimate_radius,
     _merge_near_soma_nodes,
     _prune_neurites,
+    _radii_from_distances,
 )
 from ._state import (
     SkeletonState,
@@ -27,6 +29,8 @@ from ._state import (
 from .dataclass import Skeleton, Soma
 
 __skeleton__ = [
+    # editing bins
+    "reassign_verts",
     # editing edges
     "graft",
     "clip",
@@ -209,6 +213,328 @@ def _remap_ntype(
         )
         mapped = _ensure_root_label(mapped, root_label)
     return mapped
+
+
+# -----------------------------------------------------------------------------
+# editing bins: which mesh vertices each node owns
+# -----------------------------------------------------------------------------
+
+
+def _cl_dist_lut(skel, n_verts: int) -> np.ndarray | None:
+    """Per-vertex centreline distance, or None when it was not kept.
+
+    ``centerline`` is the one radius that is not a function of the vertices
+    alone — it aggregates a perpendicular distance the second binning pass
+    measured.  ``skeletonize`` keeps those distances precisely so a bin can be
+    edited without leaving that key stale beside freshly recomputed ones.
+    """
+    vids = skel.extra.get("cl_dist_vids")
+    vals = skel.extra.get("cl_dist_vals")
+    if vids is None or vals is None or len(vids) == 0:
+        return None
+    lut = np.zeros(n_verts, dtype=np.float64)
+    lut[np.asarray(vids, dtype=np.int64)] = np.asarray(vals, dtype=np.float64)
+    return lut
+
+
+def _recompute_nodes(skel, nodes: Iterable[int], mesh, cl_lut) -> list[str]:
+    """Rebuild position and radii for *nodes* from the vertices they own.
+
+    Returns the radius keys that could not be rebuilt.
+    """
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    stale: list[str] = []
+    for nid in nodes:
+        owned = np.asarray(skel.node2verts[nid], dtype=np.int64)
+        if owned.size == 0:
+            continue
+        pts = verts[owned]
+        centre = pts.mean(axis=0)
+        skel.nodes[nid] = centre
+        d = np.linalg.norm(pts - centre, axis=1)
+        stale = _radii_from_distances(
+            skel.radii, nid, d, cl_d=None if cl_lut is None else cl_lut[owned]
+        )
+    return stale
+
+
+def reassign_verts(skel, verts: ArrayLike, to: int, *, mesh, verbose: bool = False):
+    """Move mesh vertices into bin *to*, and recompute what depends on them.
+
+    A node *is* the set of mesh vertices it owns: its position is their
+    centroid and every radius is an aggregate over them.  So this is the one
+    primitive bin editing needs — nudging a bin boundary, merging two nodes and
+    splitting one are all this call with different arguments.
+
+    Everything downstream is recomputed, never interpolated.  A node left
+    owning nothing is dropped, because a node with no vertices has no position
+    and no radius.
+
+    Parameters
+    ----------
+    skel
+        Modified in place.
+    verts
+        Mesh vertex ids to move.  Every one must currently belong to an arbor
+        bin: unowned surface is soma, organelle or discarded, and claiming it
+        would be a components decision made without re-deriving them.
+    to
+        Destination node.  Node 0 is refused — its "bin" is ``soma.verts``,
+        assigned wholesale by the soma stitch, and belongs to the components,
+        not to the partition.
+    mesh
+        The mesh the skeleton was built from.  Positions and radii are
+        measured from it.
+
+    Returns
+    -------
+    dict
+        ``moved``, ``donors``, ``dropped`` (nodes emptied and removed),
+        ``old2new`` (only when something was dropped), and ``stale_radii`` —
+        radius keys that could not be recomputed, e.g. ``calibrated``, which
+        is measured by ray casting rather than from the vertices.
+
+    Notes
+    -----
+    **Edges are left alone.** Moving vertices between adjacent bins almost
+    never changes which bins touch, and re-deriving the whole graph from the
+    surface would silently discard the edges that have no surface support —
+    the soma stems and ``bridge_gaps`` bridges — and can disconnect the
+    skeleton. Re-derive explicitly with :func:`rebuild_mst`, or re-skeletonize,
+    when that is what you want.
+
+    The one exception is a bin emptied by this call. It was absorbed into
+    *to*, not deleted, so its edges are **contracted onto** *to* rather than
+    dropped — otherwise merging a node would cut the tree at every neighbour
+    that node was holding on to.
+    """
+    if skel.node2verts is None:
+        raise ValueError("Skeleton carries no node2verts; nothing to reassign.")
+    to = int(to)
+    if not 0 <= to < len(skel.nodes):
+        raise ValueError(f"node {to} out of range (0..{len(skel.nodes) - 1})")
+    if to == 0:
+        raise ValueError(
+            "node 0 is the soma, not a bin — its vertices are Soma.verts and "
+            "belong to the components. Reassign them in the mesh editor."
+        )
+
+    moving = np.unique(np.asarray(verts, dtype=np.int64).ravel())
+    if moving.size == 0:
+        raise ValueError("No vertices given.")
+    if moving.min() < 0 or moving.max() >= len(mesh.vertices):
+        raise ValueError("vertex ids must lie within the mesh")
+
+    owner = np.full(len(mesh.vertices), -1, dtype=np.int64)
+    for nid, owned in enumerate(skel.node2verts):
+        owned = np.asarray(owned, dtype=np.int64)
+        if nid and owned.size:  # node 0 holds soma.verts, which is not a bin
+            owner[owned] = nid
+
+    unowned = moving[owner[moving] < 0]
+    if unowned.size:
+        raise ValueError(
+            f"{unowned.size:,} of {moving.size:,} vertices belong to no bin "
+            "(soma, organelle or discarded surface). Edit Mesh owns those."
+        )
+
+    donors = sorted({int(n) for n in np.unique(owner[moving])} - {to})
+    if not donors:
+        return {
+            "moved": 0,
+            "donors": [],
+            "dropped": [],
+            "stale_radii": [],
+        }
+
+    keep_set = set(moving.tolist())
+    for nid in donors:
+        owned = np.asarray(skel.node2verts[nid], dtype=np.int64)
+        skel.node2verts[nid] = owned[~np.isin(owned, moving)]
+    skel.node2verts[to] = np.unique(
+        np.concatenate(
+            [
+                np.asarray(skel.node2verts[to], dtype=np.int64),
+                np.asarray(sorted(keep_set)),
+            ]
+        )
+    )
+
+    dropped = [n for n in donors if skel.node2verts[n].size == 0]
+    touched = [n for n in donors if n not in dropped] + [to]
+    old2new = None
+
+    if dropped:
+        # A bin that gave everything to `to` was *absorbed* by it, not
+        # deleted, so its edges are now `to`'s.  Contract them onto `to`
+        # before compacting: `remap_edges` drops edges touching a removed
+        # node, which is right for a deletion and would here cut the tree
+        # at every neighbour the absorbed node was holding.
+        contracted = np.asarray(skel.edges, dtype=np.int64).copy()
+        if contracted.size:
+            contracted[np.isin(contracted, dropped)] = to
+            # remap_edges removes the resulting self-loops and dedups.
+            skel.edges = contracted
+
+        keep_mask = np.ones(len(skel.nodes), dtype=bool)
+        keep_mask[dropped] = False
+        state = SkeletonState(
+            nodes=skel.nodes,
+            radii=skel.radii,
+            edges=skel.edges,
+            node2verts=skel.node2verts,
+            vert2node=skel.vert2node,
+        )
+        new_state, old2new = compact_state(state, keep_mask, return_old2new=True)
+        skel.nodes = new_state.nodes
+        skel.radii = new_state.radii
+        skel.edges = new_state.edges
+        skel.node2verts = new_state.node2verts
+        skel.vert2node = new_state.vert2node
+        skel.ntype = _remap_ntype(
+            skel.ntype,
+            old2new,
+            len(new_state.nodes),
+            edges=new_state.edges,
+            fill_gaps=True,
+        )
+        touched = [int(old2new[n]) for n in touched]
+    else:
+        skel.vert2node = rebuild_vert2node(skel.node2verts)
+
+    cl_lut = _cl_dist_lut(skel, len(mesh.vertices))
+    stale = sorted(_recompute_nodes(skel, touched, mesh, cl_lut))
+    skel._invalidate_spatial_index()
+    if verbose:
+        print(
+            f"[skeliner.post] reassign_verts: {moving.size:,} verts → node {to}, "
+            f"{len(donors)} donor(s), {len(dropped)} emptied"
+        )
+        if stale:
+            print(f"      └─ not recomputable, now stale: {', '.join(stale)}")
+
+    return {
+        "moved": int(moving.size),
+        "donors": donors,
+        "dropped": dropped,
+        "old2new": None if old2new is None else old2new.tolist(),
+        "stale_radii": stale,
+    }
+
+
+def _bins_touch(mesh, a: ArrayLike, b: ArrayLike) -> bool:
+    """Does any mesh edge run from a vertex of *a* to a vertex of *b*?
+
+    The local form of the question :func:`skeliner.dx.edge_support` answers
+    globally, without building the whole node-adjacency graph for it.
+    """
+    e = np.asarray(mesh.edges_unique, dtype=np.int64)
+    in_a = np.isin(e, np.asarray(a, dtype=np.int64))
+    in_b = np.isin(e, np.asarray(b, dtype=np.int64))
+    return bool(((in_a[:, 0] & in_b[:, 1]) | (in_a[:, 1] & in_b[:, 0])).any())
+
+
+def split_node(skel, node: int, verts: ArrayLike, *, mesh, verbose: bool = False):
+    """Promote part of bin *node* to a node of its own.
+
+    The remaining bin verb, and the only one whose destination does not exist
+    yet.  The *partition* needs no invention — the caller draws it — so this
+    is :func:`reassign_verts` into a node created for the purpose, and
+    position and radii for both halves follow from the vertices as always.
+
+    **The new node is attached to its parent and to nothing else**, which is
+    the only edge here that can be defended.  The tempting alternative is to
+    derive its edges from surface adjacency, giving ``a—k'—k—b`` where the
+    geometry says so — but surface adjacency does not imply tree adjacency.
+    Measured on 549190673, 147 of the 156 bin pairs that share surface while
+    three or more tree hops apart lie *within one branch*, with the two bins
+    overlapping in space: a densely packed axon tuft.  Deriving edges there
+    would wire the new node to whatever branch happens to be touching.  So the
+    split makes one honest edge and leaves the rest to :func:`graft` and
+    :func:`clip`, where ``dx.edge_support`` can say which joins the surface
+    actually backs.
+
+    Node ids are stable: the new node is appended, and nothing is dropped, so
+    no existing id changes.
+
+    Parameters
+    ----------
+    node
+        The bin to split.  Node 0 is refused, as everywhere — its "bin" is
+        ``soma.verts``.
+    verts
+        The subset to promote.  Vertices *node* does not own are ignored and
+        counted, because the ≥2-of-3 face rule means a selection drawn on the
+        surface routinely catches a neighbour's.  Taking the whole bin is
+        refused: that renames a node rather than splitting it.
+
+    Returns
+    -------
+    dict
+        ``node`` (the new id), ``parent``, ``moved``, ``ignored``,
+        ``supported`` — whether the two halves actually share surface, false
+        when the split cut a bin that was already in two patches — and
+        ``stale_radii``.
+    """
+    if skel.node2verts is None:
+        raise ValueError("Skeleton carries no node2verts; nothing to split.")
+    node = int(node)
+    if not 0 <= node < len(skel.nodes):
+        raise ValueError(f"node {node} out of range (0..{len(skel.nodes) - 1})")
+    if node == 0:
+        raise ValueError(
+            "node 0 is the soma, not a bin — its vertices are Soma.verts and "
+            "belong to the components. Edit them in the mesh editor."
+        )
+
+    owned = np.asarray(skel.node2verts[node], dtype=np.int64)
+    picked = np.unique(np.asarray(verts, dtype=np.int64).ravel())
+    if picked.size == 0:
+        raise ValueError("No vertices given.")
+    if picked.min() < 0 or picked.max() >= len(mesh.vertices):
+        raise ValueError("vertex ids must lie within the mesh")
+
+    moving = picked[np.isin(picked, owned)]
+    ignored = int(picked.size - moving.size)
+    if moving.size == 0:
+        raise ValueError(f"none of those vertices belong to node {node}")
+    if moving.size == len(owned):
+        raise ValueError(
+            f"that is all {len(owned):,} of node {node}'s vertices — a split "
+            "has to leave something behind"
+        )
+
+    # Extend every node-indexed array by one.  The values are placeholders
+    # that reassign_verts recomputes from the vertices; ntype is the exception
+    # and is inherited, there being nothing to compute it from.
+    new_id = len(skel.nodes)
+    skel.nodes = np.vstack([skel.nodes, skel.nodes[node][None, :]])
+    for key, arr in skel.radii.items():
+        skel.radii[key] = np.append(arr, arr[node])
+    if skel.ntype is not None:
+        skel.ntype = np.append(skel.ntype, skel.ntype[node])
+    skel.node2verts.append(np.empty(0, dtype=np.int64))
+    skel.edges = np.vstack([np.asarray(skel.edges, dtype=np.int64), [[node, new_id]]])
+
+    result = reassign_verts(skel, moving, new_id, mesh=mesh)
+    supported = _bins_touch(mesh, skel.node2verts[node], skel.node2verts[new_id])
+
+    if verbose:
+        print(
+            f"[skeliner.post] split_node: {moving.size:,} verts of node {node} "
+            f"→ new node {new_id}"
+        )
+        if not supported:
+            print("      └─ the two halves share no surface")
+
+    return {
+        "node": new_id,
+        "parent": node,
+        "moved": int(moving.size),
+        "ignored": ignored,
+        "supported": supported,
+        "stale_radii": result["stale_radii"],
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -1408,48 +1734,9 @@ def downsample(
     return new_skel
 
 
-def _estimate_radius(
-    d: np.ndarray,
-    *,
-    method: str = "median",
-    trim_fraction: float = 0.05,
-    q: float = 55.,
-) -> float:
-    """Return one scalar radius according to *method*."""
-    if method == "median":
-        return float(np.median(d))
-    if method == "mean":
-        return float(d.mean())
-    if method == "max":
-        return float(d.max())
-    if method == "min":
-        return float(d.min())
-    if method == "percentile":
-        return float(np.percentile(d, q=q))
-    if method == "trim":
-        lo, hi = np.quantile(d, [trim_fraction, 1.0 - trim_fraction])
-        mask = (d >= lo) & (d <= hi)
-        if not np.any(mask):
-            return float(np.mean(d))
-        return float(d[mask].mean())
-    if method == "trimlow":
-        lo = np.quantile(d, trim_fraction)
-        mask = (d >= lo)
-        if not np.any(mask):
-            return float(np.mean(d))
-        return float(d[mask].mean())
-    if method == "trimhigh":
-        hi = np.quantile(d, 1.0 - trim_fraction)
-        mask = (d <= hi)
-        if not np.any(mask):
-            return float(np.mean(d))
-        return float(d[mask].mean())
-    raise ValueError(f"Unknown radius estimator '{method}'.")
-
-
 def submesh_by_vertices(
-        mesh : trimesh.Trimesh,
-        vertex_indices : np.ndarray,
+    mesh: trimesh.Trimesh,
+    vertex_indices: np.ndarray,
 ) -> trimesh.Trimesh:
     """
     Reduce mesh to a subset of vertices and corresponding faces.
@@ -1478,23 +1765,19 @@ def filter_inner_surfaces_raycast(mesh, num_rays=20, thresh=0.2, sample=True):
 
     # ---- Ray directions ----
     if sample:
-        phi = np.random.uniform(0, 2*np.pi, num_rays)
+        phi = np.random.uniform(0, 2 * np.pi, num_rays)
         theta = np.arccos(np.random.uniform(-1, 1, num_rays))
-        directions = np.column_stack([
-            np.sin(theta) * np.cos(phi),
-            np.sin(theta) * np.sin(phi),
-            np.cos(theta)
-        ])
+        directions = np.column_stack(
+            [np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)]
+        )
     else:
         golden_ratio = (1 + np.sqrt(5)) / 2
         idx = np.arange(num_rays)
         theta = 2 * np.pi * idx / golden_ratio
         phi = np.arccos(1 - 2 * (idx + 0.5) / num_rays)
-        directions = np.column_stack([
-            np.sin(phi) * np.cos(theta),
-            np.sin(phi) * np.sin(theta),
-            np.cos(phi)
-        ])
+        directions = np.column_stack(
+            [np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)]
+        )
 
     # ---- Precompute centroids & normals ----
     C = mesh.triangles_center
@@ -1520,6 +1803,7 @@ def filter_inner_surfaces_raycast(mesh, num_rays=20, thresh=0.2, sample=True):
     # ---- Fast intersector ----
     try:
         from trimesh.ray.ray_pyembree import RayMeshIntersector
+
         intersector = RayMeshIntersector(mesh)
     except ImportError:
         intersector = mesh.ray
@@ -1541,17 +1825,17 @@ def filter_inner_surfaces_raycast(mesh, num_rays=20, thresh=0.2, sample=True):
 
 
 def calibrate_radii(
-    skel : Skeleton,
+    skel: Skeleton,
     mesh: trimesh.Trimesh,
     *,
     radius_metric: str | None = None,
     aggregate: str = "trim",
-    min_n_outer : int = 20,
-    min_frac_outer : float = 0.33,
-    min_verts_q_outer : float = 80.,
-    rays_num_outer : int = 30,
-    rays_thresh_outer : float = 0.2,
-    rays_sample : bool = False,
+    min_n_outer: int = 20,
+    min_frac_outer: float = 0.33,
+    min_verts_q_outer: float = 80.0,
+    rays_num_outer: int = 30,
+    rays_thresh_outer: float = 0.2,
+    rays_sample: bool = False,
     store_key: str = "calibrated",
     verbose: bool = False,
 ) -> None:
@@ -1612,27 +1896,34 @@ def calibrate_radii(
 
     # Aggregate distances for each node using per-call whitelist restriction
     r_new = np.array(skel.radii[radius_metric], dtype=np.float64, copy=True)
-    r_kind = np.full(n_total, 'fallback', dtype='object')
+    r_kind = np.full(n_total, "fallback", dtype="object")
 
     n_verts = np.array([len(i) for i in skel.node2verts])
     min_n_verts_bulb = int(np.percentile(n_verts, q=min_verts_q_outer))
 
-    log_steps = (np.array([0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.]) * n_total).astype(int)
+    log_steps = (np.array([0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0]) * n_total).astype(int)
     log_steps[-1] = n_total - 1
 
     with _post_stage("calibrate_radii", verbose=verbose) as log:
-        log(f"Check for inner meshes in all nodes with min_n_verts_bulb>={min_n_verts_bulb};")
+        log(
+            f"Check for inner meshes in all nodes with min_n_verts_bulb>={min_n_verts_bulb};"
+        )
         log(f"This is {np.mean(n_verts > min_n_verts_bulb):.0%} of all nodes")
 
     for i in range(n_total):
         if i in log_steps:
-            _post_stage(f"calibrate_radii - {i/n_total:.0%} calibrated", verbose=verbose)
+            _post_stage(
+                f"calibrate_radii - {i / n_total:.0%} calibrated", verbose=verbose
+            )
 
         if skel.ntype[i] == 1 and skel.soma is not None:  # Ignore soma
             continue
 
-        vids = (np.asarray(skel.node2verts[i], dtype=np.int64)
-                if i < len(skel.node2verts) else np.empty(0, dtype=np.int64))
+        vids = (
+            np.asarray(skel.node2verts[i], dtype=np.int64)
+            if i < len(skel.node2verts)
+            else np.empty(0, dtype=np.int64)
+        )
         if vids.size == 0:
             continue
 
@@ -1642,38 +1933,46 @@ def calibrate_radii(
             mesh_i = submesh_by_vertices(mesh, vids)
             assert len(mesh_i.vertices) == len(vids)
             outer_vids = filter_inner_surfaces_raycast(
-                mesh_i, num_rays=rays_num_outer, thresh=rays_thresh_outer, sample=rays_sample)
+                mesh_i,
+                num_rays=rays_num_outer,
+                thresh=rays_thresh_outer,
+                sample=rays_sample,
+            )
             n_outer = len(outer_vids)
 
-            if (n_outer >= min_n_outer) and (n_outer >= min_frac_outer * n_inner) and (n_outer < n_inner):
+            if (
+                (n_outer >= min_n_outer)
+                and (n_outer >= min_frac_outer * n_inner)
+                and (n_outer < n_inner)
+            ):
                 d_local = dx.distance(
                     skel,
                     mesh_vertices[vids[outer_vids]],
-                    mode='centerline',
+                    mode="centerline",
                     radius_metric=radius_metric,
                     allowed_nodes=[int(i)],
                 )
                 r_new[i] = _estimate_radius(d_local, method=aggregate)
-                r_kind[i] = 'outer_centerline'
+                r_kind[i] = "outer_centerline"
                 outer_success = True
 
         if not outer_success:
             d_local = dx.distance(
                 skel,
                 mesh_vertices[vids],
-                mode='centerline',
+                mode="centerline",
                 radius_metric=radius_metric,
                 allowed_nodes=[int(i)],
             )
             r_new_i = _estimate_radius(d_local, method=aggregate)
             if r_new_i < r_new[i]:  # Update only if smaller
                 r_new[i] = r_new_i
-                r_kind[i] = 'full_centerline'
+                r_kind[i] = "full_centerline"
 
     skel.radii[store_key] = r_new
-    n_fallback = int(np.sum(r_kind == 'fallback'))
-    n_full_centerline = int(np.sum(r_kind == 'full_centerline'))
-    n_outer_centerline = int(np.sum(r_kind == 'outer_centerline'))
+    n_fallback = int(np.sum(r_kind == "fallback"))
+    n_full_centerline = int(np.sum(r_kind == "full_centerline"))
+    n_outer_centerline = int(np.sum(r_kind == "outer_centerline"))
 
     # annotate meta
     skel.extra["calibration"] = {
@@ -1691,6 +1990,10 @@ def calibrate_radii(
     with _post_stage("calibrate_radii summary", verbose=verbose) as log:
         log(f"n_total={n_total}")
         log(f"n_fallback={n_fallback}={n_fallback / n_total:.0%}, ")
-        log(f"n_full_centerline={n_full_centerline}={n_full_centerline / n_total:.0%}, ")
-        log(f"n_outer_centerline={n_outer_centerline}={n_outer_centerline / n_total:.0%}; ")
+        log(
+            f"n_full_centerline={n_full_centerline}={n_full_centerline / n_total:.0%}, "
+        )
+        log(
+            f"n_outer_centerline={n_outer_centerline}={n_outer_centerline / n_total:.0%}; "
+        )
         log(f"store='{store_key}', base='{radius_metric}'")

@@ -11,9 +11,19 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Ellipse
 from scipy.stats import binned_statistic_2d
 
-from ..dataclass import Skeleton
+from ..dataclass import MeshComponents, Organelles, Skeleton
 
-__all__ = ["projection", "threeviews", "details", "node_details"]
+__all__ = [
+    "projection",
+    "threeviews",
+    "details",
+    "node_details",
+    "z_section",
+    "z_section_grid",
+    "diagnose_soma",
+    "diagnose_components",
+    "diagnose_discarded",
+]
 
 
 Number = int | float
@@ -265,7 +275,6 @@ def _resolve_swc_palette_from_skel_cmap(skel_cmap) -> np.ndarray:
       - dict {name|code: color, ...} with optional '__base__'
     Returns (8,4) RGBA array indexed by SWC code -1..6.
     """
-    overrides: dict[int, str | tuple | list] = {}
     if isinstance(skel_cmap, Mapping):
         base_arg = skel_cmap.get("__base__", "Pastel2")  # default fallback
         palette = _palette_from_base(base_arg)
@@ -517,23 +526,19 @@ def projection(
     c_xy = _project(skel.nodes[[0]] * scl_skel, ix, iy).ravel()
     col_soma = swc_colors[1] if color_by == "ntype" else "pink"
 
-    if soma_style == 'filled':
+    if soma_style == "filled":
         soma_fc = col_soma
-        soma_ec = 'k'
-        soma_ls = '-'
-        soma_mc = 'none'
+        soma_ec = "k"
+        soma_ls = "-"
+        soma_mc = "none"
     else:
         ax.scatter(*c_xy, color="black", s=15, zorder=3)
-        soma_fc = 'none'
-        soma_ec = 'k'
-        soma_ls = '--'
+        soma_fc = "none"
+        soma_ec = "k"
+        soma_ls = "--"
         soma_mc = col_soma
 
-    if (
-        mesh is not None
-        and skel.soma is not None
-        and skel.soma.verts is not None
-    ):
+    if mesh is not None and skel.soma is not None and skel.soma.verts is not None:
         if draw_soma_mask:
             xy_soma = _project(mesh.vertices[np.asarray(skel.soma.verts, int)], ix, iy)
             xy_soma = xy_soma * scl_mesh
@@ -631,8 +636,8 @@ def projection(
                     ax.add_collection(pc)
 
     # ────────────────────────────── final cosmetics ────────────────────────
-    if plane in ['xy', 'yx']:
-        ax.set_aspect('equal', adjustable='box')
+    if plane in ["xy", "yx"]:
+        ax.set_aspect("equal", adjustable="box")
 
     if unit is None:
         unit_str = "" if scl_skel == 1.0 else f"(×{scl_skel:g})"
@@ -989,7 +994,7 @@ def details(
         ax.add_patch(ell)
 
     # ────────────── cosmetics & labels ────────────────────────────────────
-    if plane in ['xy', 'yx']:
+    if plane in ["xy", "yx"]:
         ax.set_aspect("equal", adjustable="box")
 
     if unit is None:
@@ -998,7 +1003,6 @@ def details(
     else:
         ax.set_xlabel(f"{plane[0]} ({unit})")
         ax.set_ylabel(f"{plane[1]} ({unit})")
-
 
     if xlim is not None:
         ax.set_xlim(xlim)
@@ -1237,3 +1241,833 @@ def node_details(
         **kwargs,
     )
     return fig, ax
+
+
+# =====================================================================
+#  Mesh cross-section visualization
+# =====================================================================
+
+
+def z_section(
+    mesh: trimesh.Trimesh,
+    z: float | None = None,
+    *,
+    z_tol: float = 150.0,
+    organelles: Organelles | None = None,
+    nucleus: dict | None = None,
+    soma_hull: bool = False,
+    ax: Axes | None = None,
+    figsize: tuple[float, float] = (10, 10),
+) -> tuple[Figure, Axes]:
+    """Plot a Z cross-section of the mesh vertex cloud.
+
+    Shows all mesh vertices near *z* as a 2D scatter, with a
+    concave-hull outer contour, optional organelle overlay, and
+    optional nucleus void circle from :func:`find_nucleus_center`.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh.
+    z : float
+        Z-level to slice at.
+    z_tol : float
+        Half-width of the Z slab for collecting vertices.
+    organelles : Organelles or None
+        Pre-computed organelles from :func:`find_organelles`.  If
+        provided, organelle face centroids are drawn in red.
+    nucleus : dict or None
+        Result dict from :func:`find_nucleus_center`.  If provided,
+        the per-Z void circle is drawn at the nearest matching slice.
+    soma_hull : bool
+        If True, apply fill + morphological opening to strip neurite
+        protrusions before building the outer contour hull.  This
+        matches the hull computation used by ``find_soma_via_z_contour``.
+    ax : Axes or None
+        Matplotlib axes to draw on.  Created if None.
+    figsize : tuple
+        Figure size when *ax* is None.
+
+    Returns
+    -------
+    fig, ax : Figure, Axes
+    """
+    if z is None:
+        if nucleus is not None:
+            z = nucleus["center"][2]
+        else:
+            raise ValueError("z must be provided when nucleus is None")
+
+    from scipy.ndimage import binary_dilation, label
+    from scipy.spatial import ConvexHull
+
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+
+    near_z = np.abs(verts[:, 2] - z) < z_tol
+    pts_xy = verts[near_z, :2]
+
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        fig = ax.figure
+
+    if len(pts_xy) < 3:
+        ax.set_title(f"Z={z:.0f}: too few vertices")
+        return fig, ax
+
+    # All vertices — light gray
+    ax.scatter(
+        pts_xy[:, 0],
+        pts_xy[:, 1],
+        c="#cccccc",
+        s=0.5,
+        alpha=0.3,
+        zorder=1,
+        rasterized=True,
+    )
+
+    # Organelle overlay
+    if organelles is not None:
+        centroids = verts[faces].mean(axis=1)
+        face_near = np.abs(centroids[:, 2] - z) < z_tol
+        org_near = face_near & organelles.mask
+        if org_near.sum() > 0:
+            oc = centroids[org_near]
+            ax.scatter(
+                oc[:, 0],
+                oc[:, 1],
+                c="red",
+                s=2,
+                alpha=0.4,
+                zorder=2,
+                rasterized=True,
+                label="organelles",
+            )
+
+    # Outer contour — rasterize, find largest cluster, convex hull.
+    # When soma_hull=True, fill interior + morphological open to strip
+    # neurite protrusions before hull (matches _soma_hulls()).
+    soma_pts = None
+    if len(pts_xy) >= 4:
+        try:
+            grid_res = 200.0
+            struct3 = np.ones((3, 3), dtype=bool)
+            xy_min = pts_xy.min(axis=0) - grid_res * 3
+            nx = int((pts_xy[:, 0].max() - xy_min[0] + grid_res * 6) / grid_res) + 1
+            ny = int((pts_xy[:, 1].max() - xy_min[1] + grid_res * 6) / grid_res) + 1
+            occ = np.zeros((nx, ny), dtype=bool)
+            ix = ((pts_xy[:, 0] - xy_min[0]) / grid_res).astype(int).clip(0, nx - 1)
+            iy = ((pts_xy[:, 1] - xy_min[1]) / grid_res).astype(int).clip(0, ny - 1)
+            occ[ix, iy] = True
+
+            dilated = binary_dilation(occ, struct3)
+            labeled, n_labels = label(dilated)
+            if n_labels > 0:
+                sizes = np.bincount(labeled.ravel())[1:]
+                vert_labels = labeled[ix, iy]
+                lid = int(np.argmax(sizes)) + 1
+                soma_region = labeled == lid
+                soma_mask = vert_labels == lid
+
+                if soma_hull:
+                    from scipy.ndimage import (
+                        binary_erosion,
+                        binary_fill_holes,
+                        distance_transform_edt,
+                    )
+
+                    closed = binary_dilation(occ & soma_region, struct3, iterations=2)
+                    closed = binary_erosion(closed, struct3, iterations=2)
+                    filled = binary_fill_holes(closed)
+                    dt = distance_transform_edt(filled)
+                    peak_dist = dt.max()
+                    if peak_dist >= 6:
+                        r = max(int(peak_dist * 0.3), 3)
+                        se = np.zeros((2 * r + 1, 2 * r + 1), dtype=bool)
+                        yy, xx = np.ogrid[-r : r + 1, -r : r + 1]
+                        se[xx**2 + yy**2 <= r**2] = True
+                        opened = binary_erosion(filled, se)
+                        opened = binary_dilation(opened, se)
+                        if opened.any():
+                            gi, gj = np.where(opened)
+                            hull_pts = np.column_stack(
+                                [
+                                    xy_min[0] + gi * grid_res + grid_res / 2,
+                                    xy_min[1] + gj * grid_res + grid_res / 2,
+                                ]
+                            )
+                            hull = ConvexHull(hull_pts)
+                            hv = hull_pts[hull.vertices]
+                            hv_closed = np.vstack([hv, hv[0:1]])
+                            ax.plot(
+                                hv_closed[:, 0],
+                                hv_closed[:, 1],
+                                color="green",
+                                linewidth=2.5,
+                                zorder=5,
+                                label="outer contour",
+                            )
+                            soma_mask = soma_mask & opened[ix, iy]
+                            soma_pts = pts_xy[soma_mask]
+
+                # Fallback: raw convex hull of largest cluster
+                if soma_pts is None:
+                    soma_pts = pts_xy[soma_mask]
+                    if len(soma_pts) >= 4:
+                        hull = ConvexHull(soma_pts)
+                        hv = soma_pts[hull.vertices]
+                        hv_closed = np.vstack([hv, hv[0:1]])
+                        ax.plot(
+                            hv_closed[:, 0],
+                            hv_closed[:, 1],
+                            color="green",
+                            linewidth=2.5,
+                            zorder=5,
+                            label="outer contour",
+                        )
+        except Exception:
+            pass
+
+    # Nucleus void — inner boundary of soma cluster from void center,
+    # clipped to the soma convex hull so it can't escape through the
+    # open pocket mouth.
+    if nucleus is not None and len(pts_xy) >= 10:
+        from shapely.geometry import Polygon
+
+        slices = nucleus["slices"]
+        dz = np.abs(slices[:, 0] - z)
+        nearest = int(np.argmin(dz))
+        z_step = np.median(np.diff(slices[:, 0])) if len(slices) > 1 else 500
+        if dz[nearest] <= z_step * 0.6:
+            vc = slices[nearest, 1:3]
+            # Use soma cluster vertices only (soma_pts from above)
+            sweep_pts = soma_pts if soma_pts is not None else pts_xy
+            dx = sweep_pts[:, 0] - vc[0]
+            dy = sweep_pts[:, 1] - vc[1]
+            angles = np.arctan2(dy, dx)
+            dists = np.sqrt(dx**2 + dy**2)
+            n_bins = 72
+            bin_edges = np.linspace(-np.pi, np.pi, n_bins + 1)
+            inner_pts = []
+            for b in range(n_bins):
+                mask = (angles >= bin_edges[b]) & (angles < bin_edges[b + 1])
+                if mask.any():
+                    idx = np.where(mask)[0]
+                    closest = idx[np.argmin(dists[idx])]
+                    inner_pts.append(sweep_pts[closest])
+            if len(inner_pts) >= 3:
+                inner_pts = np.array(inner_pts)
+                inner_closed = np.vstack([inner_pts, inner_pts[0:1]])
+                # Clip to soma convex hull
+                try:
+                    inner_poly = Polygon(inner_closed[:, :2])
+                    if not inner_poly.is_valid:
+                        inner_poly = inner_poly.buffer(0)
+                    hull_poly = Polygon(hv) if soma_pts is not None else None
+                    if hull_poly is not None and hull_poly.is_valid:
+                        clipped = inner_poly.intersection(hull_poly)
+                        if hasattr(clipped, "exterior"):
+                            cc = np.array(clipped.exterior.coords)
+                            ax.plot(
+                                cc[:, 0],
+                                cc[:, 1],
+                                color="goldenrod",
+                                linewidth=2.5,
+                                zorder=5,
+                                label="nucleus void",
+                            )
+                        else:
+                            ax.plot(
+                                inner_closed[:, 0],
+                                inner_closed[:, 1],
+                                color="goldenrod",
+                                linewidth=2.5,
+                                zorder=5,
+                                label="nucleus void",
+                            )
+                    else:
+                        ax.plot(
+                            inner_closed[:, 0],
+                            inner_closed[:, 1],
+                            color="goldenrod",
+                            linewidth=2.5,
+                            zorder=5,
+                            label="nucleus void",
+                        )
+                except Exception:
+                    ax.plot(
+                        inner_closed[:, 0],
+                        inner_closed[:, 1],
+                        color="goldenrod",
+                        linewidth=2.5,
+                        zorder=5,
+                        label="nucleus void",
+                    )
+
+    # Auto-zoom centred on nucleus XY
+    if nucleus is not None:
+        nc = nucleus["center"]
+        pad = nucleus["peak_r"] * 4
+        ax.set_xlim(nc[0] - pad, nc[0] + pad)
+        ax.set_ylim(nc[1] - pad, nc[1] + pad)
+        ax.plot(
+            nc[0], nc[1], "+", color="red", markersize=10, markeredgewidth=2, zorder=10
+        )
+
+    ax.set_aspect("equal")
+    ax.set_title(f"Z = {z:.0f}  ({pts_xy.shape[0]} vertices)")
+    ax.grid(True, alpha=0.2)
+    ax.legend(fontsize=8, loc="upper right")
+    return fig, ax
+
+
+def z_section_grid(
+    mesh: trimesh.Trimesh,
+    nucleus: dict,
+    *,
+    z_step: float = 210.0,
+    z_span: float | None = None,
+    z_tol: float = 150.0,
+    organelles: Organelles | None = None,
+    soma_hull: bool = False,
+    figsize: tuple[float, float] | None = None,
+) -> tuple[Figure, np.ndarray]:
+    """Plot a grid of Z cross-sections spanning the nucleus Z-range.
+
+    The Z-levels are centred on the nucleus centre and span
+    *z_span* (default: 1.5 × the detected nucleus Z-range).
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input neuron mesh.
+    nucleus : dict
+        Result dict from :func:`find_nucleus_center`.
+    z_step : float
+        Spacing between Z-levels in nm.
+    z_span : float or None
+        Total Z span to cover.  If None, uses 1.5 × the nucleus
+        Z-range so the void appears and disappears within the grid.
+    z_tol : float
+        Half-width of the Z slab at each level.
+    organelles : Organelles or None
+        Forwarded to :func:`z_section`.
+    figsize : tuple or None
+        Figure size.  If None, auto-scaled from the grid dimensions.
+
+    Returns
+    -------
+    fig, axes : Figure, ndarray of Axes
+    """
+    z_center = nucleus["center"][2]
+    if z_span is None:
+        z_lo, z_hi = nucleus["z_range"]
+        z_span = (z_hi - z_lo) * 1.96
+        z_span = max(z_span, 5000.0)  # at least 5 µm
+
+    n_levels = max(4, int(np.ceil(z_span / z_step)))
+
+    ncols = int(np.ceil(np.sqrt(n_levels)))
+    nrows = int(np.ceil(n_levels / ncols))
+
+    if figsize is None:
+        figsize = (ncols * 3.5, nrows * 3.5)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+    axes_flat = np.asarray(axes).ravel()
+
+    z_levels = np.linspace(z_center - z_span / 2, z_center + z_span / 2, n_levels)
+
+    for i, z_val in enumerate(z_levels):
+        z_section(
+            mesh,
+            z_val,
+            z_tol=z_tol,
+            organelles=organelles,
+            nucleus=nucleus,
+            soma_hull=soma_hull,
+            ax=axes_flat[i],
+        )
+
+    for j in range(n_levels, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+
+    fig.tight_layout()
+    return fig, axes
+
+
+def diagnose_soma(
+    mesh: trimesh.Trimesh,
+    *,
+    nucleus: dict | None = None,
+    soma: object = None,
+    organelles: Organelles | None = None,
+    planes: tuple[str, str, str] = ("xy", "xz", "zy"),
+    figsize: tuple[float, float] = (12, 12),
+) -> tuple[Figure, list[Axes]]:
+    """Three orthogonal projections of soma detection results.
+
+    Shows mesh vertices in gray, soma vertices highlighted, nucleus
+    center marked, nucleus Z-range indicated, and soma ellipsoid
+    outline.
+
+    Colors match the web viewer: soma is light magenta, pocket
+    organelles are red, isolated organelles are green, and expanded
+    organelles are orange.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    nucleus : dict or None
+        Result from :func:`find_nucleus_center`.
+    soma : Soma or None
+        Result from any soma detection method.
+    organelles : Organelles or None
+        Pre-computed organelles from :func:`find_organelles`.
+    planes : tuple of str
+        Three plane codes for the panels.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    fig, axes : Figure, list[Axes]
+    """
+    # Color scheme — matches skeliner.plot.viewer
+    SOMA_COLOR = (0.9, 0.5, 0.9)
+    POCKET_COLOR = (1.0, 0.15, 0.15)
+    ISOLATED_COLOR = (0.15, 0.8, 0.15)
+    EXPANDED_COLOR = (1.0, 0.6, 0.15)
+
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+
+    # 2×2 grid: top-left=XZ, top-right=empty, bottom-left=XY, bottom-right=ZY
+    # Axes alignment: XY bottom-left shares X with XZ above, Y with ZY right.
+    fig, ax_grid = plt.subplots(2, 2, figsize=figsize)
+    # Map: XY→(1,0), XZ→(0,0), ZY→(1,1), empty→(0,1)
+    panel_pos = {"xy": (1, 0), "xz": (0, 0), "zy": (1, 1)}
+    axes = []
+    for plane in planes:
+        r, c = panel_pos[plane]
+        axes.append(ax_grid[r, c])
+    ax_grid[0, 1].set_visible(False)
+
+    for ax, plane in zip(axes, planes):
+        ix, iy = _PLANE_AXES[plane]
+        xlab, ylab = _plane_axes(plane)
+
+        # All mesh vertices — light gray
+        ax.scatter(
+            verts[:, ix],
+            verts[:, iy],
+            c="#dddddd",
+            s=0.3,
+            alpha=0.2,
+            rasterized=True,
+            zorder=1,
+        )
+
+        # Soma vertices
+        if soma is not None and len(soma.verts) > 0:
+            sv = verts[soma.verts]
+            ax.scatter(
+                sv[:, ix],
+                sv[:, iy],
+                color=SOMA_COLOR,
+                s=0.8,
+                alpha=0.6,
+                rasterized=True,
+                zorder=3,
+                label="soma",
+            )
+
+        # Organelle face centroids — split by category, viewer colors
+        if organelles is not None:
+            face_centroids = verts[faces].mean(axis=1)
+            org_layers = (
+                ("pocket", organelles.pocket, POCKET_COLOR),
+                ("isolated", organelles.isolated, ISOLATED_COLOR),
+                ("expanded", organelles.expanded, EXPANDED_COLOR),
+            )
+            for label, mask, color in org_layers:
+                if not mask.any():
+                    continue
+                fc = face_centroids[mask]
+                ax.scatter(
+                    fc[:, ix],
+                    fc[:, iy],
+                    color=color,
+                    s=0.3,
+                    alpha=0.25,
+                    rasterized=True,
+                    zorder=2,
+                    label=f"organelle:{label}",
+                )
+
+        # Soma ellipsoid outline (drawn even when organelles is None)
+        if soma is not None:
+            ell = _soma_ellipse2d(soma, plane)
+            ell.set_edgecolor(SOMA_COLOR)
+            ell.set_linewidth(1.5)
+            ax.add_patch(ell)
+
+        # Nucleus center + z_range
+        if nucleus is not None:
+            nc = nucleus["center"]
+            ax.plot(
+                nc[ix],
+                nc[iy],
+                "+",
+                color="cyan",
+                markersize=12,
+                markeredgewidth=2,
+                zorder=10,
+            )
+            # Z-range lines on planes that show Z
+            if 2 in (ix, iy):
+                z_lo, z_hi = nucleus["z_range"]
+                z_ax = ix if ix == 2 else iy
+                for zv in (z_lo, z_hi):
+                    if z_ax == ix:
+                        ax.axvline(
+                            zv, color="cyan", linewidth=0.8, alpha=0.6, linestyle="--"
+                        )
+                    else:
+                        ax.axhline(
+                            zv, color="cyan", linewidth=0.8, alpha=0.6, linestyle="--"
+                        )
+
+        # Zoom to soma region with generous padding
+        if soma is not None and len(soma.verts) > 0:
+            pad = max(soma.axes) * 1.5
+            cx, cy = soma.center[ix], soma.center[iy]
+        elif nucleus is not None:
+            pad = nucleus["peak_r"] * 8
+            cx, cy = nucleus["center"][ix], nucleus["center"][iy]
+        else:
+            pad = None
+
+        if pad is not None:
+            ax.set_xlim(cx - pad, cx + pad)
+            ax.set_ylim(cy - pad, cy + pad)
+
+        ax.set_aspect("equal")
+        ax.set_xlabel(xlab)
+        ax.set_ylabel(ylab)
+        ax.set_title(plane.upper())
+        ax.grid(True, alpha=0.15)
+
+    axes[0].legend(fontsize=7, loc="upper right", markerscale=5)
+    fig.tight_layout()
+    return fig, axes
+
+
+def diagnose_components(
+    mesh: trimesh.Trimesh,
+    components: MeshComponents,
+    *,
+    planes: tuple[str, str, str] = ("xy", "xz", "zy"),
+    figsize: tuple[float, float] = (12, 12),
+) -> tuple[Figure, list[Axes]]:
+    """Three orthogonal projections of break_up_mesh component results.
+
+    Same layout as :func:`diagnose_soma`, but colors faces by
+    component (soma, organelles, neurites) using the same palette as
+    the web viewer after running break_up_mesh. Discarded fragments
+    are not plotted.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh.
+    components : MeshComponents
+        Result of :func:`~skeliner.pre.break_up_mesh`.
+    planes : tuple of str
+        Three plane codes for the panels.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    fig, axes : Figure, list[Axes]
+    """
+    # Color scheme — matches skeliner.plot.viewer post break_up_mesh
+    SOMA_COLOR = (0.9, 0.5, 0.9)
+    ORG_COLOR = (1.0, 0.8, 0.0)
+    NEURITE_COLORS = [
+        (0.2, 0.6, 1.0),
+        (0.3, 1.0, 0.3),
+        (1.0, 0.4, 0.1),
+        (0.0, 0.9, 0.9),
+        (1.0, 0.2, 0.6),
+    ]
+
+    soma = components.soma
+    organelles = components.organelles
+    neurites = components.neurites
+    nucleus = soma.nucleus if soma is not None else None
+
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+    face_centroids = verts[faces].mean(axis=1)
+
+    # Mirror the viewer: organelle faces that are also soma faces are
+    # painted as soma, so subtract them from the org layer to avoid
+    # double-coloring. A face is a soma face if >= 2 of its 3 verts
+    # are in soma.verts.
+    if soma is not None and len(soma.verts) > 0:
+        soma_vmask = np.zeros(len(verts), dtype=bool)
+        soma_vmask[np.asarray(soma.verts, dtype=np.int64)] = True
+        soma_face_mask = soma_vmask[faces].sum(axis=1) >= 2
+        org_only = organelles.mask & ~soma_face_mask
+    else:
+        org_only = organelles.mask
+
+    # 2×2 grid: top-left=XZ, bottom-left=XY, bottom-right=ZY, top-right=empty
+    fig, ax_grid = plt.subplots(2, 2, figsize=figsize)
+    panel_pos = {"xy": (1, 0), "xz": (0, 0), "zy": (1, 1)}
+    axes = []
+    for plane in planes:
+        r, c = panel_pos[plane]
+        axes.append(ax_grid[r, c])
+    ax_grid[0, 1].set_visible(False)
+
+    for ax, plane in zip(axes, planes):
+        ix, iy = _PLANE_AXES[plane]
+        xlab, ylab = _plane_axes(plane)
+
+        # All mesh vertices — light gray background
+        ax.scatter(
+            verts[:, ix],
+            verts[:, iy],
+            c="#dddddd",
+            s=0.3,
+            alpha=0.2,
+            rasterized=True,
+            zorder=1,
+        )
+
+        # Neurite face centroids — cycled palette.  The legend carries the
+        # names once they are given: this figure is how you decide which
+        # neurite is the axon, so it has to be able to show the answer.
+        labels = neurites.labels if hasattr(neurites, "labels") else None
+        for i, nf in enumerate(neurites):
+            if len(nf) == 0:
+                continue
+            color = NEURITE_COLORS[i % len(NEURITE_COLORS)]
+            fc = face_centroids[nf]
+            ax.scatter(
+                fc[:, ix],
+                fc[:, iy],
+                color=color,
+                s=0.3,
+                alpha=0.4,
+                rasterized=True,
+                zorder=2,
+                label=f"[{i}] {labels[i]}" if labels is not None else f"neurite {i}",
+            )
+
+        # Organelle face centroids (excluding soma overlap)
+        if org_only.any():
+            fc = face_centroids[org_only]
+            ax.scatter(
+                fc[:, ix],
+                fc[:, iy],
+                color=ORG_COLOR,
+                s=0.3,
+                alpha=0.35,
+                rasterized=True,
+                zorder=3,
+                label="organelles",
+            )
+
+        # Soma vertices
+        if soma is not None and len(soma.verts) > 0:
+            sv = verts[soma.verts]
+            ax.scatter(
+                sv[:, ix],
+                sv[:, iy],
+                color=SOMA_COLOR,
+                s=0.8,
+                alpha=0.6,
+                rasterized=True,
+                zorder=4,
+                label="soma",
+            )
+
+        # Soma ellipsoid outline
+        if soma is not None:
+            ell = _soma_ellipse2d(soma, plane)
+            ell.set_edgecolor(SOMA_COLOR)
+            ell.set_linewidth(1.5)
+            ax.add_patch(ell)
+
+        # Nucleus center + z_range
+        if nucleus is not None:
+            nc = nucleus["center"]
+            ax.plot(
+                nc[ix],
+                nc[iy],
+                "+",
+                color="cyan",
+                markersize=12,
+                markeredgewidth=2,
+                zorder=10,
+            )
+            if 2 in (ix, iy):
+                z_lo, z_hi = nucleus["z_range"]
+                z_ax = ix if ix == 2 else iy
+                for zv in (z_lo, z_hi):
+                    if z_ax == ix:
+                        ax.axvline(
+                            zv,
+                            color="cyan",
+                            linewidth=0.8,
+                            alpha=0.6,
+                            linestyle="--",
+                        )
+                    else:
+                        ax.axhline(
+                            zv,
+                            color="cyan",
+                            linewidth=0.8,
+                            alpha=0.6,
+                            linestyle="--",
+                        )
+
+        # Zoom to soma region with generous padding
+        if soma is not None and len(soma.verts) > 0:
+            pad = max(soma.axes) * 1.5
+            cx, cy = soma.center[ix], soma.center[iy]
+        elif nucleus is not None:
+            pad = nucleus["peak_r"] * 8
+            cx, cy = nucleus["center"][ix], nucleus["center"][iy]
+        else:
+            pad = None
+
+        if pad is not None:
+            ax.set_xlim(cx - pad, cx + pad)
+            ax.set_ylim(cy - pad, cy + pad)
+
+        ax.set_aspect("equal")
+        ax.set_xlabel(xlab)
+        ax.set_ylabel(ylab)
+        ax.set_title(plane.upper())
+        ax.grid(True, alpha=0.15)
+
+    axes[0].legend(fontsize=7, loc="upper right", markerscale=5)
+    fig.tight_layout()
+    return fig, axes
+
+
+def diagnose_discarded(
+    mesh: trimesh.Trimesh,
+    components: MeshComponents,
+    *,
+    min_faces: int = 1000,
+    planes: tuple[str, str, str] = ("xy", "xz", "zy"),
+    figsize: tuple[float, float] = (12, 4),
+) -> tuple[Figure, list[list[Axes]]]:
+    """Row-per-component view of discarded fragments.
+
+    Each discarded component with at least *min_faces* faces gets one
+    row of three orthogonal projections.  All mesh vertices are shown
+    in light gray; the discarded fragment is highlighted in red.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Input mesh (after preprocessing).
+    components : MeshComponents
+        Result of :func:`~skeliner.pre.break_up_mesh`.
+    min_faces : int, default 1000
+        Only show fragments with at least this many faces.
+    planes : tuple of str
+        Three plane codes for the panels.
+    figsize : tuple
+        Figure size per row.
+
+    Returns
+    -------
+    fig, axes : Figure, list[list[Axes]]
+        One sub-list of axes per discarded fragment row.
+    """
+    DISCARD_COLOR = (0.9, 0.2, 0.2)
+
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+    face_centroids = verts[faces].mean(axis=1)
+
+    big = [(i, d) for i, d in enumerate(components.discarded) if len(d) >= min_faces]
+    if not big:
+        print(f"No discarded fragments \u2265 {min_faces} faces")
+        return None
+
+    n_rows = len(big)
+    n_cols = len(planes)
+    fig, ax_grid = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(figsize[0], figsize[1] * n_rows),
+        squeeze=False,
+    )
+
+    all_axes = []
+    for row, (idx, d_faces) in enumerate(big):
+        row_axes = []
+        fc = face_centroids[d_faces]
+        center = fc.mean(axis=0)
+        span = fc.max(axis=0) - fc.min(axis=0)
+        pad = max(span) * 0.6 + 500
+
+        for col, plane in enumerate(planes):
+            ax = ax_grid[row, col]
+            row_axes.append(ax)
+            ix, iy = _PLANE_AXES[plane]
+            xlab, ylab = _plane_axes(plane)
+
+            ax.scatter(
+                verts[:, ix],
+                verts[:, iy],
+                c="#dddddd",
+                s=0.3,
+                alpha=0.15,
+                rasterized=True,
+                zorder=1,
+            )
+            ax.scatter(
+                fc[:, ix],
+                fc[:, iy],
+                color=DISCARD_COLOR,
+                s=0.8,
+                alpha=0.6,
+                rasterized=True,
+                zorder=2,
+            )
+
+            ax.set_xlim(
+                center[ix] - pad,
+                center[ix] + pad,
+            )
+            ax.set_ylim(
+                center[iy] - pad,
+                center[iy] + pad,
+            )
+            ax.set_aspect("equal")
+            ax.set_xlabel(xlab)
+            if col == 0:
+                ax.set_ylabel(
+                    f"discarded {idx}\n({len(d_faces):,}f)\n\n{ylab}",
+                )
+            else:
+                ax.set_ylabel(ylab)
+            if row == 0:
+                ax.set_title(plane.upper())
+            ax.grid(True, alpha=0.15)
+
+        all_axes.append(row_axes)
+
+    fig.tight_layout()
+    return fig, all_axes

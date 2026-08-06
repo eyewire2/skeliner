@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from skeliner import post
 from skeliner.dataclass import Skeleton, Soma

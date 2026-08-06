@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "skeliner"
-version = "0.2.8"
+version = "0.3.0"
 description = "A lightweight neuromorphological mesh skeletonizer."
 authors = []
 requires-python = ">=3.10.0"
@@ -20,6 +20,12 @@ dependencies = [
     "notebook>=7.4.7",
     "jupyter>=1.1.1",
     "pytest>=8.3.5",
+    "python-multipart>=0.0.22",
+    "shapely>=2.1.2",
+    "flake8>=7.3.0",
+    "starlette>=0.52.1",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
 ]
 license = "GPL-3.0-or-later"
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -30,9 +36,25 @@ dev = [
     "pytest",
     "watermark>=2.5.0",
 ]
-3d = [
-    "vtk>=9.4.2",
-]
+
+
+[project.scripts]
+skeliner = "skeliner.__main__:main"
+
+[tool.ruff]
+line-length = 88
+# Notebooks are the user's own; no tool of ours rewrites them.
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+# ruff's defaults (E4/E7/E9, F) plus unused arguments — a parameter that
+# is never read is usually a leftover from a rename.  Framework-mandated
+# signatures keep theirs under an underscore, which ARG skips.
+select = ["E4", "E7", "E9", "F", "ARG"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
 
 [tool.setuptools]
 packages = {find = {}}

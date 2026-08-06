@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from . import post as _post_mod
 
 __all__ = [
+    "Discarded",
+    "MeshComponents",
+    "Neurites",
     "Soma",
     "Skeleton",
     "ContactSeeds",
@@ -49,6 +52,442 @@ class _SkeletonModuleView:
 
 
 # -----------------------------------------------------------------------------
+# MeshStats dataclass
+# -----------------------------------------------------------------------------
+@dataclass(slots=True)
+class MeshStats:
+    """Precomputed per-face mesh statistics.
+
+    Returned by :func:`~skeliner.pre.compute_mesh_stats`.  Lifecycle is
+    tied to the mesh, not to organelles — mesh-mutating operations call
+    :meth:`invalidate_topology` / :meth:`invalidate_geometry` to mark the
+    cached arrays as stale.  Persist standalone via
+    :func:`~skeliner.io.save_mesh_stats_npz`.
+
+    Parameters
+    ----------
+    outward_dots : (nFaces,) float
+        Per-face outward score (dot of face normal vs direction from
+        local center-of-mass).  Positive = surface, negative = internal.
+    face_comp : (nFaces,) int
+        Connected component label per face.
+    main_ci : int
+        Largest component ID.
+    """
+
+    outward_dots: np.ndarray | None = None
+    face_comp: np.ndarray | None = None
+    main_ci: int | None = None
+
+    @property
+    def main_face_mask(self) -> np.ndarray:
+        """Bool mask for faces in the main component."""
+        if self.face_comp is None or self.main_ci is None:
+            raise AttributeError(
+                "face_comp/main_ci invalidated; recompute via _face_edge_components"
+            )
+        return self.face_comp == self.main_ci
+
+    def invalidate_topology(self) -> None:
+        """Mark face_comp/main_ci as stale (after connectivity changes)."""
+        self.face_comp = None
+        self.main_ci = None
+
+    def invalidate_geometry(self) -> None:
+        """Mark outward_dots as stale (after vertex position changes)."""
+        self.outward_dots = None
+
+    def as_tuple(self) -> tuple:
+        """Backward-compatible tuple ``(outward_dots, face_comp, main_ci, main_face_mask)``."""
+        return (self.outward_dots, self.face_comp, self.main_ci, self.main_face_mask)
+
+
+# -----------------------------------------------------------------------------
+# Organelles dataclass
+# -----------------------------------------------------------------------------
+@dataclass(slots=True)
+class Organelles:
+    """Organelle masks.
+
+    Returned by :func:`~skeliner.pre.find_organelles` (alongside the
+    associated :class:`MeshStats`) and by
+    :func:`~skeliner.io.load_organelles_npz`.
+
+    Parameters
+    ----------
+    pocket : (nFaces,) bool
+        Pocket organelle faces.
+    isolated : (nFaces,) bool
+        Isolated (disconnected) organelle faces.
+    expanded : (nFaces,) bool
+        Faces added by :func:`~skeliner.pre.break_up_mesh`.
+    manual : (nFaces,) bool, optional
+        Faces assigned to the organelles by hand.  Kept apart from the
+        detected masks because those are all recomputed:
+        :func:`~skeliner.pre.break_up_mesh` rebuilds *expanded* from
+        scratch every run, so a manual assignment stored there would be
+        erased by the same re-derive meant to apply it.  Defaults to all
+        False.
+    """
+
+    pocket: np.ndarray
+    isolated: np.ndarray
+    expanded: np.ndarray
+    manual: np.ndarray = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.manual is None:
+            self.manual = np.zeros(len(self.pocket), dtype=bool)
+
+    @property
+    def mask(self) -> np.ndarray:
+        """Combined bool mask (pocket | isolated | expanded | manual)."""
+        return self.pocket | self.isolated | self.expanded | self.manual
+
+
+# -----------------------------------------------------------------------------
+# Neurites / Discarded / MeshComponents dataclasses
+# -----------------------------------------------------------------------------
+#: SWC structure codes, by the leading word of a neurite's name.  Only the
+#: standard ones are here; anything else resolves to 0 ("undefined"), which
+#: is what every neurite exports as today.
+SWC_TYPES: dict[str, int] = {
+    "soma": 1,
+    "axon": 2,
+    "dendrite": 3,
+    "basal": 3,
+    "apical": 4,
+    "custom": 5,
+    "unspecified": 6,
+    "glia": 7,
+}
+
+
+def swc_type_for(label: str) -> int:
+    """The SWC code a neurite name implies, or 0 if it implies none.
+
+    Reads the leading word, so ``"dendrite 2"`` and ``"apical tuft"`` work
+    and an index can distinguish two neurites of the same kind.  Only ever
+    a *default*: the code is stored explicitly beside the name, because a
+    name is free text and an export that silently retypes itself when
+    someone writes "Axon (?)" is worse than one that asks.
+    """
+    head = label.strip().lower().split()
+    return SWC_TYPES.get(head[0], 0) if head else 0
+
+
+@dataclass(slots=True)
+class Neurites:
+    """Neurite components from :func:`~skeliner.pre.break_up_mesh`.
+
+    Each element of *components* is a face-index array for one neurite,
+    sorted by descending face count.
+
+    *labels* and *swc_types* are the hand-given identity of each neurite —
+    ``"dendrite 1"``, ``"axon"`` — and the SWC structure code it exports
+    as.  Both are ``None`` on anything :func:`~skeliner.pre.break_up_mesh`
+    produces, which is the whole design: a name is pinned to a *position*
+    in this list, and a re-derive re-sorts by size, splits and merges, so
+    a name that survived one would end up on a different piece of surface.
+    Naming is therefore the last step, after the mesh is final; if you have
+    to break the mesh again, the names go and you name it again.
+    """
+
+    components: list[np.ndarray]
+    labels: list[str] | None = None
+    swc_types: list[int] | None = None
+
+    def __post_init__(self) -> None:
+        n = len(self.components)
+        if (self.labels is None) != (self.swc_types is None):
+            raise ValueError("labels and swc_types must be given together")
+        if self.labels is None:
+            return
+        if len(self.labels) != n or len(self.swc_types) != n:
+            raise ValueError(
+                f"labels and swc_types must have one entry per component "
+                f"(got {len(self.labels)}, {len(self.swc_types)} for {n})"
+            )
+        self.labels = [str(x) for x in self.labels]
+        self.swc_types = [int(x) for x in self.swc_types]
+
+    @property
+    def named(self) -> bool:
+        return self.labels is not None
+
+    def name(
+        self,
+        index: int,
+        label: str,
+        *,
+        swc_type: int | None = None,
+    ) -> None:
+        """Name one neurite, in place.
+
+        Naming any neurite names them all: the rest default to
+        ``neurite {i}`` with code 0, so ``labels`` never has holes and the
+        skeleton always has a code to stamp.
+
+        Parameters
+        ----------
+        index : int
+            Position in ``components``.
+        label : str
+            Free text, e.g. ``"dendrite 1"``.
+        swc_type : int, optional
+            The SWC code.  Defaults to :func:`swc_type_for` of *label*.
+        """
+        n = len(self.components)
+        if not -n <= index < n:
+            raise IndexError(f"neurite index {index} out of range for {n}")
+        if self.labels is None:
+            self.labels = [f"neurite {i}" for i in range(n)]
+            self.swc_types = [0] * n
+        self.labels[index] = str(label)
+        self.swc_types[index] = (
+            swc_type_for(label) if swc_type is None else int(swc_type)
+        )
+
+    def rename(self, names, *, swc_types=None) -> "Neurites":
+        """Name several neurites at once, in place.
+
+        Parameters
+        ----------
+        names : Mapping[int, str] or Sequence[str]
+            ``{0: "axon", 2: "dendrite 1"}`` names those two and leaves the
+            rest at their defaults; a sequence names them in order and must
+            have one entry per component.
+        swc_types : Mapping[int, int] or Sequence[int], optional
+            Explicit codes, in the same shape.  Anything not given is
+            defaulted from the name by :func:`swc_type_for`.
+
+        Returns
+        -------
+        Neurites
+            *self*, so this chains off ``components.neurites``.
+
+        Examples
+        --------
+        >>> components.neurites.rename(["dendrite 0", "dendrite 1", "axon"])
+        >>> components.neurites.rename({2: "axon"})
+        """
+        n = len(self.components)
+        if hasattr(names, "items"):
+            pairs = {int(k): str(v) for k, v in names.items()}
+        else:
+            names = list(names)
+            if len(names) != n:
+                raise ValueError(
+                    f"expected one name per component ({n}), got {len(names)}"
+                )
+            pairs = {i: str(v) for i, v in enumerate(names)}
+
+        if swc_types is None:
+            codes = {}
+        elif hasattr(swc_types, "items"):
+            codes = {int(k): int(v) for k, v in swc_types.items()}
+        else:
+            swc_types = list(swc_types)
+            if len(swc_types) != n:
+                raise ValueError(
+                    f"expected one code per component ({n}), got {len(swc_types)}"
+                )
+            codes = {i: int(v) for i, v in enumerate(swc_types)}
+
+        for i, label in pairs.items():
+            self.name(i, label, swc_type=codes.get(i))
+        return self
+
+    def index_of(self, label: str) -> int:
+        """The position of the neurite called *label*.
+
+        Raises ``KeyError`` if nothing is called that, or if two are —
+        names are free text and nothing enforces that they are unique, so
+        an ambiguous lookup is an error rather than a silent first match.
+        """
+        if self.labels is None:
+            raise KeyError("these neurites have no names")
+        hits = [i for i, x in enumerate(self.labels) if x == label]
+        if not hits:
+            raise KeyError(f"no neurite called {label!r}; have {self.labels}")
+        if len(hits) > 1:
+            raise KeyError(f"{len(hits)} neurites are called {label!r}: {hits}")
+        return hits[0]
+
+    def summary(self) -> str:
+        """One line per neurite: index, name, SWC code, face count."""
+        rows = []
+        for i, comp in enumerate(self.components):
+            if self.labels is None:
+                rows.append(f"  [{i}] {len(comp):>9,} f")
+            else:
+                rows.append(
+                    f"  [{i}] {len(comp):>9,} f  {self.labels[i]} "
+                    f"(SWC {self.swc_types[i]})"
+                )
+        head = f"{len(self.components)} neurites"
+        return "\n".join([head, *rows]) if rows else head
+
+    def clear_names(self) -> None:
+        """Drop every name, back to the unnamed state."""
+        self.labels = None
+        self.swc_types = None
+
+    def __len__(self) -> int:
+        return len(self.components)
+
+    def __iter__(self):
+        return iter(self.components)
+
+    def __getitem__(self, idx):
+        return self.components[idx]
+
+    def to_npz(self, path: str | Path) -> None:
+        from . import io
+
+        io.save_neurites_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "Neurites":
+        from . import io
+
+        return io.load_neurites_npz(path)
+
+
+@dataclass(slots=True)
+class Discarded:
+    """Small fragments below the auto threshold from :func:`~skeliner.pre.break_up_mesh`."""
+
+    components: list[np.ndarray]
+
+    def __len__(self) -> int:
+        return len(self.components)
+
+    def __iter__(self):
+        return iter(self.components)
+
+    def __getitem__(self, idx):
+        return self.components[idx]
+
+    def to_npz(self, path: str | Path) -> None:
+        from . import io
+
+        io.save_discarded_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "Discarded":
+        from . import io
+
+        return io.load_discarded_npz(path)
+
+
+@dataclass(slots=True)
+class MeshComponents:
+    """Result of :func:`~skeliner.pre.break_up_mesh`.
+
+    Holds the four classified pieces of a neuron mesh after breaking
+    at the soma and organelle boundaries.  Only *soma* and *organelles*
+    are stored inputs; *neurites* and *discarded* are derived from them
+    by :func:`~skeliner.pre.break_up_mesh`.
+    """
+
+    soma: "Soma | None"
+    organelles: Organelles
+    neurites: Neurites
+    discarded: Discarded
+
+    def rescue_discarded(self, indices: int | list[int]) -> None:
+        """Move discarded fragments to neurites, in place.
+
+        The neurite/discarded split is *derived* — see
+        :func:`~skeliner.pre.break_up_mesh` — so this move lasts only
+        until the next re-derive.  To make it stick, pass the fragments'
+        faces to that function as ``rescued=``.
+
+        Parameters
+        ----------
+        indices : int or list[int]
+            Index (or indices) into ``self.discarded`` to rescue.
+        """
+        if isinstance(indices, (int, np.integer)):
+            indices = [int(indices)]
+        # Pop from the back so the earlier indices stay valid, then
+        # append in the original order: `discarded` is sorted by
+        # descending size, and so is `neurites`.
+        moved = [
+            self.discarded.components.pop(i) for i in sorted(indices, reverse=True)
+        ]
+        for comp in reversed(moved):
+            self.neurites.components.append(comp)
+            # Appending leaves the existing positions alone, so the names
+            # already given still point at the same surface; the new
+            # arrival just needs one of its own.
+            if self.neurites.labels is not None:
+                self.neurites.labels.append(f"neurite {len(self.neurites.labels)}")
+                self.neurites.swc_types.append(0)
+
+    def to_npz(self, path: str | Path) -> None:
+        from . import io
+
+        io.save_components_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "MeshComponents":
+        from . import io
+
+        return io.load_components_npz(path)
+
+
+@dataclass(slots=True)
+class Reassignment:
+    """A previewed hand reassignment of faces between components.
+
+    Produced by :func:`~skeliner.pre.preview_reassignment` and applied by
+    :func:`~skeliner.pre.apply_reassignment`.  Holds the exact components
+    the edit produces, so what is shown before committing and what lands
+    afterwards are the same object rather than a forecast and a result.
+
+    Parameters
+    ----------
+    target : {'soma', 'organelle', 'remainder'}
+        Where the selected faces go.
+    selected : (n,) int
+        The faces picked by the user.
+    entering, leaving : (k,) int
+        Faces joining and leaving the arbor — the unnamed remainder that
+        neurites are derived from.  These are the *effective* face sets,
+        so they include the one-ring fringe the ≥2-of-3 soma rule drags
+        along with the selection.
+    components : MeshComponents
+        The mesh components after the edit.
+    effects : list of (str, str)
+        Per affected component, its label before the edit and what
+        becomes of it: ``grown``, ``shrunk``, ``split into N``,
+        ``merged with …``, ``dissolved …``, ``reclassified as …`` or
+        ``new``.  Empty when no component changed.  Pure renumbering is
+        not listed — every re-derive re-sorts by size, so ids shift
+        routinely and reporting that would drown the real changes.
+    """
+
+    target: str
+    selected: np.ndarray
+    entering: np.ndarray
+    leaving: np.ndarray
+    components: "MeshComponents"
+    effects: list[tuple[str, str]]
+
+    @property
+    def summary(self) -> str:
+        """One line: the size of the move and what it does to components."""
+        moved = f"{len(self.selected):,} selected → {self.target}"
+        net = f"-{len(self.leaving):,}/+{len(self.entering):,} arbor faces"
+        if not self.effects:
+            return f"{moved} ({net}, no component change)"
+        what = "; ".join(f"{name} {eff}" for name, eff in self.effects)
+        return f"{moved} ({net}): {what}"
+
+
+# -----------------------------------------------------------------------------
 # Soma dataclass
 # -----------------------------------------------------------------------------
 @dataclass(slots=True)
@@ -74,12 +513,24 @@ class Soma:
         axes expressed in world space.
     verts  : optional (N,) int64
         Mesh-vertex IDs belonging to the soma surface.
+    nucleus : optional dict
+        Nucleus void info from detection.  Keys:
+
+        - ``center`` — ``(3,)`` XYZ world coordinates of nucleus void.
+        - ``peak_r`` — ``float`` peak void radius (nm).
+        - ``z_range`` — ``(z_lo, z_hi)`` Z extent of the void.
+        - ``slices`` — ``(N, 4)`` per-Z data ``(z, cx, cy, void_r)``.
+
+        Compatible with the ``nucleus`` parameter of
+        :func:`~skeliner.plot.vis2d.z_section` and
+        :func:`~skeliner.plot.vis2d.diagnose_soma`.
     """
 
     center: np.ndarray  # (3,)
     axes: np.ndarray  # (3,)
     R: np.ndarray  # (3,3)
     verts: np.ndarray | None = None  # (N,)
+    nucleus: dict | None = None
 
     # ---- cached helper (not part of the public API) -----------------------
     _W: np.ndarray = field(init=False, repr=False)  # (3,3) affine map
@@ -115,6 +566,34 @@ class Soma:
         ξ = self._body_coords(x)
         ρ2 = (ξ**2).sum(axis=-1)
         return ρ2 <= inside_frac**2
+
+    def remap(self, vert_map: np.ndarray) -> "Soma":
+        """Return a copy with vertex indices translated by *vert_map*.
+
+        Parameters
+        ----------
+        vert_map : (nOldVerts,) int64
+            ``vert_map[old_idx]`` gives the new index, or ``-1`` if the
+            vertex was removed.
+
+        Returns
+        -------
+        Soma
+            New Soma with the same geometry but remapped verts.
+        """
+        if self.verts is None:
+            new_verts = None
+        else:
+            mapped = vert_map[self.verts]
+            new_verts = mapped[mapped >= 0]
+            if len(new_verts) == 0:
+                new_verts = None
+        return Soma(
+            center=self.center.copy(),
+            axes=self.axes.copy(),
+            R=self.R.copy(),
+            verts=new_verts,
+        )
 
     def distance(self, x, to="center"):
         """
@@ -244,6 +723,22 @@ class Soma:
         R = np.eye(3, dtype=np.float64)
         return cls(center, axes, R, verts=verts)
 
+    # ---------------------------------------------------------------------
+    # I/O
+    # ---------------------------------------------------------------------
+    def to_npz(self, path: str | Path) -> None:
+        """Write the soma to a compressed NumPy archive."""
+        from . import io
+
+        io.save_soma_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "Soma":
+        """Load a soma from a ``.npz`` archive."""
+        from . import io
+
+        return io.load_soma_npz(path)
+
 
 # -----------------------------------------------------------------------------
 # Skeleton dataclass
@@ -301,7 +796,9 @@ class Skeleton:
             self.ntype = np.asanyarray(self.ntype, dtype=np.int8).reshape(-1)
             if len(self.ntype) != N:
                 raise ValueError("ntype length must match number of nodes")
-            self.ntype[0] = -1 if not (self.ntype[0] in [-1, 1]) else self.ntype[0]  # root must be "root" or "soma"
+            self.ntype[0] = (
+                -1 if self.ntype[0] not in [-1, 1] else self.ntype[0]
+            )  # root must be "root" or "soma"
 
         if self.soma is not None:
             if self.soma.verts is not None and self.soma.verts.ndim != 1:
@@ -363,7 +860,7 @@ class Skeleton:
         """Write the skeleton to SWC."""
         from . import io
 
-        io.to_swc(
+        io.save_skeleton_swc(
             self,
             path,
             include_header=include_header,
@@ -376,13 +873,47 @@ class Skeleton:
         """Write the skeleton to a compressed NumPy archive."""
         from . import io
 
-        io.to_npz(self, path)
+        io.save_skeleton_npz(self, path)
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> "Skeleton":
+        """Load a skeleton from a ``.npz`` archive."""
+        from . import io
+
+        return io.load_skeleton_npz(path)
+
+    @classmethod
+    def from_swc(
+        cls,
+        path: str | Path,
+        *,
+        scale: float = 1.0,
+        keep_types: Iterable[int] | None = None,
+    ) -> "Skeleton":
+        """Load a skeleton from an SWC file."""
+        from . import io
+
+        return io.load_skeleton_swc(path, scale=scale, keep_types=keep_types)
 
     # ------------------------------------------------------------------
     # radius recommendation
     # ------------------------------------------------------------------
     def recommend_radius(self) -> Tuple[str, str, Dict[str, float]]:
-        """Heuristic choice among mean / trim / median with explanation."""
+        """Recommend the best available radius key.
+
+        Returns ``"centerline"`` when available (perpendicular
+        distance to the skeleton path from the second-pass
+        re-binning).  Falls back to the legacy heuristic among
+        mean / trim / median.
+        """
+        if "centerline" in self.radii:
+            return (
+                "centerline",
+                "Centerline radius from perpendicular re-binning.",
+                {},
+            )
+
+        # Legacy fallback
         mean = self.radii.get("mean")
         median = self.radii.get("median")
         if mean is None or median is None:

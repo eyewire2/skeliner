@@ -195,7 +195,9 @@ def test_reroot_clears_duplicate_roots_and_fills_gaps():
     nodes = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], float)
     edges = np.array([[0, 1], [1, 2]], np.int64)
     radii = {"median": np.array([1.0, 1.0, 1.0])}
-    ntype = np.array([-1, -1, 4], np.int8)  # duplicate roots, gap on index 1 after reroot
+    ntype = np.array(
+        [-1, -1, 4], np.int8
+    )  # duplicate roots, gap on index 1 after reroot
     skel = Skeleton(
         soma=Soma.from_sphere(nodes[0], 1.0, verts=None),
         nodes=nodes,
@@ -285,3 +287,386 @@ def test_detect_soma_remaps_ntype_once():
     assert np.allclose(s.nodes[0], nodes[1])  # new soma promoted
     assert s.ntype[0] == 1
     assert int(np.sum(s.ntype == 1)) == 1
+
+
+# ---------------------------------------------------------------------
+# reassign_verts — bin editing
+#
+# A node *is* the set of mesh vertices it owns: its position is their
+# centroid and every radius is an aggregate over them.  So the standard
+# these tests hold the primitive to is that afterwards the skeleton is in
+# exactly the state a from-scratch rebuild would have produced.  Anything
+# less is a skeleton that looks right and measures wrong.
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def bin_mesh():
+    return load_mesh(Path(__file__).parent / "data" / "60427.obj")
+
+
+@pytest.fixture
+def bin_skel(bin_mesh):
+    return skeletonize(bin_mesh, verbose=False)
+
+
+def _a_neighbour_of(skel, node):
+    e = np.asarray(skel.edges)
+    nbrs = np.unique(e[(e[:, 0] == node) | (e[:, 1] == node)])
+    nbrs = nbrs[(nbrs != node) & (nbrs != 0)]
+    assert nbrs.size, f"node {node} has no usable neighbour"
+    return int(nbrs[0])
+
+
+def _assert_matches_rebuild(skel, mesh, node):
+    """Position and radii must equal what `_make_nodes` would produce."""
+    from skeliner._core import _estimate_radius
+
+    owned = np.asarray(skel.node2verts[node], dtype=np.int64)
+    pts = np.asarray(mesh.vertices, dtype=np.float64)[owned]
+    centre = pts.mean(axis=0)
+    assert np.allclose(skel.nodes[node], centre, atol=1e-9)
+
+    d = np.linalg.norm(pts - centre, axis=1)
+    for key in skel.radii:
+        if key == "centerline":
+            continue
+        want = _estimate_radius(d, method=key, trim_fraction=0.05)
+        assert skel.radii[key][node] == pytest.approx(want, abs=1e-9), key
+
+
+def _first_editable_node(skel):
+    for n in range(1, len(skel.nodes)):
+        if len(skel.node2verts[n]) >= 4 and _a_neighbour_of(skel, n):
+            return n
+    pytest.skip("fixture has no bin big enough to split")
+
+
+def test_moving_part_of_a_bin_recomputes_both_ends(bin_skel, bin_mesh):
+    src = _first_editable_node(bin_skel)
+    dst = _a_neighbour_of(bin_skel, src)
+    half = np.asarray(bin_skel.node2verts[src])[: len(bin_skel.node2verts[src]) // 2]
+    n_before = len(bin_skel.nodes)
+
+    report = post.reassign_verts(bin_skel, half, dst, mesh=bin_mesh)
+
+    assert report["moved"] == len(half)
+    assert report["donors"] == [src]
+    assert report["dropped"] == []
+    assert len(bin_skel.nodes) == n_before, "nothing was emptied"
+    _assert_matches_rebuild(bin_skel, bin_mesh, src)
+    _assert_matches_rebuild(bin_skel, bin_mesh, dst)
+    assert dx.check_bins(bin_skel)
+
+
+def test_emptying_a_bin_drops_its_node(bin_skel, bin_mesh):
+    """A node owning nothing has no position and no radius; it is not a
+    node.  Moving a whole bin is therefore a merge."""
+    src = _first_editable_node(bin_skel)
+    dst = _a_neighbour_of(bin_skel, src)
+    everything = np.asarray(bin_skel.node2verts[src])
+    n_before = len(bin_skel.nodes)
+
+    report = post.reassign_verts(bin_skel, everything, dst, mesh=bin_mesh)
+
+    assert report["dropped"] == [src]
+    assert len(bin_skel.nodes) == n_before - 1
+    new_dst = report["old2new"][dst]
+    assert set(everything.tolist()) <= set(
+        np.asarray(bin_skel.node2verts[new_dst]).tolist()
+    )
+    _assert_matches_rebuild(bin_skel, bin_mesh, new_dst)
+    assert dx.check_bins(bin_skel)
+
+
+def test_centerline_is_recomputed_when_the_distances_were_kept(bin_mesh):
+    """Only the preprocessing track produces `centerline`, so this needs a
+    preproc skeleton — on a direct-track one the test would skip forever
+    and prove nothing."""
+    from skeliner._core import TRIM_FRACTION, _estimate_radius
+
+    from .test_core import _make_components
+
+    skel = skeletonize(
+        bin_mesh, components=_make_components(bin_mesh, with_soma=True), verbose=False
+    )
+    assert "centerline" in skel.radii and "cl_dist_vids" in skel.extra
+
+    src = _first_editable_node(skel)
+    dst = _a_neighbour_of(skel, src)
+    half = np.asarray(skel.node2verts[src])[: len(skel.node2verts[src]) // 2]
+    before = float(skel.radii["centerline"][dst])
+    post.reassign_verts(skel, half, dst, mesh=bin_mesh)
+
+    lut = np.zeros(len(bin_mesh.vertices))
+    lut[skel.extra["cl_dist_vids"]] = skel.extra["cl_dist_vals"]
+    want = _estimate_radius(
+        lut[np.asarray(skel.node2verts[dst])],
+        method="trim",
+        trim_fraction=TRIM_FRACTION,
+    )
+    assert skel.radii["centerline"][dst] == pytest.approx(want, abs=1e-9)
+    assert skel.radii["centerline"][dst] != before, "it must actually be rebuilt"
+
+
+def test_a_radius_that_cannot_be_recomputed_is_reported(bin_skel, bin_mesh):
+    """`calibrated` is measured by ray casting, not from the vertices.
+    Leaving it silently stale beside freshly recomputed keys is the one
+    outcome worse than either dropping or reporting it."""
+    src = _first_editable_node(bin_skel)
+    dst = _a_neighbour_of(bin_skel, src)
+    bin_skel.radii["calibrated"] = np.asarray(bin_skel.radii["median"]).copy()
+
+    report = post.reassign_verts(
+        bin_skel, np.asarray(bin_skel.node2verts[src])[:2], dst, mesh=bin_mesh
+    )
+    assert "calibrated" in report["stale_radii"]
+
+
+def test_moving_within_one_bin_is_a_no_op(bin_skel, bin_mesh):
+    src = _first_editable_node(bin_skel)
+    before = np.asarray(bin_skel.nodes[src]).copy()
+    report = post.reassign_verts(
+        bin_skel, np.asarray(bin_skel.node2verts[src])[:2], src, mesh=bin_mesh
+    )
+    assert report["moved"] == 0
+    assert np.array_equal(bin_skel.nodes[src], before)
+
+
+def test_edges_are_left_alone(bin_skel, bin_mesh):
+    """Re-deriving the graph from the surface would discard the edges that
+    have no surface support — soma stems and gap bridges — and can
+    disconnect the skeleton.  Re-derivation is opt-in, via rebuild_mst."""
+    src = _first_editable_node(bin_skel)
+    dst = _a_neighbour_of(bin_skel, src)
+    before = np.asarray(bin_skel.edges).copy()
+    half = np.asarray(bin_skel.node2verts[src])[: len(bin_skel.node2verts[src]) // 2]
+
+    post.reassign_verts(bin_skel, half, dst, mesh=bin_mesh)
+    assert np.array_equal(bin_skel.edges, before)
+
+
+@pytest.mark.parametrize(
+    "verts, to, expected",
+    [
+        ([1, 2], 0, "node 0 is the soma"),
+        ([1], 10**9, "out of range"),
+        ([], 1, "No vertices given"),
+    ],
+)
+def test_reassign_verts_guards(bin_skel, bin_mesh, verts, to, expected):
+    with pytest.raises(ValueError, match=expected):
+        post.reassign_verts(bin_skel, verts, to, mesh=bin_mesh)
+
+
+def test_unowned_surface_is_refused(bin_skel, bin_mesh):
+    """Unowned surface is soma, organelle or discarded — claiming it would
+    be a components decision made without re-deriving them."""
+    owned = np.fromiter(bin_skel.vert2node.keys(), np.int64, len(bin_skel.vert2node))
+    unowned = np.setdiff1d(np.arange(len(bin_mesh.vertices)), owned)
+    if unowned.size == 0:
+        pytest.skip("every vertex of this mesh belongs to a bin")
+    with pytest.raises(ValueError, match="belong to no bin"):
+        post.reassign_verts(bin_skel, unowned[:3], 1, mesh=bin_mesh)
+
+
+def test_prune_neurites_survives_a_centerline_radius(bin_mesh):
+    """Regression: `_prune_neurites` recomputes the soma's radii for every
+    key in the dict, and a preprocessing-track skeleton always carries
+    `centerline`, which was never an estimator name.  It raised `Unknown
+    radius estimator 'centerline'` on any cell where something merged."""
+    skel = skeletonize(bin_mesh, verbose=False)
+    skel.radii["centerline"] = np.asarray(skel.radii["median"]).copy()
+    n_before = len(skel.nodes)
+    cl_before = float(skel.radii["centerline"][0])
+
+    out = post.prune_neurites(
+        skel,
+        mesh_vertices=np.asarray(bin_mesh.vertices),
+        stem_extent_factor=1e9,
+        tip_extent_factor=1e9,
+        verbose=False,
+    )
+    assert len(out.nodes) < n_before, "the merge branch must actually run"
+    assert out.radii["centerline"][0] == cl_before, "left alone, not corrupted"
+    assert dx.check_bins(out)
+
+
+# ── merging must not cut the tree ────────────────────────────────────
+#
+# An emptied bin is absorbed, not deleted.  Deleting its edges instead
+# strands every neighbour it was holding on to, which is the failure the
+# whole manual-editing effort exists to avoid.
+
+
+def _n_components(skel):
+    """Connected components of the skeleton graph."""
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(skel.nodes)
+    e = np.asarray(skel.edges, dtype=np.int64)
+    adj = sp.coo_matrix(
+        (np.ones(len(e), dtype=np.int8), (e[:, 0], e[:, 1])), shape=(n, n)
+    )
+    return connected_components(adj, directed=False)[0]
+
+
+def _a_node_between_two_others(skel):
+    """A node with >=2 neighbours, so absorbing it could strand one."""
+    e = np.asarray(skel.edges)
+    for n in range(1, len(skel.nodes)):
+        nbrs = np.unique(e[(e[:, 0] == n) | (e[:, 1] == n)])
+        nbrs = nbrs[nbrs != n]
+        if nbrs.size >= 2 and 0 not in nbrs.tolist():
+            return int(n), [int(x) for x in nbrs]
+    pytest.skip("fixture has no interior node to absorb")
+
+
+def test_absorbing_a_node_contracts_its_edges_instead_of_dropping_them(
+    bin_skel, bin_mesh
+):
+    src, nbrs = _a_node_between_two_others(bin_skel)
+    dst = nbrs[0]
+    others = [n for n in nbrs if n != dst]
+
+    before = _n_components(bin_skel)
+    out = post.reassign_verts(bin_skel, bin_skel.node2verts[src], dst, mesh=bin_mesh)
+    assert out["dropped"] == [src], "the emptied bin should have been dropped"
+
+    old2new = out["old2new"]
+    new_dst = int(old2new[dst])
+    e = np.asarray(bin_skel.edges)
+    survivors = set(np.unique(e[(e[:, 0] == new_dst) | (e[:, 1] == new_dst)]).tolist())
+    for o in others:
+        assert int(old2new[o]) in survivors, (
+            f"node {o} lost its link when {src} was absorbed into {dst}"
+        )
+    assert _n_components(bin_skel) == before, "the merge split the skeleton"
+
+
+def test_absorbing_a_leaf_leaves_no_self_loop(bin_skel, bin_mesh):
+    e = np.asarray(bin_skel.edges)
+    leaf = None
+    for n in range(1, len(bin_skel.nodes)):
+        nbrs = np.unique(e[(e[:, 0] == n) | (e[:, 1] == n)])
+        nbrs = nbrs[nbrs != n]
+        if nbrs.size == 1 and int(nbrs[0]) != 0:
+            leaf, host = int(n), int(nbrs[0])
+            break
+    if leaf is None:
+        pytest.skip("fixture has no leaf to absorb")
+
+    post.reassign_verts(bin_skel, bin_skel.node2verts[leaf], host, mesh=bin_mesh)
+    e2 = np.asarray(bin_skel.edges)
+    assert not (e2[:, 0] == e2[:, 1]).any(), "contraction left a self-loop"
+    assert len(np.unique(e2, axis=0)) == len(e2), "contraction left a duplicate edge"
+
+
+# ── split_node ───────────────────────────────────────────────────────
+#
+# The one bin verb whose destination does not exist yet.  The partition
+# is drawn, so nothing is invented about vertices; the interesting part
+# is what it does *not* do, which is guess the new node's other edges.
+
+
+def test_a_split_recomputes_both_halves_from_their_own_vertices(bin_skel, bin_mesh):
+    """A node *is* the vertices it owns, on both sides of the cut."""
+    node = 3
+    owned = np.asarray(bin_skel.node2verts[node])
+    assert len(owned) >= 4, "fixture bin is too small to split"
+
+    out = post.split_node(bin_skel, node, owned[: len(owned) // 2], mesh=bin_mesh)
+    new = out["node"]
+
+    for nid in (node, new):
+        pts = np.asarray(bin_mesh.vertices)[np.asarray(bin_skel.node2verts[nid])]
+        assert np.allclose(bin_skel.nodes[nid], pts.mean(axis=0))
+        for key, arr in bin_skel.radii.items():
+            if key in ("centerline", "calibrated"):
+                continue
+            assert np.isfinite(arr[nid])
+    assert dx.check_bins(bin_skel), "the split broke the partition"
+
+
+def test_a_split_appends_and_renumbers_nothing(bin_skel, bin_mesh):
+    """Unlike a merge, which drops a bin and shifts every id after it."""
+    before = bin_skel.nodes.copy()
+    owned = np.asarray(bin_skel.node2verts[3])
+
+    out = post.split_node(bin_skel, 3, owned[:2], mesh=bin_mesh)
+
+    assert out["node"] == len(before), "the new node is appended"
+    assert len(bin_skel.nodes) == len(before) + 1
+    untouched = [i for i in range(len(before)) if i != 3]
+    assert np.allclose(bin_skel.nodes[untouched], before[untouched])
+
+
+def test_a_split_joins_the_new_node_to_its_parent_and_nothing_else(bin_skel, bin_mesh):
+    """Surface adjacency does not imply tree adjacency — measured on a real
+    cell, where bins that touch are routinely far apart in the tree — so the
+    other edges are the user's to make, with `dx.edge_support` to guide them."""
+    node, nbrs = _a_node_between_two_others(bin_skel)
+    owned = np.asarray(bin_skel.node2verts[node])
+    if len(owned) < 4:
+        pytest.skip("fixture bin is too small to split")
+    before = _n_components(bin_skel)
+
+    out = post.split_node(bin_skel, node, owned[: len(owned) // 2], mesh=bin_mesh)
+    new = out["node"]
+
+    e = np.asarray(bin_skel.edges)
+    touching = set(np.unique(e[(e[:, 0] == new) | (e[:, 1] == new)]).tolist()) - {new}
+    assert touching == {node}, f"the split invented edges to {touching - {node}}"
+    assert _n_components(bin_skel) == before, "the split left a piece adrift"
+    assert dx.check_acyclicity(bin_skel), "the split closed a cycle"
+
+
+def test_a_split_reports_whether_the_halves_share_surface(bin_skel, bin_mesh):
+    """The one edge a split does make can still have nothing behind it, when
+    the bin was already in two patches."""
+    owned = np.asarray(bin_skel.node2verts[3])
+    out = post.split_node(bin_skel, 3, owned[: len(owned) // 2], mesh=bin_mesh)
+    assert out["supported"] is True
+
+    assert post._bins_touch(bin_mesh, owned[:1], owned[:1]) is False, (
+        "a vertex set does not touch itself"
+    )
+
+
+def test_a_split_ignores_vertices_the_bin_does_not_own(bin_skel, bin_mesh):
+    """The >=2-of-3 face rule means a surface selection routinely catches a
+    neighbour's vertex; that is not grounds for failing the edit."""
+    owned = np.asarray(bin_skel.node2verts[3])
+    other = np.asarray(bin_skel.node2verts[5])
+    out = post.split_node(
+        bin_skel, 3, np.concatenate([owned[:2], other[:3]]), mesh=bin_mesh
+    )
+    assert out["moved"] == 2
+    assert out["ignored"] == 3
+    assert len(bin_skel.node2verts[5]) == len(other), "a non-owner lost vertices"
+
+
+@pytest.mark.parametrize(
+    "node, verts, expected",
+    [
+        (0, [1, 2], "node 0 is the soma"),
+        (10**6, [1, 2], "out of range"),
+        (3, [], "No vertices given"),
+    ],
+)
+def test_split_rejects_bad_input(bin_skel, bin_mesh, node, verts, expected):
+    with pytest.raises(ValueError, match=expected):
+        post.split_node(bin_skel, node, verts, mesh=bin_mesh)
+
+
+def test_splitting_off_the_whole_bin_is_refused(bin_skel, bin_mesh):
+    """That renames a node rather than splitting it, and would leave the
+    parent owning nothing — which is not a node."""
+    with pytest.raises(ValueError, match="leave something behind"):
+        post.split_node(bin_skel, 3, bin_skel.node2verts[3], mesh=bin_mesh)
+
+
+def test_splitting_vertices_from_elsewhere_only_is_refused(bin_skel, bin_mesh):
+    with pytest.raises(ValueError, match="belong to node 3"):
+        post.split_node(bin_skel, 3, bin_skel.node2verts[5], mesh=bin_mesh)

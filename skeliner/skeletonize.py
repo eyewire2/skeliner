@@ -1,7 +1,8 @@
 import time
-from contextlib import contextmanager
+from collections import deque
+from contextlib import contextmanager, nullcontext
 from importlib import metadata as _metadata
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import igraph as ig
 import numpy as np
@@ -9,6 +10,7 @@ import trimesh
 from scipy.spatial import KDTree
 
 from ._core import (
+    TRIM_FRACTION,
     _bridge_gaps,
     _build_mst,
     _detect_soma,
@@ -17,7 +19,7 @@ from ._core import (
     _prune_neurites,
 )
 from ._state import rebuild_vert2node
-from .dataclass import Skeleton, Soma
+from .dataclass import MeshComponents, Skeleton, Soma
 
 _SKELINER_VERSION = _metadata.version("skeliner")
 
@@ -25,6 +27,86 @@ _SKELINER_VERSION = _metadata.version("skeliner")
 __all__ = [
     "skeletonize",
 ]
+
+
+def _jsonable(v):
+    """Coerce a parameter value to something ``json.dumps`` accepts.
+
+    ``to_swc`` writes ``meta`` as a single ``# meta {...}`` line with a plain
+    ``json.dumps`` and no fallback encoder, so a numpy scalar or array left in
+    here would raise on *export* — long after the run that recorded it.
+    ``soma_seed_point`` is the reachable case.
+    """
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (np.integer, np.floating, np.bool_)):
+        return v.item()
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
+def _skel_meta(track: str, unit: str, id, params: dict) -> dict:
+    """Provenance for one skeletonize run.
+
+    *track* and *params* are recorded by the assembler that ran, not by the
+    dispatcher, so what lands is what actually took effect.  The preprocessing
+    track ignores most of :func:`skeletonize`'s arguments — soma detection,
+    gap bridging and pruning all happen upstream — and copying them in would
+    describe a run that did not happen.
+
+    Without this a saved skeleton cannot say which track produced it, and the
+    two tracks disagree about the same cell by construction.  It is written
+    into every export, so it cannot be added retroactively.
+    """
+    return {
+        "skeliner_version": _SKELINER_VERSION,
+        "skeletonized_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "unit": unit,
+        "id": _jsonable(id),
+        "track": track,
+        "params": {k: _jsonable(v) for k, v in params.items()},
+    }
+
+
+# -----------------------------------------------------------------------------
+#  Verbose timing helper
+# -----------------------------------------------------------------------------
+
+
+@contextmanager
+def _timed(label: str, *, verbose: bool):
+    """Context manager printing  ``↳  label … N.NN s``.
+
+    Use the yielded ``log()`` callback for sub-messages::
+
+        with _timed("stage", verbose=True) as log:
+            log("detail 1")
+    """
+    if not verbose:
+        yield lambda *_: None
+        return
+
+    PAD = 47
+    print(f" {label:<{PAD}} …", end="", flush=True)
+    t0 = time.perf_counter()
+    _msgs: list[str] = []
+
+    def log(msg: str) -> None:
+        _msgs.append(str(msg))
+
+    try:
+        yield log
+    finally:
+        dt = time.perf_counter() - t0
+        print(f" {dt:.2f} s")
+        for m in _msgs:
+            print(f"      └─ {m}")
+
+
+def _no_stage(_label: str):
+    """Report nothing — the default when a caller wants no progress."""
+    return nullcontext()
 
 
 # -----------------------------------------------------------------------------
@@ -48,23 +130,48 @@ def _surface_graph(mesh: trimesh.Trimesh) -> ig.Graph:
 def _dist_vec_for_component(
     gsurf: ig.Graph,
     verts: np.ndarray,  # 1-D int64 array of vertex IDs (one component)
-    seed_vid: int,  # mesh-vertex ID, must be in *verts*
+    seed_vid: int | np.ndarray,  # single or multiple mesh-vertex IDs
 ) -> np.ndarray:
     """
-    Return the distance vector *d[verts[i]]* from *seed_vid* to every
-    vertex in this component, **without touching the rest of the mesh**.
+    Return the distance vector *d[verts[i]]* from *seed_vid* to
+    every vertex in this component, **without touching the rest of
+    the mesh**.
+
+    When *seed_vid* is an array of vertex IDs (multi-seed), the
+    returned distance is the minimum over all seeds (multi-source
+    shortest path).
     """
     # Build a dedicated sub-graph (much smaller than gsurf)
     sub = gsurf.induced_subgraph(verts, implementation="create_from_scratch")
 
-    # Map the seed’s mesh-vertex ID → its local index in *sub*
-    root_idx = int(np.where(verts == seed_vid)[0][0])
+    seed_arr = np.atleast_1d(np.asarray(seed_vid, dtype=np.int64))
 
-    # igraph returns shape (1, |verts|); squeeze to 1-D
-    return sub.distances(
-        source=[root_idx],
-        weights="weight",
-    )[0]
+    # Map seed mesh-vertex IDs → local indices in *sub*.  Order does not
+    # matter: either there is one seed, or they are all joined to a
+    # single virtual vertex below.
+    root_idxs = np.flatnonzero(np.isin(verts, seed_arr)).tolist()
+    if not root_idxs:
+        raise ValueError("no seed vertex lies in this component")
+
+    if len(root_idxs) > 1:
+        # Join every seed to one virtual vertex by a zero-weight edge:
+        # a single Dijkstra from it is the min over all seeds, exactly.
+        # Passing the seeds to igraph as `source=` instead runs one
+        # Dijkstra per seed and builds a (len(seeds), |verts|) matrix
+        # only to take its minimum — seeding a 740k-vertex neurite from
+        # a 78-vertex soma ring costs 11.4 s and 0.46 GB that way,
+        # against 0.3 s here for the same distances.
+        sub.add_vertex()
+        virtual = sub.vcount() - 1
+        sub.add_edges(
+            [(virtual, i) for i in root_idxs],
+            attributes={"weight": [0.0] * len(root_idxs)},
+        )
+        root_idxs = [virtual]
+
+    dist = np.asarray(sub.distances(source=root_idxs, weights="weight")[0])
+    # drop the virtual vertex, which igraph appended last
+    return dist[: len(verts)]
 
 
 def _geodesic_bins(dist_dict: Dict[int, float], step: float) -> List[List[int]]:
@@ -150,142 +257,391 @@ def _split_comp_if_elongated(
             yield comp_idx[m]
 
 
-def _bin_geodesic_shells(
-    mesh: trimesh.Trimesh,
+def _neighbour_groups(
+    comp_verts: np.ndarray,
     gsurf: ig.Graph,
+    owner_of: dict[int, tuple[int, int]],
+    own: tuple[int, int],
+) -> list[list[int]]:
+    """Group the vertices of other bins that touch this one, by tube.
+
+    Like :func:`_is_ring`, but returns the groups instead of stopping at
+    two, and asks which *bin* a neighbour belongs to rather than whether
+    it is in the component's vertex set.  A cross-section has exactly two
+    groups, one on each side; more than two means the bin touches several
+    tubes at once.
+
+    Touching one bin along two separate patches is still one tube, so
+    patches are merged when they share a bin.  Without that, a bin that
+    merely dips into a neighbour twice looks like a branch point and gets
+    cut into slivers.
+    """
+    ext: set[int] = set()
+    for vid in comp_verts:
+        for e in gsurf.incident(int(vid)):
+            src, tgt = gsurf.es[e].source, gsurf.es[e].target
+            nbr = tgt if src == int(vid) else src
+            key = owner_of.get(nbr)
+            if key is not None and key != own:
+                ext.add(nbr)
+
+    patches: list[list[int]] = []
+    seen: set[int] = set()
+    for start in sorted(ext):
+        if start in seen:
+            continue
+        queue = deque([start])
+        seen.add(start)
+        grp = [start]
+        while queue:
+            u = queue.popleft()
+            for e in gsurf.incident(u):
+                src, tgt = gsurf.es[e].source, gsurf.es[e].target
+                nbr = tgt if src == u else src
+                if nbr in ext and nbr not in seen:
+                    seen.add(nbr)
+                    queue.append(nbr)
+                    grp.append(nbr)
+        patches.append(grp)
+
+    # union patches that touch the same neighbouring bin
+    parent = list(range(len(patches)))
+
+    def _find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first_seen: dict[tuple[int, int], int] = {}
+    for pi, grp in enumerate(patches):
+        for v in grp:
+            key = owner_of[v]
+            other = first_seen.setdefault(key, pi)
+            ra, rb = _find(pi), _find(other)
+            if ra != rb:
+                parent[rb] = ra
+
+    merged: dict[int, list[int]] = {}
+    for pi, grp in enumerate(patches):
+        merged.setdefault(_find(pi), []).extend(grp)
+    return [merged[k] for k in sorted(merged)]
+
+
+def _split_branch_band(
+    comp: np.ndarray,
+    groups: list[list[int]],
+    gsurf: ig.Graph,
+) -> list[np.ndarray]:
+    """Cut a band that spans a branch point into one piece per neighbour.
+
+    Grows a region from each neighbouring group simultaneously, so every
+    vertex joins the tube it is nearest to *across the surface*.  Each
+    piece then wraps a single tube and its centroid lands inside that
+    tube.  Vertices no group reaches stay with the largest piece.
+    """
+    vset = set(int(v) for v in comp)
+    label: dict[int, int] = {}
+    queue: deque[int] = deque()
+    for gi, grp in enumerate(groups):
+        for u in sorted(grp):
+            for e in gsurf.incident(u):
+                src, tgt = gsurf.es[e].source, gsurf.es[e].target
+                nbr = tgt if src == u else src
+                if nbr in vset and nbr not in label:
+                    label[nbr] = gi
+                    queue.append(nbr)
+
+    while queue:
+        u = queue.popleft()
+        gi = label[u]
+        for e in gsurf.incident(u):
+            src, tgt = gsurf.es[e].source, gsurf.es[e].target
+            nbr = tgt if src == u else src
+            if nbr in vset and nbr not in label:
+                label[nbr] = gi
+                queue.append(nbr)
+
+    parts: list[list[int]] = [[] for _ in groups]
+    orphans: list[int] = []
+    for v in comp:
+        gi = label.get(int(v))
+        if gi is None:
+            orphans.append(int(v))
+        else:
+            parts[gi].append(int(v))
+
+    out = [np.asarray(p, dtype=np.int64) for p in parts if p]
+    if not out:
+        return [np.asarray(comp, dtype=np.int64)]
+    if orphans:
+        big = max(range(len(out)), key=lambda i: len(out[i]))
+        out[big] = np.concatenate([out[big], np.asarray(orphans, dtype=np.int64)])
+    return out
+
+
+def _is_ring(
+    comp_verts: np.ndarray,
+    gsurf: ig.Graph,
+    neurite_set: set[int],
+) -> bool:
+    """Test whether a vertex component is a topological ring.
+
+    A ring wraps around the tube so that removing it separates the
+    surface into two sides.  Equivalently, the external neighbors
+    (neurite vertices adjacent to the component but not in it)
+    form 2+ disconnected groups.  A non-ring patch has all its
+    external neighbors in one connected group.
+    """
+    vset = set(int(v) for v in comp_verts)
+
+    # Collect external neighbors
+    ext: set[int] = set()
+    for vid in comp_verts:
+        for e in gsurf.incident(int(vid)):
+            src, tgt = gsurf.es[e].source, gsurf.es[e].target
+            nbr = tgt if src == int(vid) else src
+            if nbr not in vset and nbr in neurite_set:
+                ext.add(nbr)
+
+    if len(ext) < 2:
+        return False
+
+    # Count connected components among external neighbors
+    visited: set[int] = set()
+    n_groups = 0
+    for start in ext:
+        if start in visited:
+            continue
+        n_groups += 1
+        if n_groups >= 2:
+            return True
+        queue = deque([start])
+        while queue:
+            u = queue.popleft()
+            if u in visited:
+                continue
+            visited.add(u)
+            for e in gsurf.incident(u):
+                src, tgt = gsurf.es[e].source, gsurf.es[e].target
+                nbr = tgt if src == u else src
+                if nbr in ext and nbr not in visited:
+                    queue.append(nbr)
+
+    return n_groups >= 2
+
+
+def _bin_one_component(
+    gsurf: ig.Graph,
+    verts: np.ndarray,
+    seed_vid: int | np.ndarray,
     *,
-    soma: Soma,
+    mesh_vertices: np.ndarray,
+    mean_edge_len: float,
+    soma_verts: set[int] | None = None,
     step_size: float | None = None,
     target_shell_count: int = 500,
     min_shell_vertices: int = 6,
     max_shell_width_factor: float = 50.0,
-    # -- split elongated shells (optional) ------------------------
     split_elongated_shells: bool = True,
-    split_aspect_thr: float = 3.0,  # λ1 / λ2
-    split_min_shell_vertices: int = 50,  # minimum size of a cluster to split
-    split_max_vertices_per_slice: int | None = None,  # max size of a slice
+    split_aspect_thr: float = 3.0,
+    split_min_shell_vertices: int = 50,
+    split_max_vertices_per_slice: int | None = None,
 ) -> List[List[np.ndarray]]:
-    """
-    Cluster every connected surface patch into sets of *geodesic shells*.
-
-    The function reproduces the logic that used to live inline in
-    :pyfunc:`skeletonize`, but is now reusable and unit-testable.
+    """Bin one connected surface component into geodesic shells.
 
     Parameters
     ----------
-    mesh
-        The watertight neuron mesh.
     gsurf
-        Undirected triangle-adjacency graph of the mesh (from
-        :pyfunc:`_surface_graph`).
-    c_soma
-        3-vector of the soma centroid **chosen earlier**.
-        (Its exact origin depends on `detect_soma`.)
+        Full surface graph of the mesh.
+    verts
+        1-D int64 array of vertex IDs in this component.
+    seed_vid
+        Mesh-vertex ID(s) to start the geodesic from.  A single
+        ``int`` or a 1-D array for multi-source seeding.
+    mesh_vertices
+        ``mesh.vertices`` as ``(N, 3) float64``.
+    mean_edge_len
+        Mean mesh-edge length (for step-size fallback).
     soma_verts
-        Set of mesh-vertex IDs that belong to the detected soma patch (may be a
-        singleton `{seed_vid}` if soma detection is deferred or disabled).
-    target_shell_count
-        Requested number of shells per connected component.  The actual width
-        is adapted to mesh resolution.
-    min_shell_vertices
-        Discard clusters smaller than this size; they usually represent noise.
-    max_shell_width_factor
-        Upper limit for the shell width expressed as a multiple of the mean
-        mesh-edge length.  Prevents *very* sparse meshes from producing a
-        single giant shell.
+        Vertex IDs to exclude from shells.  ``None`` or
+        empty set means no exclusion.
+
+    Returns
+    -------
+    List[List[np.ndarray]]
+        Shells for this component — same structure as the
+        return of :func:`_bin_geodesic_shells`.
+    """
+    v = mesh_vertices
+    e_m = mean_edge_len
+    exclude = soma_verts or set()
+    vert_set = set(int(x) for x in verts)
+
+    # -- geodesic distance from seed to every vertex in component --
+    dist_vec = _dist_vec_for_component(gsurf, verts, seed_vid)
+    dist_sub = {int(vid): float(d) for vid, d in zip(verts, dist_vec)}
+    if not dist_sub:
+        return []
+
+    # -- shell width ---------------------------------------------------
+    if step_size is None:
+        arc_len = max(dist_sub.values())
+        step = max(e_m * 2.0, arc_len / target_shell_count)
+    else:
+        step = float(step_size)
+
+    # increase step until at least one non-empty shell
+    shells: List[List[int]] = []
+    while not any(shells) and step < e_m * max_shell_width_factor:
+        shells = _geodesic_bins(dist_sub, step)
+        step *= 1.5
+
+    # -- split each shell into connected sub-clusters ------------------
+    component_shells: List[List[np.ndarray]] = []
+    pending_frags: List[np.ndarray] = []
+    for shell_verts in shells:
+        inner = [vid for vid in shell_verts if vid not in exclude]
+        if not inner:
+            continue
+
+        sub = gsurf.induced_subgraph(inner)
+        comps = []
+        for comp in sub.components():
+            if len(comp) < min_shell_vertices:
+                continue
+            comp_idx = np.fromiter((inner[i] for i in comp), dtype=np.int64)
+            if split_elongated_shells and len(comp) < 1500:  # hard-coded, might be soma
+                for part in _split_comp_if_elongated(
+                    comp_idx,
+                    v,
+                    aspect_thr=split_aspect_thr,
+                    min_shell_vertices=(split_min_shell_vertices),
+                    max_vertices_per_slice=(split_max_vertices_per_slice),
+                ):
+                    comps.append(part)
+            else:
+                comps.append(comp_idx)
+
+        # -- separate rings from non-ring fragments --
+        rings = []
+        frags = []
+        for c in comps:
+            if _is_ring(c, gsurf, vert_set):
+                rings.append(c)
+            else:
+                frags.append(c)
+        if frags:
+            pending_frags.extend(frags)
+        comps = rings
+
+        if comps:
+            component_shells.append(comps)
+
+    # -- merge pending fragments via mesh-edge connectivity --
+    if pending_frags:
+        # Build vertex → (band, comp) lookup for all rings
+        vid_to_ring: dict[int, tuple[int, int]] = {}
+        for bi, band in enumerate(component_shells):
+            for ci, ring in enumerate(band):
+                for vid in ring:
+                    vid_to_ring[int(vid)] = (bi, ci)
+
+        for frag in pending_frags:
+            # Count mesh-edge connections to each ring
+            votes: dict[tuple[int, int], int] = {}
+            for vid in frag:
+                for e in gsurf.incident(int(vid)):
+                    nbr = int(
+                        gsurf.es[e].target
+                        if gsurf.es[e].source == int(vid)
+                        else gsurf.es[e].source
+                    )
+                    key = vid_to_ring.get(nbr)
+                    if key is not None:
+                        votes[key] = votes.get(key, 0) + 1
+            if votes:
+                best = max(votes, key=votes.get)
+                bi, ci = best
+                component_shells[bi][ci] = np.concatenate(
+                    [component_shells[bi][ci], frag]
+                )
+                # Update lookup for merged verts
+                for vid in frag:
+                    vid_to_ring[int(vid)] = best
+
+    return component_shells
+
+
+def _bin_geodesic_shells(
+    mesh: trimesh.Trimesh,
+    gsurf: ig.Graph,
+    *,
+    seed_vid: int,
+    soma_verts: set[int] | None = None,
+    step_size: float | None = None,
+    target_shell_count: int = 500,
+    min_shell_vertices: int = 6,
+    max_shell_width_factor: float = 50.0,
+    split_elongated_shells: bool = True,
+    split_aspect_thr: float = 3.0,
+    split_min_shell_vertices: int = 50,
+    split_max_vertices_per_slice: int | None = None,
+) -> List[List[np.ndarray]]:
+    """Cluster every connected surface component into geodesic
+    shells.
+
+    Iterates over connected components of *gsurf*, picks a
+    seed per component, and delegates to
+    :func:`_bin_one_component`.
+
+    Parameters
+    ----------
+    seed_vid
+        Mesh-vertex ID used as the geodesic origin in the
+        component that contains it.  Other components fall
+        back to a deterministic pseudo-random vertex.
+    soma_verts
+        Vertex IDs to exclude from shells (e.g. soma surface
+        vertices).  ``None`` means no exclusion.
 
     Returns
     -------
     List[List[np.ndarray]]
         Outer list = shells ordered by growing distance;
-        inner list = connected vertex clusters inside that shell;
-        each cluster is a 1-D ``int64`` array of mesh-vertex IDs.
-
-        The structure is exactly what stage 2 of *skeletonize()* expects.
+        inner list = connected vertex clusters inside that
+        shell; each cluster is a 1-D ``int64`` array.
     """
     v = mesh.vertices.view(np.ndarray)
-    e_m = float(mesh.edges_unique_length.mean())  # mean mesh-edge length
+    e_m = float(mesh.edges_unique_length.mean())
 
-    c_soma = soma.center
-    soma_verts = set() if soma.verts is None else set(map(int, soma.verts))
-    soma_vids = np.fromiter(soma_verts, dtype=np.int64)
-
-    # ------------------------------------------------------------------
-    # build a vertex list for every connected surface patch
-    # ------------------------------------------------------------------
     comp_vertices = [np.asarray(c, dtype=np.int64) for c in gsurf.components()]
     all_shells: List[List[np.ndarray]] = []
 
     for cid, verts in enumerate(comp_vertices):
-        # --------------------------------------------------------------
-        # choose one seed *per component* – deterministic but cheap
-        # --------------------------------------------------------------
-        if np.intersect1d(verts, soma_vids).size:
-            # component that contains (part of) the soma ➜
-            # pick the *furthest* soma vertex from the centroid to avoid
-            # degeneracy when the soma spans many shells
-            seed_vid = int(
-                soma_vids[np.argmax(np.linalg.norm(v[soma_vids] - c_soma, axis=1))]
-            )
+        # one seed per component
+        if np.any(verts == seed_vid):
+            comp_seed = seed_vid
         else:
-            # foreign island ➜ pick a pseudo-random, yet deterministic vertex
-            seed_vid = int(verts[hash(cid) % len(verts)])
+            comp_seed = int(verts[hash(cid) % len(verts)])
 
-        # --------------------------------------------------------------
-        # geodesic distance of *all* vertices in this component
-        # --------------------------------------------------------------
-        dist_vec = _dist_vec_for_component(gsurf, verts, seed_vid)
-        dist_sub = {int(vid): float(d) for vid, d in zip(verts, dist_vec)}
-
-        if not dist_sub:
-            continue
-
-        # shell width: max(edge × 2, arc_len / target_shell_count)
-        if step_size is None:
-            arc_len = max(dist_sub.values())
-            step = max(e_m * 2.0, arc_len / target_shell_count)
-        else:
-            step = float(step_size)
-
-        # ------------------------------------------------------------------
-        # increase the step until we get at least one non-empty shell
-        # (avoids pathological meshes with *too* fine resolution)
-        # ------------------------------------------------------------------
-        shells: List[List[int]] = []
-        while not any(shells) and step < e_m * max_shell_width_factor:
-            shells = _geodesic_bins(dist_sub, step)
-            step *= 1.5
-
-        # --------------------------------------------------------------
-        # for every shell: split it into connected sub-clusters
-        # --------------------------------------------------------------
-        for shell_verts in shells:
-            # exclude explicit soma vertices to keep the center clean
-            inner = [vid for vid in shell_verts if vid not in soma_verts]
-            if not inner:
-                continue
-
-            sub = gsurf.induced_subgraph(inner)
-            comps = []
-            for comp in sub.components():
-                if len(comp) < min_shell_vertices:
-                    continue  # too small ➜ ignore
-                comp_idx = np.fromiter((inner[i] for i in comp), dtype=np.int64)
-                if (
-                    split_elongated_shells and len(comp) < 1500
-                ):  # hard-coded for now, if too large, might be a soma
-                    for part in _split_comp_if_elongated(
-                        comp_idx,
-                        v,
-                        aspect_thr=split_aspect_thr,
-                        min_shell_vertices=split_min_shell_vertices,
-                        max_vertices_per_slice=split_max_vertices_per_slice,
-                    ):
-                        comps.append(part)
-                else:
-                    comps.append(comp_idx)
-
-            all_shells.append(comps)
+        shells = _bin_one_component(
+            gsurf,
+            verts,
+            comp_seed,
+            mesh_vertices=v,
+            mean_edge_len=e_m,
+            soma_verts=soma_verts,
+            step_size=step_size,
+            target_shell_count=target_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=max_shell_width_factor,
+            split_elongated_shells=split_elongated_shells,
+            split_aspect_thr=split_aspect_thr,
+            split_min_shell_vertices=(split_min_shell_vertices),
+            split_max_vertices_per_slice=(split_max_vertices_per_slice),
+        )
+        all_shells.extend(shells)
 
     return all_shells
 
@@ -439,7 +795,8 @@ def _make_nodes(
             d = np.linalg.norm(pts - center, axis=1)  # distances → radii
             for est in radius_estimators:
                 radii_dict[est] = np.append(
-                    radii_dict[est], _estimate_radius(d, method=est, trim_fraction=0.05)
+                    radii_dict[est],
+                    _estimate_radius(d, method=est, trim_fraction=TRIM_FRACTION),
                 )
 
             nodes.append(center.astype(np.float64))
@@ -468,12 +825,972 @@ def _make_nodes(
     return nodes_arr, radii_dict, node2verts, vert2node
 
 
+def _perpendicular_rebin(
+    nodes_arr: np.ndarray,
+    edges_mst: np.ndarray,
+    node2verts: list[np.ndarray],
+    mesh_vertices: np.ndarray,
+    radius_estimators: list[str],
+    radii_dict: dict[str, np.ndarray],
+) -> tuple[
+    list[list[np.ndarray]],
+    dict[int, int],
+]:
+    """Re-assign vertices along skeleton chains for perpendicular
+    bins.
+
+    For every degree-2 path (chain) between branch points / tips,
+    project all chain vertices onto the piecewise-linear skeleton
+    path and assign each vertex to the nearest node by arc-length
+    distance (radius-weighted so thick nodes claim proportionally
+    more territory).
+
+    Returns new shells (same structure as ``_bin_one_component``)
+    and an updated ``vert2node`` mapping.
+    """
+    n_skel = len(nodes_arr)
+    if n_skel < 2 or edges_mst.size == 0:
+        return [[n2v] for n2v in node2verts], {
+            int(v): i for i, n2v in enumerate(node2verts) for v in n2v
+        }
+
+    # -- skeleton adjacency & degree --
+    adj: dict[int, set[int]] = {i: set() for i in range(n_skel)}
+    for a, b in edges_mst:
+        a, b = int(a), int(b)
+        adj[a].add(b)
+        adj[b].add(a)
+
+    degree = np.array([len(adj[i]) for i in range(n_skel)])
+    anchors = set(i for i in range(n_skel) if degree[i] != 2)
+
+    # -- dissolve branch-point bins --
+    donated: dict[tuple[int, int], list[int]] = {}
+    for b in range(n_skel):
+        if degree[b] < 3:
+            continue
+        bv = np.asarray(node2verts[b], dtype=np.int64)
+        if len(bv) < 3:
+            continue
+        nbrs = sorted(adj[b])
+        dirs = nodes_arr[nbrs] - nodes_arr[b]
+        ln = np.linalg.norm(dirs, axis=1, keepdims=True)
+        dirs = np.divide(dirs, ln, out=np.zeros_like(dirs), where=ln > 1e-6)
+        proj = (mesh_vertices[bv] - nodes_arr[b]) @ dirs.T
+        best = np.argmax(proj, axis=1)
+        for k, nb in enumerate(nbrs):
+            donated[(b, nb)] = bv[best == k].tolist()
+
+    # -- extract chains (degree-2 paths between anchors) --
+    chains: list[list[int]] = []
+    visited_edges: set[tuple[int, int]] = set()
+    for anchor in sorted(anchors):
+        for nbr in adj[anchor]:
+            edge = (min(anchor, nbr), max(anchor, nbr))
+            if edge in visited_edges:
+                continue
+            visited_edges.add(edge)
+            chain = [anchor, nbr]
+            cur, prev = nbr, anchor
+            while cur not in anchors:
+                nexts = [n for n in adj[cur] if n != prev]
+                if len(nexts) != 1:
+                    break
+                prev, cur = cur, nexts[0]
+                visited_edges.add((min(prev, cur), max(prev, cur)))
+                chain.append(cur)
+            chains.append(chain)
+
+    # -- per-chain: project vertices, assign by arc-length --
+    # Use first radius estimator for weighting
+    r_key = radius_estimators[0]
+    r_ref = radii_dict[r_key]
+
+    new_node2verts: list[list[int]] = [[] for _ in range(n_skel)]
+    centerline_dists: list[list[float]] = [[] for _ in range(n_skel)]
+    assigned = np.zeros(len(mesh_vertices), dtype=bool)
+
+    for chain in chains:
+        # Collect all vertices along the chain
+        all_vids_set: set[int] = set()
+        for pos, ni in enumerate(chain):
+            key = None
+            if degree[ni] >= 3 and (pos == 0 or pos == len(chain) - 1):
+                key = (ni, chain[1] if pos == 0 else chain[-2])
+            if key is not None and key in donated:
+                all_vids_set.update(donated[key])
+            else:
+                all_vids_set.update(int(v) for v in node2verts[ni])
+        all_vids = [v for v in all_vids_set if not assigned[v]]
+        if not all_vids:
+            continue
+
+        all_vids_arr = np.asarray(all_vids, dtype=np.int64)
+        all_pts = mesh_vertices[all_vids_arr]
+
+        # Piecewise-linear skeleton path
+        path_pts = np.array([nodes_arr[n] for n in chain])
+        seg_lens = np.linalg.norm(np.diff(path_pts, axis=0), axis=1)
+        arc_cum = np.concatenate(([0.0], np.cumsum(seg_lens)))
+
+        # Project each vertex onto the path
+        best_dist = np.full(len(all_vids), np.inf)
+        best_t = np.zeros(len(all_vids))
+        for si in range(len(chain) - 1):
+            p0, p1 = path_pts[si], path_pts[si + 1]
+            s = seg_lens[si]
+            if s < 1e-10:
+                continue
+            sd = (p1 - p0) / s
+            df = all_pts - p0
+            tp = np.clip(df @ sd, 0, s)
+            d = np.linalg.norm(
+                all_pts - (p0 + np.outer(tp, sd)),
+                axis=1,
+            )
+            arc_at = arc_cum[si] + tp
+            closer = d < best_dist
+            best_dist[closer] = d[closer]
+            best_t[closer] = arc_at[closer]
+
+        # Radius-weighted assignment
+        node_arcs = np.array([arc_cum[i] for i in range(len(chain))])
+        r_floor = np.median(r_ref[r_ref > 0]) * 0.01
+        node_radii = np.array(
+            [max(r_ref[chain[i]], r_floor) for i in range(len(chain))]
+        )
+
+        arc_diffs = np.abs(best_t[:, None] - node_arcs[None, :])
+        weighted = arc_diffs / node_radii[None, :]
+        nearest_idx = np.argmin(weighted, axis=1)
+
+        for vi, ci_idx in enumerate(nearest_idx):
+            ni = chain[ci_idx]
+            new_node2verts[ni].append(all_vids[vi])
+            centerline_dists[ni].append(best_dist[vi])
+            assigned[all_vids[vi]] = True
+
+    # Assign any remaining unassigned anchor vertices
+    for ni in sorted(anchors):
+        for v in node2verts[ni]:
+            if not assigned[int(v)]:
+                new_node2verts[ni].append(int(v))
+                assigned[int(v)] = True
+
+    # Convert to shells format (one band per node, one
+    # component per band) for re-use with _is_ring / _make_nodes
+    shells: list[list[np.ndarray]] = []
+    for ni in range(n_skel):
+        vids = new_node2verts[ni]
+        if vids:
+            shells.append([np.asarray(vids, dtype=np.int64)])
+
+    # Per-vertex centerline distance map
+    vid_cl_dist: dict[int, float] = {}
+    for ni in range(n_skel):
+        for v, d in zip(new_node2verts[ni], centerline_dists[ni]):
+            vid_cl_dist[int(v)] = d
+
+    return shells, vid_cl_dist
+
+
+def _skeletonize_component(
+    mesh: trimesh.Trimesh,
+    gsurf: ig.Graph,
+    vert_ids: np.ndarray,
+    *,
+    seed_vid: int | np.ndarray,
+    soma_verts: set[int] | None = None,
+    radius_estimators: list[str],
+    merge_nested: bool = True,
+    merge_kwargs: dict | None = None,
+    step_size: float | None = None,
+    target_shell_count: int = 500,
+    min_shell_vertices: int = 6,
+    max_shell_width_factor: float = 50.0,
+    split_elongated_shells: bool = True,
+    split_aspect_thr: float = 3.0,
+    split_min_shell_vertices: int = 50,
+    split_max_vertices_per_slice: int | None = None,
+    second_pass: bool = True,
+    stage=_no_stage,
+) -> tuple[
+    np.ndarray,
+    dict[str, np.ndarray],
+    list[np.ndarray],
+    dict[int, int],
+    np.ndarray,
+    dict[int, float],
+]:
+    """Bin, build nodes, and extract edges for one component.
+
+    Combines :func:`_bin_one_component`, :func:`_make_nodes`,
+    and :func:`_edges_from_mesh` into a single call that
+    produces a complete sub-skeleton for one connected vertex
+    set.
+
+    Parameters
+    ----------
+    mesh
+        The neuron mesh (needed for ``edges_unique`` and
+        ``vertices``).
+    gsurf
+        Full surface graph of the mesh.
+    vert_ids
+        1-D int64 array — vertex IDs for this component.
+    seed_vid
+        Where to start the geodesic.  A single ``int`` or a
+        1-D array for multi-source seeding.
+    soma_verts
+        Vertices to exclude from shells (``None`` = none).
+    radius_estimators
+        Passed to :func:`_make_nodes`.
+    merge_nested, merge_kwargs
+        Passed to :func:`_make_nodes`.
+
+    Returns
+    -------
+    nodes_arr, radii_dict, node2verts, vert2node, edges_arr, vid_cl_dist
+
+    ``vid_cl_dist`` maps mesh vertex -> perpendicular distance to the
+    centreline, and is empty when the second pass does not run.  It is
+    returned rather than consumed because it is the only input to the
+    ``centerline`` radius that cannot be recovered from the vertices alone;
+    keeping it lets that radius be recomputed after a bin is edited.
+    """
+    mesh_vertices = mesh.vertices.view(np.ndarray)
+    e_m = float(mesh.edges_unique_length.mean())
+    vid_cl_dist: dict[int, float] = {}
+
+    with stage("bin vertices by geodesic distance"):
+        all_shells = _bin_one_component(
+            gsurf,
+            vert_ids,
+            seed_vid,
+            mesh_vertices=mesh_vertices,
+            mean_edge_len=e_m,
+            soma_verts=soma_verts,
+            step_size=step_size,
+            target_shell_count=target_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=max_shell_width_factor,
+            split_elongated_shells=split_elongated_shells,
+            split_aspect_thr=split_aspect_thr,
+            split_min_shell_vertices=(split_min_shell_vertices),
+            split_max_vertices_per_slice=(split_max_vertices_per_slice),
+        )
+
+    with stage("compute bin centroids and radii"):
+        nodes_arr, radii_dict, node2verts, vert2node = _make_nodes(
+            all_shells,
+            mesh_vertices,
+            radius_estimators=radius_estimators,
+            merge_nested=merge_nested,
+            merge_kwargs=merge_kwargs,
+        )
+
+    with stage("derive edges from mesh edges"):
+        edges_arr = _edges_from_mesh(
+            mesh.edges_unique,
+            vert2node,
+            n_mesh_verts=len(mesh.vertices),
+        )
+
+    # -- second pass: perpendicular re-binning --------
+    if second_pass and len(nodes_arr) > 1 and edges_arr.size:
+        with stage("re-bin perpendicular to the centreline"):
+            edges_mst = _build_mst(nodes_arr, edges_arr)
+
+            rebin_shells, vid_cl_dist = _perpendicular_rebin(
+                nodes_arr,
+                edges_mst,
+                node2verts,
+                mesh_vertices,
+                radius_estimators,
+                radii_dict,
+            )
+
+        with stage("re-check rings, merge non-rings"):
+            # Re-check rings, merge non-rings
+            vert_set = set(int(x) for x in vert_ids)
+            final_shells: List[List[np.ndarray]] = []
+            pending: List[np.ndarray] = []
+            for band in rebin_shells:
+                rings = []
+                frags = []
+                for c in band:
+                    if _is_ring(c, gsurf, vert_set):
+                        rings.append(c)
+                    else:
+                        frags.append(c)
+                if frags:
+                    pending.extend(frags)
+                if rings:
+                    final_shells.append(rings)
+
+            if pending:
+                vid_to_ring: dict[int, tuple[int, int]] = {}
+                for bi, band in enumerate(final_shells):
+                    for ci, ring in enumerate(band):
+                        for vid in ring:
+                            vid_to_ring[int(vid)] = (bi, ci)
+                for frag in pending:
+                    votes: dict[tuple[int, int], int] = {}
+                    for vid in frag:
+                        for e in gsurf.incident(int(vid)):
+                            src = gsurf.es[e].source
+                            tgt = gsurf.es[e].target
+                            nbr = tgt if src == int(vid) else src
+                            key = vid_to_ring.get(nbr)
+                            if key is not None:
+                                votes[key] = votes.get(key, 0) + 1
+                    if votes:
+                        best = max(votes, key=votes.get)
+                        bi, ci = best
+                        final_shells[bi][ci] = np.concatenate(
+                            [final_shells[bi][ci], frag]
+                        )
+                        for vid in frag:
+                            vid_to_ring[int(vid)] = best
+
+        with stage("reunite bins split across the surface"):
+            # Arc-length assignment has no notion of the surface: a vertex
+            # whose projection lands near a node is claimed by it even when
+            # it is a micron away across the mesh.  That leaves bins in
+            # several disconnected pieces and drags the node's centroid into
+            # the empty space between them.  Keep each bin's largest
+            # connected piece and hand every stray piece to a bin it
+            # actually touches.  Connectivity is categorical — no threshold.
+            owner_of: dict[int, tuple[int, int]] = {}
+            for bi, band in enumerate(final_shells):
+                for ci, comp in enumerate(band):
+                    for vid in comp:
+                        owner_of[int(vid)] = (bi, ci)
+
+            def _pieces(comp):
+                vset = set(int(v) for v in comp)
+                seen: set[int] = set()
+                out: list[list[int]] = []
+                for start in vset:
+                    if start in seen:
+                        continue
+                    queue = deque([start])
+                    seen.add(start)
+                    grp = [start]
+                    while queue:
+                        u = queue.popleft()
+                        for e in gsurf.incident(u):
+                            src = gsurf.es[e].source
+                            tgt = gsurf.es[e].target
+                            nb = tgt if src == u else src
+                            if nb in vset and nb not in seen:
+                                seen.add(nb)
+                                queue.append(nb)
+                                grp.append(nb)
+                    out.append(grp)
+                return sorted(out, key=len, reverse=True)
+
+            # Donating a stray can disconnect the bin that receives it, so a
+            # single pass does not converge — repeat until every bin is one
+            # piece, refreshing ownership each round.
+            for _ in range(8):
+                changed = False
+                for bi, band in enumerate(final_shells):
+                    for ci, comp in enumerate(band):
+                        if len(comp) < 2:
+                            continue
+                        parts = _pieces(comp)
+                        if len(parts) < 2:
+                            continue
+                        band[ci] = np.asarray(parts[0], dtype=comp.dtype)
+                        for vid in parts[0]:
+                            owner_of[int(vid)] = (bi, ci)
+                        for stray in parts[1:]:
+                            votes: dict[tuple[int, int], int] = {}
+                            for vid in stray:
+                                for e in gsurf.incident(vid):
+                                    src = gsurf.es[e].source
+                                    tgt = gsurf.es[e].target
+                                    nb = tgt if src == vid else src
+                                    key = owner_of.get(nb)
+                                    if key is not None and key != (bi, ci):
+                                        votes[key] = votes.get(key, 0) + 1
+                            if not votes:
+                                band[ci] = np.concatenate(
+                                    [band[ci], np.asarray(stray, dtype=np.int64)]
+                                )
+                                continue
+                            tb, tc = max(votes, key=lambda k: votes[k])
+                            final_shells[tb][tc] = np.concatenate(
+                                [
+                                    final_shells[tb][tc],
+                                    np.asarray(stray, dtype=np.int64),
+                                ]
+                            )
+                            for vid in stray:
+                                owner_of[int(vid)] = (tb, tc)
+                            changed = True
+                if not changed:
+                    break
+
+        with stage("split bins that wrap a branch point"):
+            # A bin that touches three or more separate neighbourhoods is not
+            # a cross-section: it is the band wrapping a branch point, holding
+            # the parent tube and both children at once.  Averaging points on
+            # diverging tubes puts its node in the notch between them, on or
+            # past the surface.  Split it so each piece wraps one tube.  The
+            # number of neighbourhoods is a count, not a threshold.
+            # One pass, not a loop: the split already sends every vertex to the
+            # tube nearest it, so there is nothing left to cut.  Repeating it
+            # only shaves slivers off, because the pieces of a split are bins
+            # in their own right and each sibling then reads as another
+            # neighbourhood.  For the same reason every decision is made
+            # against a snapshot of ownership taken before any bin is cut, so
+            # the result does not depend on the order bins are visited.
+            snapshot = dict(owner_of)
+            planned: list[tuple[int, int, list[np.ndarray]]] = []
+            for bi, band in enumerate(final_shells):
+                for ci, comp in enumerate(band):
+                    if len(comp) < 3:
+                        continue
+                    groups = _neighbour_groups(comp, gsurf, snapshot, (bi, ci))
+                    if len(groups) < 3:
+                        continue
+                    parts = _split_branch_band(comp, groups, gsurf)
+                    if len(parts) > 1:
+                        planned.append((bi, ci, parts))
+
+            for bi, ci, parts in planned:
+                band = final_shells[bi]
+                band[ci] = parts[0]
+                for vid in parts[0]:
+                    owner_of[int(vid)] = (bi, ci)
+                for extra in parts[1:]:
+                    band.append(extra)
+                    for vid in extra:
+                        owner_of[int(vid)] = (bi, len(band) - 1)
+
+        with stage("recompute centroids and centerline radii"):
+            # Remake nodes and edges with centerline radii
+            nodes_arr, radii_dict, node2verts, vert2node = _make_nodes(
+                final_shells,
+                mesh_vertices,
+                radius_estimators=radius_estimators,
+                merge_nested=merge_nested,
+                merge_kwargs=merge_kwargs,
+            )
+
+            # Compute centerline radii (perpendicular distance
+            # from each vertex to the skeleton path)
+            cl_radii = np.empty(len(nodes_arr))
+            for ni, n2v in enumerate(node2verts):
+                dists = np.array([vid_cl_dist.get(int(v), 0.0) for v in n2v])
+                if len(dists) > 0:
+                    cl_radii[ni] = _estimate_radius(
+                        dists,
+                        method="trim",
+                        trim_fraction=TRIM_FRACTION,
+                    )
+                else:
+                    cl_radii[ni] = 0.0
+            radii_dict["centerline"] = cl_radii
+
+        with stage("re-derive edges from mesh edges"):
+            edges_arr = _edges_from_mesh(
+                mesh.edges_unique,
+                vert2node,
+                n_mesh_verts=len(mesh.vertices),
+            )
+
+    return (
+        nodes_arr,
+        radii_dict,
+        node2verts,
+        vert2node,
+        edges_arr,
+        vid_cl_dist,
+    )
+
+
+# -----------------------------------------------------------------------------
+#  Preprocessing track helpers
+# -----------------------------------------------------------------------------
+
+
+def _concat_radii(
+    parts: list[dict[str, np.ndarray]],
+    radius_estimators: list[str],
+    *,
+    lead_value: float | None = None,
+) -> dict[str, np.ndarray]:
+    """Concatenate per-neurite radii, keeping keys beyond the estimators.
+
+    The second binning pass writes a ``centerline`` entry that is not in
+    ``radius_estimators``; collecting only the estimators silently drops it.
+
+    A neurite too small for the second pass has no ``centerline`` of its
+    own, so its nodes fall back to the first estimator — that keeps every
+    radius array the same length as ``nodes`` and finite, which exporters
+    and :meth:`Skeleton.recommend_radius` both rely on.
+
+    Parameters
+    ----------
+    parts : list of dict
+        One radii dict per sub-skeleton, in node order.
+    radius_estimators : list of str
+        Keys guaranteed to be present on every sub-skeleton.
+    lead_value : float or None
+        Radius for a single node prepended before the parts (the soma).
+    """
+    keys = list(radius_estimators)
+    for radii in parts:
+        for k in radii:
+            if k not in keys:
+                keys.append(k)
+    fallback = radius_estimators[0]
+
+    out: dict[str, list[np.ndarray]] = {k: [] for k in keys}
+    if lead_value is not None:
+        for k in keys:
+            out[k].append(np.array([lead_value], dtype=np.float64))
+    for radii in parts:
+        for k in keys:
+            v = radii.get(k, radii[fallback])
+            out[k].append(np.asarray(v, dtype=np.float64))
+    return {
+        k: (np.concatenate(v) if v else np.empty(0, dtype=np.float64))
+        for k, v in out.items()
+    }
+
+
+def _stitch_to_soma(
+    sub_skeletons: list[
+        tuple[
+            np.ndarray,
+            dict[str, np.ndarray],
+            list[np.ndarray],
+            dict[int, int],
+            np.ndarray,
+            dict[int, float],
+        ]
+    ],
+    soma: Soma,
+    radius_estimators: list[str],
+) -> tuple[
+    np.ndarray,
+    dict[str, np.ndarray],
+    list[np.ndarray],
+    dict[int, int],
+    np.ndarray,
+]:
+    """Combine per-neurite sub-skeletons with soma node 0.
+
+    Each sub-skeleton's node IDs are offset so they sit after
+    the soma and all earlier sub-skeletons.  One synthetic
+    stem edge ``(0, root_i)`` is added per neurite, where
+    ``root_i`` is the node closest to the soma centre.
+
+    Returns
+    -------
+    nodes, radii, node2verts, vert2node, edges
+    """
+    r_soma = soma.spherical_radius
+
+    # -- node 0 = soma --
+    soma_verts_arr = soma.verts if soma.verts is not None else np.empty(0, np.int64)
+    all_nodes = [soma.center.reshape(1, 3)]
+    radii_parts: list[dict[str, np.ndarray]] = []
+    all_n2v: list[np.ndarray] = [soma_verts_arr]
+    all_edges: list[np.ndarray] = []
+
+    offset = 1  # node 0 is soma
+    for nodes, radii, n2v, _, edges, _cl in sub_skeletons:
+        if len(nodes) == 0:
+            continue
+
+        all_nodes.append(nodes)
+        radii_parts.append(radii)
+        all_n2v.extend(n2v)
+
+        # offset edge endpoints
+        all_edges.append(edges + offset)
+
+        # stem edge: soma → closest node
+        dists = np.linalg.norm(nodes - soma.center, axis=1)
+        root = int(np.argmin(dists)) + offset
+        all_edges.append(np.array([[0, root]], dtype=np.int64))
+
+        offset += len(nodes)
+
+    nodes_arr = np.vstack(all_nodes) if all_nodes else np.empty((0, 3), np.float64)
+    radii_dict = _concat_radii(radii_parts, radius_estimators, lead_value=r_soma)
+    edges_arr = np.vstack(all_edges) if all_edges else np.empty((0, 2), np.int64)
+    edges_arr = np.sort(edges_arr, axis=1)
+    edges_arr = np.unique(edges_arr, axis=0)
+
+    vert2node: dict[int, int] = {}
+    for nid, verts in enumerate(all_n2v):
+        for vid in verts:
+            vert2node[int(vid)] = nid
+
+    return (
+        nodes_arr,
+        radii_dict,
+        all_n2v,
+        vert2node,
+        edges_arr,
+    )
+
+
+def _pick_neurite_seed(
+    neurite_verts: np.ndarray,
+    mesh_vertices: np.ndarray,
+    soma: Soma | None,
+) -> int | np.ndarray:
+    """Choose a geodesic seed for one neurite.
+
+    With soma: return the full boundary ring (all neurite
+    vertices shared with the soma surface).  Multi-source
+    seeding from the ring produces perpendicular shells.
+    Without soma: return the single vertex closest to the
+    neurite centroid.
+    """
+    if soma is not None and soma.verts is not None:
+        boundary = np.intersect1d(neurite_verts, soma.verts)
+        if boundary.size > 1:
+            return boundary
+        if boundary.size == 1:
+            return int(boundary[0])
+        # no shared verts — fall back to nearest
+        dists = np.linalg.norm(
+            mesh_vertices[neurite_verts] - soma.center,
+            axis=1,
+        )
+        return int(neurite_verts[np.argmin(dists)])
+
+    # no soma — seed at centroid of the neurite
+    centroid = mesh_vertices[neurite_verts].mean(axis=0)
+    dists = np.linalg.norm(mesh_vertices[neurite_verts] - centroid, axis=1)
+    return int(neurite_verts[np.argmin(dists)])
+
+
+def _concatenate_sub_skeletons(
+    sub_skeletons: list[
+        tuple[
+            np.ndarray,
+            dict[str, np.ndarray],
+            list[np.ndarray],
+            dict[int, int],
+            np.ndarray,
+            dict[int, float],
+        ]
+    ],
+    radius_estimators: list[str],
+) -> tuple[
+    np.ndarray,
+    dict[str, np.ndarray],
+    list[np.ndarray],
+    dict[int, int],
+    np.ndarray,
+]:
+    """Join per-neurite sub-skeletons without a soma node.
+
+    Unlike :func:`_stitch_to_soma`, no node 0 is prepended
+    and no stem edges are added.  The result is a forest
+    (one tree per neurite).
+    """
+    all_nodes: list[np.ndarray] = []
+    radii_parts: list[dict[str, np.ndarray]] = []
+    all_n2v: list[np.ndarray] = []
+    all_edges: list[np.ndarray] = []
+
+    offset = 0
+    for nodes, radii, n2v, _, edges, _cl in sub_skeletons:
+        if len(nodes) == 0:
+            continue
+        all_nodes.append(nodes)
+        radii_parts.append(radii)
+        all_n2v.extend(n2v)
+        if edges.size:
+            all_edges.append(edges + offset)
+        offset += len(nodes)
+
+    nodes_arr = np.vstack(all_nodes) if all_nodes else np.empty((0, 3), np.float64)
+    radii_dict = _concat_radii(radii_parts, radius_estimators)
+    edges_arr = np.vstack(all_edges) if all_edges else np.empty((0, 2), np.int64)
+    if edges_arr.size:
+        edges_arr = np.sort(edges_arr, axis=1)
+        edges_arr = np.unique(edges_arr, axis=0)
+
+    vert2node: dict[int, int] = {}
+    for nid, verts in enumerate(all_n2v):
+        for vid in verts:
+            vert2node[int(vid)] = nid
+
+    return (
+        nodes_arr,
+        radii_dict,
+        all_n2v,
+        vert2node,
+        edges_arr,
+    )
+
+
+def _skeletonize_preproc(
+    mesh: trimesh.Trimesh,
+    components: MeshComponents,
+    *,
+    radius_estimators: list[str],
+    geodesic_step_size: float | None,
+    geodesic_shell_count: int,
+    min_shell_vertices: int,
+    max_shell_width_factor: float,
+    soma_init_guess_axis: str,
+    soma_init_guess_mode: str,
+    unit: str,
+    id: str | int | None,
+    verbose: bool,
+    second_pass: bool = True,
+) -> Skeleton:
+    """Preprocessing track: per-neurite skeletonization.
+
+    Each neurite in *components* is skeletonized via
+    :func:`_skeletonize_component`, then all sub-skeletons
+    are grafted onto the precomputed soma.
+
+    Skips: soma detection, gap bridging, neurite pruning,
+    near-soma collapse, nested-node merge, elongated-shell
+    splitting (all unnecessary on clean preprocessed
+    neurites).
+    """
+    # Snapshot the arguments before anything else is bound, so the recorded
+    # parameters cannot drift from the signature the way a hand-kept list
+    # would.  A stale provenance record is worse than none.
+    _params = {
+        k: v
+        for k, v in locals().items()
+        if k not in ("mesh", "components", "unit", "id", "verbose")
+    }
+
+    soma = components.soma
+    has_soma = soma is not None
+
+    if verbose:
+        _global_start = time.perf_counter()
+        soma_tag = "with soma" if has_soma else "no soma"
+        print(
+            f"[skeliner] preprocessing track "
+            f"({len(mesh.vertices):,} vertices, "
+            f"{len(mesh.faces):,} faces, "
+            f"{len(components.neurites)} neurites, "
+            f"{soma_tag})"
+        )
+
+    with _timed("↳  build surface graph", verbose=verbose):
+        gsurf = _surface_graph(mesh)
+
+    mesh_vertices = mesh.vertices.view(np.ndarray)
+
+    # Each stage of the per-neurite work reports itself as a top-level
+    # step, the way `_skeletonize_direct` does.  Wrapping the loop in one
+    # `_timed` instead would report a single number for the slowest part
+    # of the run, and `_timed` holds its sub-messages until the block
+    # ends, so nothing would appear while it was actually working.
+    n_neurites = len(components.neurites)
+    sub_skeletons = []
+    for i, face_idx in enumerate(components.neurites):
+        neurite_verts = np.unique(mesh.faces[face_idx].ravel()).astype(np.int64)
+
+        seed_vid = _pick_neurite_seed(
+            neurite_verts,
+            mesh_vertices,
+            soma,
+        )
+
+        tag = f"neurite {i}: " if n_neurites > 1 else ""
+
+        def stage(label, _tag=tag):
+            return _timed(f"↳  {_tag}{label}", verbose=verbose)
+
+        sub = _skeletonize_component(
+            mesh,
+            gsurf,
+            neurite_verts,
+            seed_vid=seed_vid,
+            radius_estimators=radius_estimators,
+            merge_nested=False,
+            step_size=geodesic_step_size,
+            target_shell_count=geodesic_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=(max_shell_width_factor),
+            split_elongated_shells=False,
+            second_pass=second_pass,
+            stage=stage,
+        )
+        sub_skeletons.append(sub)
+        if verbose:
+            print(
+                f"      └─ neurite {i}: {len(neurite_verts):,} verts "
+                f"→ {sub[0].shape[0]:,} nodes"
+            )
+
+    # -- assemble skeleton -----------------------------------------
+    if has_soma:
+        with _timed(
+            "↳  stitch neurites to soma",
+            verbose=verbose,
+        ):
+            (
+                nodes_arr,
+                radii_dict,
+                node2verts,
+                vert2node,
+                edges_arr,
+            ) = _stitch_to_soma(sub_skeletons, soma, radius_estimators)
+    else:
+        with _timed(
+            "↳  concatenate neurites",
+            verbose=verbose,
+        ):
+            (
+                nodes_arr,
+                radii_dict,
+                node2verts,
+                vert2node,
+                edges_arr,
+            ) = _concatenate_sub_skeletons(sub_skeletons, radius_estimators)
+
+    # -- keep the per-vertex centreline distances --
+    # The `centerline` radius is an aggregate of these, so keeping them is
+    # what lets it be recomputed when a bin changes; every other radius is
+    # already recoverable from the vertices alone.  Vertex ids are global,
+    # so the per-neurite maps merge without any offsetting.
+    cl_vids: list[int] = []
+    cl_dists: list[float] = []
+    for *_rest, cl in sub_skeletons:
+        cl_vids.extend(cl.keys())
+        cl_dists.extend(cl.values())
+
+    # -- global MST --
+    with _timed(
+        "↳  build global minimum-spanning tree",
+        verbose=verbose,
+    ):
+        if len(nodes_arr) > 1 and edges_arr.size:
+            edges_mst = _build_mst(nodes_arr, edges_arr)
+        else:
+            edges_mst = edges_arr
+
+    if verbose:
+        total = time.perf_counter() - _global_start
+        print(f"{'TOTAL':<49}… {total:.2f} s")
+        print(f"({len(nodes_arr):,} nodes, {edges_mst.shape[0]:,} edges)")
+
+    ntype = np.zeros(len(nodes_arr), np.int8)
+    if has_soma:
+        ntype[0] = 1
+    elif len(nodes_arr):
+        ntype[0] = -1
+        # pick a deterministic root like the direct track
+        root_vid = _extreme_vertex(
+            mesh,
+            axis=soma_init_guess_axis,
+            mode=soma_init_guess_mode,
+        )
+        if root_vid in vert2node:
+            root_nid = vert2node[root_vid]
+        else:
+            # extreme vertex not in any neurite — pick
+            # the closest skeleton node instead
+            dists = np.linalg.norm(
+                nodes_arr - mesh_vertices[root_vid],
+                axis=1,
+            )
+            root_nid = int(np.argmin(dists))
+        if root_nid != 0:
+            # swap node 0 and root_nid
+            nodes_arr[[0, root_nid]] = nodes_arr[[root_nid, 0]]
+            for k in radii_dict:
+                radii_dict[k][[0, root_nid]] = radii_dict[k][[root_nid, 0]]
+            node2verts[0], node2verts[root_nid] = (
+                node2verts[root_nid],
+                node2verts[0],
+            )
+            m0 = edges_mst == 0
+            mi = edges_mst == root_nid
+            edges_mst[m0] = root_nid
+            edges_mst[mi] = 0
+            edges_mst = np.sort(edges_mst, axis=1)
+            vert2node = rebuild_vert2node(node2verts)
+        # placeholder soma at the root
+        r0 = float(list(radii_dict.values())[0][0])
+        soma = Soma.from_sphere(nodes_arr[0], r0, verts=None)
+
+    # -- carry the neurites' hand-given identity onto the skeleton --
+    # Read through `vert2node` rather than by re-deriving the node ranges:
+    # the assembly lays sub-skeletons down in order, but skips any that came
+    # out empty, so an index into `components.neurites` is not an index into
+    # the node blocks.  Ownership is exact and needs no such assumption.
+    #
+    # Node 0 is excluded throughout: under the >=2-of-3 face rule a face at
+    # the soma junction carries soma vertices, so a neurite's vertex set
+    # reaches node 0, and stamping it would retype the soma as a dendrite.
+    #
+    # Three things are recorded, because `ntype` alone loses information:
+    # it collapses "dendrite 0" and "dendrite 1" into the same code 3, and
+    # SWC has no field for a name.  The labels go in `meta`, which both the
+    # npz and the SWC header carry, and the per-node owner goes in `extra`,
+    # which is what lets a name be resolved back to nodes.
+    skel_meta = _skel_meta("preproc", unit, id, _params)
+    skel_extra: dict[str, Any] = (
+        {
+            "cl_dist_vids": np.asarray(cl_vids, dtype=np.int64),
+            "cl_dist_vals": np.asarray(cl_dists, dtype=np.float64),
+        }
+        if cl_vids
+        else {}
+    )
+
+    if components.neurites.named:
+        node2neurite = np.full(len(nodes_arr), -1, dtype=np.int32)
+        for ni, (face_idx, code) in enumerate(
+            zip(components.neurites.components, components.neurites.swc_types)
+        ):
+            nids = {
+                vert2node[int(v)]
+                for v in np.unique(mesh.faces[face_idx].ravel())
+                if int(v) in vert2node
+            }
+            nids.discard(0)
+            if not nids:
+                continue
+            owned = np.fromiter(nids, dtype=np.int64, count=len(nids))
+            node2neurite[owned] = ni
+            if code:
+                ntype[owned] = code
+        skel_meta["neurite_labels"] = list(components.neurites.labels)
+        skel_meta["neurite_swc_types"] = [int(c) for c in components.neurites.swc_types]
+        skel_extra["node2neurite"] = node2neurite
+
+    return Skeleton(
+        nodes=nodes_arr,
+        radii=radii_dict,
+        edges=edges_mst,
+        ntype=ntype,
+        soma=soma,
+        node2verts=node2verts,
+        vert2node=vert2node,
+        meta=skel_meta,
+        extra=skel_extra,
+    )
+
+
 # -----------------------------------------------------------------------------
 #  Skeletonization Public API
 # -----------------------------------------------------------------------------
 
 
-def skeletonize(
+def _skeletonize_direct(
     mesh: trimesh.Trimesh,
     # --- radius estimation ---
     radius_estimators: list[str] = ["median", "mean", "trim"],
@@ -483,9 +1800,10 @@ def skeletonize(
     soma_radius_percentile_threshold: float = 99.9,
     soma_radius_distance_factor: float = 4,
     soma_min_nodes: int = 3,
-    # -- for post-skeletonization soma detection only--
-    soma_init_guess_axis: str = "z",  # "x" | "y" | "z"
-    soma_init_guess_mode: str = "min",  # "min" | "max"
+    # -- soma seed heuristic for the geodesic origin --
+    soma_init_guess: str | None = None,  # "nucleus" | "<axis>-<mode>"
+    soma_init_guess_axis: str = "z",  # legacy, when soma_init_guess is None
+    soma_init_guess_mode: str = "min",  # legacy, when soma_init_guess is None
     # --- geodesic binning ---
     geodesic_step_size: float | None = None,
     geodesic_shell_count: int = 1000,  # higher = more bins, smaller bin size
@@ -516,53 +1834,20 @@ def skeletonize(
     verbose: bool = False,
     postprocess: bool = True,
 ) -> Skeleton:
-    """Compute a center-line skeleton with radii of a neuronal mesh .
+    """Direct track: full pipeline from raw mesh.
 
-    The algorithm proceeds in eight conceptual stages:
-
-      1. geodesic shell binning of every connected surface patch
-      2. cluster each shell ⇒ interior node with local radius
-      3. optional post-skeletonization soma detection
-      4. project mesh edges ⇒ graph edges between nodes
-      5. optional collapsing of soma-like/fat nodes near the centroid
-      6. optional bridging of disconnected components
-      7. minimum-spanning tree (global) to remove microscopic cycles
-      8. optional pruning of tiny neurites sprouting directly from the soma
-
-
-    Parameters
-    ----------
-    mesh : trimesh.Trimesh
-        Closed surface mesh of the neuron in *arbitrary* units.
-    target_shell_count : int, default ``500``
-        Rough number of geodesic shells to produce per component.  The actual
-        shell width is adapted to mesh resolution.
-    bridge_gaps : bool, default ``True``
-        If the mesh contains disconnected islands (breaks, imaging artefacts),
-        attempt to connect them back to the soma with synthetic edges.
-    bridge_k : int, default ``1``
-        How many candidate node pairs to test when bridging a foreign island.
-    prune_tiny_neurites : bool, default ``True``
-        Remove sub-trees with fewer than ``min_branch_nodes`` that attach
-        *directly* to the soma and do not extend beyond
-        ``min_branch_extent_factor × r_soma``.
-    collapse_soma : bool, default ``True``
-        Merge centroids that sit well inside the soma or have very fat radii.
-    verbose : bool, default ``False``
-        Print progress messages.
-    postprocess : bool, default ``True``
-        When ``False`` the optional post-processing stages (soma detection,
-        near-soma merging, gap bridging, MST rebuild, neurite pruning) are
-        skipped so that you can rerun them later via the corresponding
-        :mod:`skeliner.post` helpers.
-
-    Returns
-    -------
-    Skeleton
-        The (acyclic) skeleton with vertex 0 at the soma centroid.
+    Stages: surface graph, geodesic binning, node creation,
+    soma detection, edge mapping, near-soma collapse, gap
+    bridging, MST, neurite pruning.
     """
+    # See _skeletonize_preproc: snapshot the arguments before anything else
+    # is bound, so the record cannot drift from the signature.
+    _params = {
+        k: v for k, v in locals().items() if k not in ("mesh", "unit", "id", "verbose")
+    }
+
     # ------------------------------------------------------------------
-    #  helpers for verbose timing
+    #  Direct track: helpers for verbose timing
     # ------------------------------------------------------------------
     if verbose:
         _global_start = time.perf_counter()
@@ -581,40 +1866,7 @@ def skeletonize(
         prune_tiny_neurites = False
         run_mst = False
 
-    @contextmanager
-    def _timed(label: str, *, verbose: bool = verbose):  # keep the signature you like
-        """
-        Context manager that prints
-
-            ↳  <label padded to width> … <elapsed> s
-                └─ <sub-message 1>
-                └─ <sub-message 2>
-                …
-
-        Use the yielded `log()` callback to record any number of sub-messages.
-        """
-        if not verbose:
-            yield lambda *_: None
-            return
-
-        PAD = 47  # keeps the old alignment
-        print(f" {label:<{PAD}} …", end="", flush=True)
-        t0 = time.perf_counter()
-        _msgs: list[str] = []
-
-        def log(msg: str) -> None:
-            _msgs.append(str(msg))
-
-        try:
-            yield log  # the `with`-body gets this function
-        finally:
-            dt = time.perf_counter() - t0
-            print(f" {dt:.2f} s")  # finish first line
-
-            for m in _msgs:  # then all sub-messages, nicely indented
-                print(f"      └─ {m}")
-
-    # 0. soma vertices ---------------------------------------------------
+    # 0. build surface graph -----------------------------------------------
     with _timed("↳  build surface graph", verbose=verbose):
         gsurf = _surface_graph(mesh)
 
@@ -622,29 +1874,40 @@ def skeletonize(
     with _timed("↳  bin surface vertices by geodesic distance", verbose=verbose):
         mesh_vertices = mesh.vertices.view(np.ndarray)
 
-        # pseudo-random soma seed point for kick-starting the binning
+        # -- resolve soma_init_guess → soma_seed_point ----
+        if soma_seed_point is None and soma_init_guess is not None:
+            if soma_init_guess == "nucleus":
+                from .pre import find_nucleus_center
+
+                nuc = find_nucleus_center(mesh, verbose=verbose)
+                if nuc is not None:
+                    soma_seed_point = nuc["center"]
+            elif "-" in soma_init_guess:
+                ax, md = soma_init_guess.split("-", 1)
+                soma_init_guess_axis = ax
+                soma_init_guess_mode = md
+
+        # -- pick seed vertex -----------------------------
         if soma_seed_point is not None:
             seed_vid = int(
                 np.argmin(
-                    np.linalg.norm(mesh_vertices - np.asarray(soma_seed_point), axis=1)
+                    np.linalg.norm(
+                        mesh_vertices - np.asarray(soma_seed_point),
+                        axis=1,
+                    )
                 )
             )
         else:
             seed_vid = _extreme_vertex(
-                mesh, axis=soma_init_guess_axis, mode=soma_init_guess_mode
+                mesh,
+                axis=soma_init_guess_axis,
+                mode=soma_init_guess_mode,
             )
-
-        avg_edge = float(mesh.edges_unique_length.mean())
-        soma = Soma.from_sphere(
-            mesh_vertices[seed_vid],
-            radius=avg_edge,
-            verts=np.asarray([int(seed_vid)], dtype=np.int64),
-        )
 
         all_shells = _bin_geodesic_shells(
             mesh,
             gsurf,
-            soma=soma,
+            seed_vid=seed_vid,
             step_size=geodesic_step_size,
             target_shell_count=geodesic_shell_count,
             min_shell_vertices=min_shell_vertices,
@@ -669,7 +1932,7 @@ def skeletonize(
 
     # 3. soma detection (optional) -----------------------------------
     _t0 = time.perf_counter()
-    with _timed("↳  post-skeletonization soma detection") as log:
+    with _timed("↳  post-skeletonization soma detection", verbose=verbose) as log:
         (
             nodes_arr,
             radii_dict,
@@ -809,10 +2072,155 @@ def skeletonize(
         soma=soma,
         node2verts=node2verts,
         vert2node=vert2node,
-        meta={
-            "skeliner_version": _SKELINER_VERSION,
-            "skeletonized_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "unit": unit,
-            "id": id,
-        },
+        meta=_skel_meta("direct", unit, id, _params),
+    )
+
+
+def skeletonize(
+    mesh: trimesh.Trimesh,
+    # --- preprocessing track ---
+    components: MeshComponents | None = None,
+    # --- radius estimation ---
+    radius_estimators: list[str] = ["median", "mean", "trim"],
+    # --- soma detection ---
+    detect_soma: bool = True,
+    soma_seed_point: np.ndarray | list | tuple | None = None,
+    soma_radius_percentile_threshold: float = 99.9,
+    soma_radius_distance_factor: float = 4,
+    soma_min_nodes: int = 3,
+    # -- soma seed heuristic for the geodesic origin --
+    soma_init_guess: str | None = None,  # "nucleus" | "<axis>-<mode>"
+    soma_init_guess_axis: str = "z",  # legacy, when soma_init_guess is None
+    soma_init_guess_mode: str = "min",  # legacy, when soma_init_guess is None
+    # --- geodesic binning ---
+    geodesic_step_size: float | None = None,
+    geodesic_shell_count: int = 1000,  # higher = more bins, smaller bin size
+    min_shell_vertices: int = 6,
+    max_shell_width_factor: int = 50,
+    split_elongated_shells: bool = False,
+    split_aspect_thr: float = 3.0,  # λ1 / λ2
+    split_min_shell_vertices: int = 15,
+    split_max_vertices_per_slice: int | None = None,
+    merge_nodes_overlap_fraction: float = 0.8,  # merge nested nodes if inside_frac ≥ this
+    # --- bridging disconnected patches ---
+    bridge_gaps: bool = True,
+    bridge_max_factor: float | None = None,
+    bridge_recalc_after: int | None = None,
+    # -- post‑processing --
+    # --- collapse soma-like nodes ---
+    collapse_soma: bool = True,
+    collapse_soma_dist_factor: float = 1.2,
+    collapse_soma_radius_factor: float = 0.2,
+    # --- prune tiny neurites ---
+    prune_tiny_neurites: bool = True,
+    prune_tip_extent_factor: float = 1.2,  # tip twigs (<–× r_soma)
+    prune_stem_extent_factor: float = 3.0,  # stems touching soma
+    prune_drop_single_node_branches: bool = True,
+    # --- misc ---
+    unit: str = "nm",
+    id: str | int | None = None,
+    verbose: bool = False,
+    postprocess: bool = True,
+    second_pass: bool = True,
+) -> Skeleton:
+    """Compute a center-line skeleton with radii from a neuronal mesh.
+
+    Two tracks are available, selected by the *components* parameter:
+
+    **Direct track** (``components=None``, the default):
+      Full pipeline — geodesic binning, post-skel soma detection,
+      gap bridging, MST, neurite pruning.  Works on any raw mesh.
+
+    **Preprocessing track** (``components=MeshComponents(...)``):
+      Per-neurite skeletonization using the soma and neurite
+      partition from :func:`~skeliner.pre.preprocess` or
+      :func:`~skeliner.pre.break_up_mesh`.  Skips soma detection,
+      gap bridging, and pruning (all handled upstream).  Supports
+      meshes with or without a soma.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Surface mesh of the neuron.
+    components : MeshComponents or None
+        If provided, selects the preprocessing track.  The soma
+        and neurite partition are taken from *components*; most
+        other parameters (bridging, pruning, soma detection) are
+        ignored.
+    soma_init_guess : str or None
+        Soma-seed heuristic for the direct track.  ``"nucleus"``
+        runs :func:`~skeliner.pre.find_nucleus_center` to locate
+        the soma before binning.  ``"<axis>-<mode>"`` (e.g.
+        ``"z-min"``) selects an extreme vertex.  ``None`` falls
+        back to *soma_init_guess_axis* / *soma_init_guess_mode*.
+    verbose : bool, default ``False``
+        Print per-stage timing.
+    second_pass : bool, default ``True``
+        Run the perpendicular re-binning pass: the first-pass bins
+        build a rough skeleton, then every degree-2 chain is re-binned
+        by projecting its vertices onto that path, and a ``centerline``
+        radius is recorded.  Roughly halves median bin tilt.
+        **Preprocessing track only** — ignored when ``components`` is
+        not given.
+
+    Returns
+    -------
+    Skeleton
+        Acyclic skeleton.  Node 0 is the soma centroid (when
+        detected) or a deterministic root vertex.
+    """
+    # ------------------------------------------------------------------
+    #  Dispatch to the appropriate track
+    # ------------------------------------------------------------------
+    if components is not None:
+        return _skeletonize_preproc(
+            mesh,
+            components,
+            radius_estimators=radius_estimators,
+            geodesic_step_size=geodesic_step_size,
+            geodesic_shell_count=geodesic_shell_count,
+            min_shell_vertices=min_shell_vertices,
+            max_shell_width_factor=max_shell_width_factor,
+            soma_init_guess_axis=soma_init_guess_axis,
+            soma_init_guess_mode=soma_init_guess_mode,
+            unit=unit,
+            id=id,
+            verbose=verbose,
+            second_pass=second_pass,
+        )
+
+    return _skeletonize_direct(
+        mesh,
+        radius_estimators=radius_estimators,
+        detect_soma=detect_soma,
+        soma_seed_point=soma_seed_point,
+        soma_radius_percentile_threshold=soma_radius_percentile_threshold,
+        soma_radius_distance_factor=soma_radius_distance_factor,
+        soma_min_nodes=soma_min_nodes,
+        soma_init_guess=soma_init_guess,
+        soma_init_guess_axis=soma_init_guess_axis,
+        soma_init_guess_mode=soma_init_guess_mode,
+        geodesic_step_size=geodesic_step_size,
+        geodesic_shell_count=geodesic_shell_count,
+        min_shell_vertices=min_shell_vertices,
+        max_shell_width_factor=max_shell_width_factor,
+        split_elongated_shells=split_elongated_shells,
+        split_aspect_thr=split_aspect_thr,
+        split_min_shell_vertices=split_min_shell_vertices,
+        split_max_vertices_per_slice=split_max_vertices_per_slice,
+        merge_nodes_overlap_fraction=merge_nodes_overlap_fraction,
+        bridge_gaps=bridge_gaps,
+        bridge_max_factor=bridge_max_factor,
+        bridge_recalc_after=bridge_recalc_after,
+        collapse_soma=collapse_soma,
+        collapse_soma_dist_factor=collapse_soma_dist_factor,
+        collapse_soma_radius_factor=collapse_soma_radius_factor,
+        prune_tiny_neurites=prune_tiny_neurites,
+        prune_tip_extent_factor=prune_tip_extent_factor,
+        prune_stem_extent_factor=prune_stem_extent_factor,
+        prune_drop_single_node_branches=prune_drop_single_node_branches,
+        unit=unit,
+        id=id,
+        verbose=verbose,
+        postprocess=postprocess,
     )

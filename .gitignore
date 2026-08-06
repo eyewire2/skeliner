@@ -23,13 +23,15 @@ venv/
 .DS_Store
 
 # Editor directories and files
-.claude
 .idea/
 .vscode/
 *.swp
 *.swo
 
 data/*
+notebooks/data/*
+notebooks/data/*.npz
+notebooks/data/*.obj
 # !data/20156.obj
 
 dev/
@@ -41,3 +43,5 @@ dev/
 .python-version
 
 *.obj
+
+.claude
