@@ -112,7 +112,7 @@ sk.post.calibrate_radii(
 It's highly recommended to run the auto mesh preprocessing pipeline before skeletonization, as the raw mesh full of 
 artifacts that might bias the geodedic binning. 
 
-```
+```python
 import skeliner as sk
 
 mesh = sk.io.load_mesh("cellA.obj")  # or trimesh.load_mesh directly
