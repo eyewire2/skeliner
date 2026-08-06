@@ -2754,6 +2754,8 @@ def break_up_mesh(
     organelles: Organelles,
     *,
     rescued=None,
+    released=None,
+    claim_min_faces: int = 0,
     verbose: bool = False,
 ) -> MeshComponents:
     """Break the mesh using soma and organelles, classify the pieces.
@@ -2765,12 +2767,21 @@ def break_up_mesh(
       without crossing organelle faces (topologically trapped).
     - **missed soma** — reachable, but boundary is mostly soma faces.
     - **neurite** — reachable, large enough to be a real branch.
-    - **discarded** — reachable, but too small (below auto threshold),
-      unless it carries a face named in *rescued*.
+    - **discarded** — reachable, but too small (below auto threshold).
+
+    A component carrying a face named in *rescued* skips all three
+    demotions and is a neurite regardless.
 
     The discard threshold is auto-inferred: components are sorted by
     size descending; once the cumulative face count reaches 95% of
     the total, the remaining components are discarded.
+
+    The soma test is a *boundary* test: it measures what fraction of a
+    component's outer edges are shared with soma faces, not how far the
+    component reaches.  A process leaving the soma is capped at its far
+    end, so the junction is nearly all the boundary it has, and a real
+    dendritic stub can score well over 0.5 — which is what *rescued* is
+    for.
 
     When ``soma`` is ``None`` (no soma in this mesh — e.g. a fragment
     or a non-somal cell type), the soma face mask is empty, the
@@ -2787,11 +2798,23 @@ def break_up_mesh(
     organelles : Organelles
         From :func:`find_organelles`.
     rescued : array-like of int, optional
-        Face ids the user has declared arbor.  A component that the
-        threshold would discard is kept as a neurite instead if it
-        carries one of them.  Passed through to the result, so the
-        override survives being re-derived; the neurite/discarded split
-        is derived state and a plain mutation of it would not.
+        Face ids the user has declared arbor, naming a component they
+        had in hand.  Any component carrying one is a neurite: not
+        absorbed into the soma, not expanded into the organelles, not
+        discarded by the size threshold, at any size.
+    released : array-like of int, optional
+        The same claim made with a lasso instead.  It escapes absorption
+        and trapping just as *rescued* does, but carries a component past
+        the size threshold only if the piece has at least
+        *claim_min_faces*.  The two are separate because they differ in
+        how well the user could aim: a lasso grazes slivers it did not
+        mean, and releasing a patch strands isolated triangles at the
+        boundary the >=2-of-3 face rule then moves, so an unfiltered
+        lasso claim produces two-face neurites.
+    claim_min_faces : int, default 0
+        The floor for *released*.  Under it a claimed component still
+        leaves the soma and the organelles — it lands in ``discarded``,
+        where it is visible, rather than becoming a neurite.
     verbose : bool
 
     Returns
@@ -2806,11 +2829,23 @@ def break_up_mesh(
     verts = mesh.vertices
     nF = len(faces)
 
-    rescued_fi = (
-        np.empty(0, dtype=np.int64)
-        if rescued is None
-        else np.unique(np.asarray(rescued, dtype=np.int64))
-    )
+    def _face_claim(ids) -> np.ndarray:
+        m = np.zeros(nF, dtype=bool)
+        if ids is None:
+            return m
+        fi = np.unique(np.asarray(ids, dtype=np.int64))
+        m[fi[(fi >= 0) & (fi < nF)]] = True
+        return m
+
+    # Naming a face claims its whole component as arbor.  Both kinds of
+    # claim outrank organelle trapping and soma absorption — each is a
+    # different reason a component stops being a neurite, and "this is
+    # arbor" answers both, so an override covering only one of them would
+    # be undone by the other on the next re-derive.  They part company at
+    # the size threshold; see `released`.
+    rescued_face = _face_claim(rescued)
+    released_face = _face_claim(released)
+    claimed_face = rescued_face | released_face
 
     # Mesh-mutating steps (e.g. remove_gaps) may have appended faces
     # since find_organelles ran. The new faces are stitch geometry, never
@@ -2888,19 +2923,23 @@ def break_up_mesh(
     organelles_expanded = organelles.mask.copy()
     n_trapped = 0
     n_soma_absorbed = 0
+    n_claimed = 0
 
     for comp in components:
+        claimed = bool(claimed_face[comp].any())
+        n_claimed += claimed
+
         # Reachability: is any face in its mesh component's body?
         in_main = reachable[comp].any()
 
-        if not in_main:
+        if not in_main and not claimed:
             # trapped by organelles
             organelles_expanded[comp] = True
             n_trapped += len(comp)
             continue
 
         # Boundary analysis for soma detection (skipped without a soma)
-        if soma is not None:
+        if soma is not None and not claimed:
             comp_set = set(comp.tolist())
             n_soma = 0
             n_total = 0
@@ -2946,13 +2985,21 @@ def break_up_mesh(
     discarded = neurite_candidates[split_idx:]
 
     # --- re-apply the hand overrides the threshold knows nothing about ---
+    # Only here do the two claims differ.  Escaping the soma is a
+    # judgement about *what the surface is* and holds at any size; being a
+    # neurite is a judgement about whether there is enough of it to be a
+    # branch, and only a claim the user could aim precisely earns that
+    # unconditionally.  A lassoed piece under the floor still left the
+    # soma — it lands in `discarded`, visible, and can be rescued
+    # deliberately from there.
     promoted: list[np.ndarray] = []
-    if len(rescued_fi) and discarded:
-        keep = np.zeros(nF, dtype=bool)
-        keep[rescued_fi[(rescued_fi >= 0) & (rescued_fi < nF)]] = True
+    if claimed_face.any() and discarded:
         still_discarded: list[np.ndarray] = []
         for comp in discarded:
-            (promoted if keep[comp].any() else still_discarded).append(comp)
+            keep = rescued_face[comp].any() or (
+                len(comp) >= claim_min_faces and released_face[comp].any()
+            )
+            (promoted if keep else still_discarded).append(comp)
         if promoted:
             discarded = still_discarded
             neurites = sorted(neurites + promoted, key=len, reverse=True)
@@ -2963,8 +3010,8 @@ def break_up_mesh(
         parts = [f"{len(neurites)} neurites"]
         if discarded:
             parts.append(f"{len(discarded)} discarded ({n_disc_faces:,}f)")
-        if promoted:
-            parts.append(f"rescued {len(promoted)}")
+        if n_claimed:
+            parts.append(f"claimed {n_claimed}")
         if n_trapped:
             parts.append(f"trapped +{n_trapped:,}f")
         if n_soma_absorbed:
@@ -3080,6 +3127,8 @@ def preview_reassignment(
     *,
     to: str,
     rescued=None,
+    released=None,
+    claim_min_faces: int = 0,
     verbose: bool = False,
 ) -> Reassignment:
     """Work out what assigning *faces* to *to* would do, without doing it.
@@ -3092,7 +3141,8 @@ def preview_reassignment(
 
     That is also why ``to='remainder'`` rather than a named neurite: the
     faces are released from the soma and organelle masks, and which
-    neurite they join is decided by what they touch.
+    neurite they join is decided by what they touch.  Releasing is only
+    half of it — see *rescued*.
 
     The preview runs the real :func:`break_up_mesh` on the edited state
     rather than modelling it.  That matters — connectivity is only its
@@ -3122,9 +3172,20 @@ def preview_reassignment(
         sets them in :attr:`~skeliner.dataclass.Organelles.manual`;
         ``'remainder'`` releases them from both, back to the arbor.
     rescued : array-like of int, optional
-        Threshold overrides in force, passed straight to
+        The component-level arbor claims in force, passed straight to
         :func:`break_up_mesh`.  Without them the re-derive this preview
-        runs would silently re-discard fragments the user had rescued.
+        runs undoes them: a released stub is still surrounded by soma, so
+        absorption reclaims it, and a released speck is still small, so
+        the threshold re-discards it.  Without the sets below,
+        the release and its undo would happen in the same call.
+    released : array-like of int, optional
+        The lasso-drawn claims, likewise passed straight through.  A
+        caller releasing faces with ``to='remainder'`` normally wants the
+        selection *in this* set — otherwise the release and its undo
+        happen in the same call, which is what "the reassignment did
+        nothing" looks like from the outside.
+    claim_min_faces : int, default 0
+        Passed to :func:`break_up_mesh`, where it floors *released*.
     verbose : bool
         Passed to :func:`break_up_mesh`.
 
@@ -3196,7 +3257,15 @@ def preview_reassignment(
     leaving = np.flatnonzero(before_arbor & ~after_arbor)
     entering = np.flatnonzero(~before_arbor & after_arbor)
 
-    after = break_up_mesh(mesh, new_soma, new_org, rescued=rescued, verbose=verbose)
+    after = break_up_mesh(
+        mesh,
+        new_soma,
+        new_org,
+        rescued=rescued,
+        released=released,
+        claim_min_faces=claim_min_faces,
+        verbose=verbose,
+    )
 
     return Reassignment(
         target=to,
@@ -8497,6 +8566,8 @@ def preprocess(
     mesh: trimesh.Trimesh,
     *,
     rescued=None,
+    released=None,
+    claim_min_faces: int = 0,
     compact: bool = False,
     verbose: bool = False,
 ) -> tuple[trimesh.Trimesh, MeshComponents]:
@@ -8523,6 +8594,10 @@ def preprocess(
         :func:`break_up_mesh` in step 6.  The neurite/discarded split is
         re-derived from scratch here, so an override that is not fed back
         in is undone by the run.
+    released : array-like of int, optional
+        Lasso-drawn arbor claims, likewise passed through to step 6.
+    claim_min_faces : int, default 0
+        Passed to :func:`break_up_mesh` in step 6.
     compact : bool, default False
         If True, run :func:`compact_mesh` as a final step to drop
         unreferenced vertices and degenerate faces.  This invalidates
@@ -8601,7 +8676,14 @@ def preprocess(
 
     # 6. Break up mesh
     with _timed("↳  break up mesh", verbose=verbose) as log:
-        components = break_up_mesh(mesh, soma, org, rescued=rescued)
+        components = break_up_mesh(
+            mesh,
+            soma,
+            org,
+            rescued=rescued,
+            released=released,
+            claim_min_faces=claim_min_faces,
+        )
         log(f"{len(components.neurites)} neurites")
 
     # 7. Compact (optional — remaps everything in MeshComponents)

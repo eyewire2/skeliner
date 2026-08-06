@@ -207,6 +207,90 @@ def test_apply_commits_exactly_what_the_preview_promised(reassign_client):
     )
 
 
+# ── releasing soma surface back to the arbor ──────────────────────────
+#
+# Releasing is only half the operation.  break_up_mesh absorbs any
+# component whose boundary is mostly soma, so a stub released from the
+# soma is re-absorbed by the very re-derive the reassignment runs — the
+# release happens and is undone in the same call.  Recording the claim is
+# what makes it stick.
+
+
+def _soma_faces_of(state):
+    from skeliner import pre
+
+    faces = np.asarray(state["mesh"].faces)
+    return np.flatnonzero(pre.soma_face_mask(faces, state["soma"].verts))
+
+
+def test_releasing_to_the_arbor_records_the_claim(reassign_client):
+    client, state, _ = reassign_client
+    sel = [int(f) for f in _soma_faces_of(state)[:64]]
+    assert len(state["released"]) == 0
+
+    client.post("/reassign_preview", json={"faces": sel, "to": "remainder"})
+    client.post("/reassign_apply")
+
+    assert set(sel) <= set(state["released"].tolist())
+    assert len(state["rescued"]) == 0, (
+        "a lasso claim is not a component-level rescue — it is floored"
+    )
+
+
+def test_assigning_to_the_soma_withdraws_the_claim(reassign_client):
+    """The opposite statement, so leaving the claim standing would have
+    the override fight the assignment just made."""
+    client, state, _ = reassign_client
+    sel = [int(f) for f in _soma_faces_of(state)[:64]]
+
+    client.post("/reassign_preview", json={"faces": sel, "to": "remainder"})
+    client.post("/reassign_apply")
+    assert set(sel) <= set(state["released"].tolist())
+
+    client.post("/reassign_preview", json={"faces": sel, "to": "soma"})
+    client.post("/reassign_apply")
+    assert not (set(sel) & set(state["released"].tolist()))
+
+
+def test_assigning_to_an_organelle_withdraws_the_claim(reassign_client):
+    client, state, _ = reassign_client
+    sel = [int(f) for f in _soma_faces_of(state)[:64]]
+    client.post("/reassign_preview", json={"faces": sel, "to": "remainder"})
+    client.post("/reassign_apply")
+
+    client.post("/reassign_preview", json={"faces": sel, "to": "organelle"})
+    client.post("/reassign_apply")
+    assert not (set(sel) & set(state["released"].tolist()))
+
+
+def test_the_preview_forecasts_the_release_with_the_claim_in_force(reassign_client):
+    """A preview run without the claim forecasts a re-absorption the
+    commit will not perform — the two must use the same set."""
+    client, state, _ = reassign_client
+    sel = [int(f) for f in _soma_faces_of(state)[:64]]
+
+    preview = client.post(
+        "/reassign_preview", json={"faces": sel, "to": "remainder"}
+    ).json()
+    applied = client.post("/reassign_apply").json()
+
+    assert applied["nNeurites"] == preview["nNeurites"]
+    assert applied["nDiscarded"] == preview["nDiscarded"]
+    assert applied["somaVerts"] == len(state["soma"].verts)
+
+
+def test_a_claim_survives_the_next_re_derive(reassign_client):
+    """The point of recording it: a later break must not take it back."""
+    client, state, _ = reassign_client
+    sel = [int(f) for f in _soma_faces_of(state)[:64]]
+    client.post("/reassign_preview", json={"faces": sel, "to": "remainder"})
+    n_neurites = client.post("/reassign_apply").json()["nNeurites"]
+
+    again = client.post("/break_up_mesh")
+    assert again.status_code == 200
+    assert again.json()["nNeurites"] == n_neurites
+
+
 def test_cancel_retires_the_preview(reassign_client):
     client, _, neurites = reassign_client
     client.post(

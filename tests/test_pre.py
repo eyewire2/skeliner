@@ -1150,6 +1150,86 @@ class TestPreviewReassignment:
         assert set(sel.tolist()) <= set(back.entering.tolist())
 
 
+# ── claiming a component as arbor ────────────────────────────────────
+#
+# `rescued` names faces the user has declared arbor, and the claim beats
+# all three ways a component can stop being a neurite: the size
+# threshold, absorption into the soma, and organelle trapping.
+
+
+def _ball_with_stub():
+    """A soma-sized ball with a short process standing on it.
+
+    The process's far end is a closed cap, so the junction with the ball
+    is nearly all the boundary it has and the absorption rule reads it as
+    soma — the shape that sends a real dendritic stub into the soma.
+    """
+    ball = trimesh.creation.icosphere(subdivisions=4, radius=100.0)
+    stub = trimesh.creation.cylinder(radius=12.0, height=160.0, sections=24)
+    stub.apply_translation([0.0, 0.0, 170.0])
+    mesh = _combine([ball, stub])
+    z = np.zeros(len(mesh.faces), dtype=bool)
+    org = Organelles(pocket=z.copy(), isolated=z.copy(), expanded=z.copy())
+    sv = np.flatnonzero(np.linalg.norm(mesh.vertices, axis=1) <= 105.0)
+    return mesh, Soma.fit(mesh.vertices[sv], verts=sv), org
+
+
+def _tube_cut_by_an_organelle_band():
+    """A tube ringed by organelle faces all the way round.
+
+    A partial band leaves a way past and does not trap anything, so the
+    band has to close for this fixture to be about trapping at all.
+    """
+    mesh = _subdivided_tube(sections=16, height=1000.0)
+    cz = mesh.vertices[mesh.faces].mean(axis=1)[:, 2]
+    band = (cz > 100) & (cz < 190)
+    z = np.zeros(len(mesh.faces), dtype=bool)
+    return mesh, Organelles(pocket=band, isolated=z.copy(), expanded=z.copy())
+
+
+def _arbor_pieces(mesh, soma, org):
+    """The components break_up_mesh is about to classify."""
+    faces = np.asarray(mesh.faces)
+    remain = (
+        pre._usable_face_mask(mesh)
+        & ~pre.soma_face_mask(faces, None if soma is None else soma.verts)
+        & ~org.mask
+    )
+    return pre._face_components_fast(faces, np.flatnonzero(remain))
+
+
+class TestSomaAbsorption:
+    """What the rule does unaided — the premise the override exists for."""
+
+    def test_a_process_on_the_soma_is_absorbed(self):
+        mesh, soma, org = _ball_with_stub()
+        assert len(_arbor_pieces(mesh, soma, org)) == 1, (
+            "fixture must leave exactly the process to classify"
+        )
+        c = pre.break_up_mesh(mesh, soma, org)
+        assert len(c.neurites) == 0
+        assert len(c.discarded) == 0, "absorbed, not discarded — a different rule"
+
+    def test_absorbing_it_grows_the_soma_around_it(self):
+        # Absorption is not a relabel: the verts join soma.verts and the
+        # ellipsoid is re-fit, so a wrong absorption also inflates the soma.
+        mesh, soma, org = _ball_with_stub()
+        stub = _arbor_pieces(mesh, soma, org)[0]
+        absorbed = pre.break_up_mesh(mesh, soma, org)
+        kept = pre.break_up_mesh(mesh, soma, org, rescued=stub[:1])
+        assert len(absorbed.soma.verts) > len(kept.soma.verts)
+        assert len(kept.soma.verts) == len(soma.verts)
+        assert kept.soma.equiv_radius < absorbed.soma.equiv_radius
+
+    def test_a_full_organelle_band_traps_what_is_behind_it(self):
+        mesh, org = _tube_cut_by_an_organelle_band()
+        pieces = _arbor_pieces(mesh, None, org)
+        assert len(pieces) == 2, "the band must close, or nothing is trapped"
+        c = pre.break_up_mesh(mesh, None, org)
+        assert int(c.organelles.expanded.sum()) == len(pieces[1])
+        assert len(c.neurites) == 1
+
+
 # ── rescuing a discarded fragment ────────────────────────────────────
 
 
@@ -1255,6 +1335,63 @@ class TestRescued:
             mesh, c, elsewhere, to="organelle", rescued=speck
         )
         assert len(kept.components.discarded) == 0
+
+    def test_a_claim_outranks_the_soma_absorption_rule(self):
+        # The rule reads a process on the soma as soma, because a process
+        # capped at its far end has the junction for nearly all of its
+        # boundary.  A claim is how the user says otherwise.
+        mesh, soma, org = _ball_with_stub()
+        stub = _arbor_pieces(mesh, soma, org)[0]
+        c = pre.break_up_mesh(mesh, soma, org, rescued=stub[:1])
+        assert len(c.neurites) == 1
+        assert set(c.neurites[0].tolist()) == set(stub.tolist())
+
+    def test_a_claim_outranks_organelle_trapping(self):
+        mesh, org = _tube_cut_by_an_organelle_band()
+        far = _arbor_pieces(mesh, None, org)[1]
+        c = pre.break_up_mesh(mesh, None, org, rescued=far[:1])
+        assert int(c.organelles.expanded.sum()) == 0
+        assert sorted(len(x) for x in c.neurites) == sorted(
+            len(p) for p in _arbor_pieces(mesh, None, org)
+        )
+
+    def test_the_floor_applies_to_a_lasso_claim_and_not_to_a_rescue(self):
+        # The two differ only in how well the user could aim, which is
+        # exactly why they are separate arguments.
+        mesh, org = _tube_with_speck()
+        speck = pre.break_up_mesh(mesh, None, org).discarded[0]
+        assert len(speck) < 16, "fixture speck must sit under the floor"
+
+        lassoed = pre.break_up_mesh(mesh, None, org, released=speck, claim_min_faces=16)
+        assert len(lassoed.discarded) == 1
+
+        picked = pre.break_up_mesh(mesh, None, org, rescued=speck, claim_min_faces=16)
+        assert len(picked.discarded) == 0
+
+    def test_the_floor_does_not_hand_a_claim_back_to_the_soma(self):
+        # The floor decides neurite vs discarded and nothing else.  Under
+        # it the piece must stay out of the soma — escaping absorption is
+        # the half of the claim that is not size-dependent.
+        mesh, soma, org = _ball_with_stub()
+        stub = _arbor_pieces(mesh, soma, org)[0]
+        c = pre.break_up_mesh(
+            mesh, soma, org, released=stub[:1], claim_min_faces=len(stub) + 1
+        )
+        assert len(c.soma.verts) == len(soma.verts), "the soma must not have grown"
+        assert sum(len(x) for x in c.neurites) + sum(
+            len(x) for x in c.discarded
+        ) == len(stub), "the piece is still on the arbor side, whichever list it is in"
+
+    def test_the_floor_only_gates_what_the_threshold_discarded(self):
+        # It is a filter on the promotion, not a minimum neurite size: a
+        # piece the 95% rule keeps by itself is a neurite either way.
+        mesh, soma, org = _ball_with_stub()
+        stub = _arbor_pieces(mesh, soma, org)[0]
+        c = pre.break_up_mesh(
+            mesh, soma, org, released=stub[:1], claim_min_faces=len(stub) + 1
+        )
+        assert [len(x) for x in c.neurites] == [len(stub)]
+        assert len(c.discarded) == 0
 
     def test_a_full_preprocess_does_not_undo_a_rescue(self):
         # Same hazard one level up: preprocess ends in break_up_mesh, so a

@@ -270,6 +270,16 @@ def _get_viewer_html() -> str:
     return html_path.read_text(encoding="utf-8")
 
 
+#: How much of a claimed component there must be for it to be a neurite.
+#: ``break_up_mesh`` honours every claim by default, which is right when a
+#: caller named a component it had in hand.  Here the claims are drawn with
+#: a lasso, which grazes slivers it did not mean and strands isolated
+#: triangles at the boundary it moves, so the viewer sets a floor.  Under it
+#: a claimed piece still leaves the soma — it lands in Discarded, visible,
+#: rather than becoming a two-face neurite.
+_CLAIM_MIN_FACES = 16
+
+
 # ── Server ────────────────────────────────────────────────────────────
 
 
@@ -311,7 +321,33 @@ def _create_app(
         # is re-derived on every break and reassignment, so an override
         # that lived on the result would be undone by the next one.
         "rescued": np.empty(0, dtype=np.int64),
+        # The same claim drawn with a lasso.  Kept apart from `rescued`
+        # because the two differ in how well the user could aim: a
+        # double-clicked component is exact, a lasso grazes slivers, so
+        # only the second wants a size floor.
+        "released": np.empty(0, dtype=np.int64),
+        # Input state for the same reason, and held here rather than
+        # taken per request so that a re-derive nobody passed it to still
+        # uses the floor the current components were produced with.
+        "claim_min_faces": _CLAIM_MIN_FACES,
     }
+
+    def _claim_floor(body) -> int:
+        """The claim size floor, updated if the request carried one."""
+        raw = (body or {}).get("claimMinFaces")
+        if raw is not None:
+            try:
+                mesh_state["claim_min_faces"] = max(0, int(raw))
+            except (TypeError, ValueError):
+                pass
+        return mesh_state["claim_min_faces"]
+
+    async def _body_of(request) -> dict:
+        """Parse a JSON body, tolerating routes that are posted without one."""
+        try:
+            return await request.json() or {}
+        except Exception:
+            return {}
 
     def _organelle_mask(org) -> np.ndarray | None:
         """Combined bool mask from Organelles object."""
@@ -573,6 +609,7 @@ def _create_app(
                 mesh_state["organelles"] = None
                 mesh_state["mesh_stats"] = None
                 mesh_state["rescued"] = np.empty(0, dtype=np.int64)
+                mesh_state["released"] = np.empty(0, dtype=np.int64)
                 annotations_path.write_text("{}", encoding="utf-8")
                 await broadcast({"type": "all_skeletons_removed"})
 
@@ -750,6 +787,7 @@ def _create_app(
                 # an override left over from another mesh would name
                 # unrelated faces.
                 mesh_state["rescued"] = np.empty(0, dtype=np.int64)
+                mesh_state["released"] = np.empty(0, dtype=np.int64)
 
                 # Build annotations
                 ann = {}
@@ -2611,7 +2649,7 @@ def _create_app(
             "orgFaces": int(new_org.sum()),
         }
 
-    async def do_break_up_mesh(_request):
+    async def do_break_up_mesh(request):
         """Break mesh at soma: classify components, expand soma + organelles."""
         if mesh_state["mesh"] is None:
             return JSONResponse(
@@ -2628,10 +2666,17 @@ def _create_app(
         from skeliner.pre import break_up_mesh
 
         mesh = mesh_state["mesh"]
+        floor = _claim_floor(await _body_of(request))
 
         def _run():
             return break_up_mesh(
-                mesh, soma, org, rescued=mesh_state["rescued"], verbose=True
+                mesh,
+                soma,
+                org,
+                rescued=mesh_state["rescued"],
+                released=mesh_state["released"],
+                claim_min_faces=floor,
+                verbose=True,
             )
 
         result = await _run_with_log(_run)
@@ -2640,7 +2685,7 @@ def _create_app(
         mesh_state["pending_reassignment"] = None
         return JSONResponse({"ok": True, **_publish_components(result)})
 
-    async def do_preprocess(_request):
+    async def do_preprocess(request):
         """Run the whole pipeline in one call.
 
         This *is* ``pre.preprocess`` rather than the panel's buttons pressed
@@ -2664,12 +2709,18 @@ def _create_app(
 
         mesh = mesh_state["mesh"]
         n_before = len(mesh.faces)
+        floor = _claim_floor(await _body_of(request))
 
         # An override the user has already made is input to this run, not a
         # casualty of it — break_up_mesh re-derives the neurite/discarded
         # split from scratch and would otherwise re-discard what they rescued.
         new_mesh, components = await _run_with_log(
-            preprocess, mesh, rescued=mesh_state["rescued"], verbose=True
+            preprocess,
+            mesh,
+            rescued=mesh_state["rescued"],
+            released=mesh_state["released"],
+            claim_min_faces=floor,
+            verbose=True,
         )
 
         await _apply_new_mesh(new_mesh)
@@ -2695,6 +2746,30 @@ def _create_app(
             neurites=mesh_state.get("neurites") or Neurites([]),
             discarded=mesh_state.get("discarded") or Discarded([]),
         )
+
+    def _released_after(target, sel) -> np.ndarray:
+        """The lasso claims a reassignment to *target* leaves behind.
+
+        Sending faces to the arbor is a claim that they are arbor, and
+        without recording it the re-derive that the reassignment runs takes
+        them straight back: a released stub is still surrounded by soma, so
+        the absorption rule re-absorbs it, and a released speck is still
+        small, so the threshold re-discards it.  The release only looks like
+        it failed — it happened, and was undone in the same call.
+
+        The two other targets are the same statement negated, so they
+        withdraw the claim; leaving it in place would have the override
+        fight the assignment that was just made.
+
+        Derived here rather than remembered so the preview and the commit
+        cannot use different sets — a preview that forecasts one outcome and
+        applies another is worse than no preview.
+        """
+        held = np.asarray(mesh_state["released"], dtype=np.int64)
+        sel = np.asarray(sel, dtype=np.int64)
+        if target == "remainder":
+            return np.union1d(held, sel)
+        return np.setdiff1d(held, sel)
 
     async def reassign_preview(request):
         """Preview handing the selected faces to soma / organelle / neurites."""
@@ -2725,6 +2800,7 @@ def _create_app(
 
         mesh = mesh_state["mesh"]
         components = _current_components()
+        floor = _claim_floor(body)
 
         def _run():
             return preview_reassignment(
@@ -2733,6 +2809,8 @@ def _create_app(
                 sel,
                 to=target,
                 rescued=mesh_state["rescued"],
+                released=_released_after(target, sel),
+                claim_min_faces=floor,
                 verbose=True,
             )
 
@@ -2770,6 +2848,16 @@ def _create_app(
 
         components = _current_components()
         apply_reassignment(components, r)
+        # The same set the preview ran with, so what was forecast is what
+        # is now in force — and what the next re-derive will honour.
+        mesh_state["released"] = _released_after(r.target, r.selected)
+        if r.target != "remainder":
+            # Assigning faces to the soma or an organelle is the opposite
+            # statement, so it withdraws a deliberate rescue too.
+            mesh_state["rescued"] = np.setdiff1d(
+                np.asarray(mesh_state["rescued"], dtype=np.int64),
+                np.asarray(r.selected, dtype=np.int64),
+            )
         mesh_state["pending_reassignment"] = None
         out = _publish_components(components)
         await _log(f"Applied: {r.summary}")
@@ -2867,12 +2955,12 @@ def _create_app(
         mesh_state["neurites"] = components.neurites
         mesh_state["discarded"] = components.discarded
         # Remapped rather than cleared with the derived state below: a
-        # rescue is something the user decided and cannot be recovered
+        # claim is something the user decided and cannot be recovered
         # by re-running anything, so it is kept like soma and organelles.
-        old_rescued = np.asarray(mesh_state["rescued"], dtype=np.int64)
-        old_rescued = old_rescued[old_rescued < n_faces_before]
-        mapped = face_map[old_rescued]
-        mesh_state["rescued"] = mapped[mapped >= 0]
+        for key in ("rescued", "released"):
+            old = np.asarray(mesh_state[key], dtype=np.int64)
+            mapped = face_map[old[old < n_faces_before]]
+            mesh_state[key] = mapped[mapped >= 0]
         mesh_state["mesh_stats"] = None
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None

@@ -474,7 +474,7 @@
                     <button
                         id="reassignRemainderBtn"
                         style="margin-left: 4px"
-                        title="Release from soma and organelles — connectivity decides which neurite it joins"
+                        title="Release from soma and organelles — connectivity decides which neurite it joins.&#10;The claim is recorded, so later re-derives will not absorb the faces back. Select the whole protrusion: the claim is honoured per connected piece, but only the faces you release stop being soma."
                     >
                         Neurites
                     </button>
@@ -482,6 +482,29 @@
                         <button id="reassignApplyBtn">Apply</button>
                         <button id="reassignCancelBtn" style="margin-left: 4px">Cancel</button>
                     </span>
+                    <label
+                        style="margin-left: 12px; color: #888"
+                        title="A released piece with fewer faces than this is still taken out of the soma, but lands in Discarded instead of becoming a neurite.&#10;A lasso claims every sliver it grazes, and releasing a patch leaves isolated triangles behind, so without a floor a release makes two-face neurites. 0 keeps everything."
+                    >
+                        min faces
+                        <input
+                            type="number"
+                            id="claimMinFaces"
+                            min="0"
+                            step="1"
+                            value="16"
+                            style="
+                                width: 52px;
+                                font-size: 11px;
+                                font-family: monospace;
+                                background: #222;
+                                color: #ccc;
+                                border: 1px solid #555;
+                                padding: 1px 3px;
+                                margin-left: 4px;
+                            "
+                        />
+                    </label>
                 </div>
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span
@@ -1055,6 +1078,12 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("skelCancelBtn").addEventListener("click", runSkelCancel);
                 document.getElementById("scopeAllBtn").addEventListener("click", () => setScopeAll(true));
                 document.getElementById("scopeNoneBtn").addEventListener("click", () => setScopeAll(false));
+                const claimInput = document.getElementById("claimMinFaces");
+                const savedClaimMin = localStorage.getItem("skeliner_claimMinFaces");
+                if (savedClaimMin !== null) claimInput.value = savedClaimMin;
+                claimInput.addEventListener("change", () =>
+                    localStorage.setItem("skeliner_claimMinFaces", claimInput.value),
+                );
                 document.getElementById("preprocessBtn").addEventListener("click", runPreprocess);
                 document.getElementById("skeletonizeBtn").addEventListener("click", runSkeletonize);
                 document.getElementById("findPathBtn").addEventListener("click", () => runFindPath("edge"));
@@ -2174,18 +2203,34 @@ let meshCentroid = [0, 0, 0];
             // The run's own progress and its summary line already arrive over
             // the WebSocket into #log-status, so there is nothing for a hint
             // beside the button to add.
+            // How much of a claimed component there must be for it to be a
+            // neurite.  Sent with every route that re-derives, so a floor
+            // changed after a release is honoured by the next break too.
+            function claimMinFaces() {
+                const v = parseInt(document.getElementById("claimMinFaces").value, 10);
+                return Number.isFinite(v) && v >= 0 ? v : 0;
+            }
+
             async function runPreprocess() {
                 const data = await _runAction(
                     document.getElementById("preprocessBtn"),
-                    () => fetch("/preprocess", { method: "POST" }),
+                    () => _postJSON("/preprocess"),
                 );
                 if (data && data.ok) fetchAnnotations();
+            }
+
+            function _postJSON(url, extra) {
+                return fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ claimMinFaces: claimMinFaces(), ...extra }),
+                });
             }
 
             async function runBreakUpMesh() {
                 const data = await _runAction(
                     document.getElementById("breakUpMeshBtn"),
-                    () => fetch("/break_up_mesh", { method: "POST" }),
+                    () => _postJSON("/break_up_mesh"),
                 );
                 if (data && data.ok) fetchAnnotations();
             }
@@ -2572,6 +2617,7 @@ let meshCentroid = [0, 0, 0];
                         body: JSON.stringify({
                             faces: Array.from(manualHighlightFaces),
                             to: target,
+                            claimMinFaces: claimMinFaces(),
                         }),
                     }),
                 );
