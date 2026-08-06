@@ -8545,10 +8545,19 @@ def compact_mesh(
         manual=organelles.manual[good],
     )
 
+    # Names ride through the remap.  Compaction reindexes faces and changes
+    # nothing about the partition — same pieces, same order — so unlike a
+    # re-derive it is not a reason to drop what they were called.
+    src_labels = components.neurites.labels
+    src_types = components.neurites.swc_types
     remapped = MeshComponents(
         soma=remapped_soma,
         organelles=remapped_org,
-        neurites=Neurites(_remap_face_list(components.neurites)),
+        neurites=Neurites(
+            _remap_face_list(components.neurites),
+            labels=None if src_labels is None else list(src_labels),
+            swc_types=None if src_types is None else list(src_types),
+        ),
         discarded=Discarded(_remap_face_list(components.discarded)),
     )
 

@@ -773,95 +773,42 @@ def _create_app(
                 )
 
             elif suffix == ".npz" and _is_components_data(tmp_path):
+                from skeliner.dataclass import MeshComponents
                 from skeliner.io import load_components_npz
 
                 comp = load_components_npz(tmp_path)
 
-                # Store state
-                if comp.soma is not None:
-                    mesh_state["soma"] = comp.soma
-                mesh_state["organelles"] = comp.organelles
-                mesh_state["neurites"] = comp.neurites
-                mesh_state["discarded"] = comp.discarded
                 # The file's split is already whatever its author decided;
                 # an override left over from another mesh would name
                 # unrelated faces.
                 mesh_state["rescued"] = np.empty(0, dtype=np.int64)
                 mesh_state["released"] = np.empty(0, dtype=np.int64)
 
-                # Build annotations
-                ann = {}
-                if annotations_path.exists():
-                    ann = json.loads(annotations_path.read_text(encoding="utf-8"))
-                ann["highlights"] = []
-
-                mesh = mesh_state.get("mesh")
-                centroid = mesh_state.get("centroid", np.zeros(3))
-
-                # Soma
-                if (
-                    comp.soma is not None
-                    and mesh is not None
-                    and comp.soma.verts is not None
-                ):
-                    soma_vset = set(int(v) for v in comp.soma.verts)
-                    soma_faces = [
-                        int(fi)
-                        for fi in range(len(mesh.faces))
-                        if sum(1 for v in mesh.faces[fi] if int(v) in soma_vset) >= 2
-                    ]
-                    ann["highlights"].append(
-                        {"faces": soma_faces, "color": [0.9, 0.5, 0.9], "label": "soma"}
+                # A components file with no soma does not clear one that is
+                # already loaded — it says nothing about the soma.
+                if comp.soma is None and mesh_state.get("soma") is not None:
+                    comp = MeshComponents(
+                        soma=mesh_state["soma"],
+                        organelles=comp.organelles,
+                        neurites=comp.neurites,
+                        discarded=comp.discarded,
                     )
-                    ann["ellipsoids"] = [
-                        {
-                            "center": (comp.soma.center - centroid).tolist(),
-                            "axes": comp.soma.axes.tolist(),
-                            "R": comp.soma.R.tolist(),
-                            "color": [0.9, 0.5, 0.9],
-                        }
-                    ]
 
-                # Organelles (non-soma)
                 org_mask = comp.organelles.mask
-                if mesh is not None and org_mask.any():
-                    ann["highlights"].append(
-                        {
-                            "faces": np.where(org_mask)[0].tolist(),
-                            "color": [1.0, 0.8, 0.0],
-                            "label": f"organelles ({int(org_mask.sum()):,}f)",
-                        }
-                    )
+                if mesh_state.get("mesh") is None:
+                    # Nothing to draw them against; keep the state so a mesh
+                    # dropped afterwards has components to publish.
+                    mesh_state["soma"] = comp.soma
+                    mesh_state["organelles"] = comp.organelles
+                    mesh_state["neurites"] = comp.neurites
+                    mesh_state["discarded"] = comp.discarded
+                else:
+                    # One implementation of "draw these components", shared
+                    # with break_up_mesh and every reassignment — a second
+                    # copy here is how a loaded file came back showing
+                    # "neurite 0" over components that had been named.
+                    _publish_components(comp)
 
-                # Neurites
-                neurite_colors = [
-                    [0.2, 0.6, 1.0],
-                    [0.3, 1.0, 0.3],
-                    [1.0, 0.4, 0.1],
-                    [0.0, 0.9, 0.9],
-                    [1.0, 0.2, 0.6],
-                ]
-                for i, nf in enumerate(comp.neurites):
-                    c = neurite_colors[i % len(neurite_colors)]
-                    ann["highlights"].append(
-                        {
-                            "faces": nf.tolist(),
-                            "color": c,
-                            "label": f"neurite {i} ({len(nf):,}f)",
-                        }
-                    )
-
-                # Discarded
-                for i, df in enumerate(comp.discarded):
-                    ann["highlights"].append(
-                        {
-                            "faces": df.tolist(),
-                            "color": [0.5, 0.5, 0.5],
-                            "label": f"discarded {i} ({len(df):,}f)",
-                        }
-                    )
-
-                annotations_path.write_text(json.dumps(ann), encoding="utf-8")
                 loaded = []
                 if comp.soma is not None:
                     loaded.append("soma")
@@ -897,13 +844,20 @@ def _create_app(
                     [0.0, 0.9, 0.9],
                     [1.0, 0.2, 0.6],
                 ]
+                # A bare neurites file is not a full set of components, so
+                # this cannot go through _publish_components — but it does
+                # carry names, and drawing them as "neurite {i}" would throw
+                # away what the file says.
+                labels = neurites.labels
                 for i, nf in enumerate(neurites):
                     c = neurite_colors[i % len(neurite_colors)]
+                    name = labels[i] if labels is not None else f"neurite {i}"
                     ann["highlights"].append(
                         {
                             "faces": nf.tolist(),
                             "color": c,
-                            "label": f"neurite {i} ({len(nf):,}f)",
+                            "label": f"{name} ({len(nf):,}f)",
+                            "neurite": i,
                         }
                     )
 
@@ -2956,7 +2910,12 @@ def _create_app(
         n_verts_before = len(mesh.vertices)
         nF = len(mesh.faces)
 
-        # Build a MeshComponents from current viewer state
+        # Build a MeshComponents from current viewer state.  The neurites
+        # and discarded must be the real ones: `compact_mesh` remaps every
+        # face array it is handed, and the result is written straight back
+        # into mesh_state below — so passing empty lists here did not mean
+        # "leave them alone", it meant the components were *erased* by a
+        # compaction, silently, along with anything they had been named.
         if org is None:
             org = Organelles(
                 pocket=np.zeros(nF, dtype=bool),
@@ -2966,8 +2925,8 @@ def _create_app(
         components = MeshComponents(
             soma=soma,
             organelles=org,
-            neurites=Neurites([]),
-            discarded=Discarded([]),
+            neurites=mesh_state.get("neurites") or Neurites([]),
+            discarded=mesh_state.get("discarded") or Discarded([]),
         )
 
         def _run():

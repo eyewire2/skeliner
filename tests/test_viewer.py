@@ -1726,3 +1726,112 @@ def test_an_unnamed_neurite_skeletonizes_to_undefined(named_client):
     ntype = _skeleton_of(client).ntype
     assert ntype[0] == 1
     assert set(ntype[1:].tolist()) == {0}
+
+
+def test_compacting_keeps_the_components_and_their_names(named_client):
+    """Compaction reindexes faces; it does not re-derive anything.
+
+    The route used to hand `compact_mesh` empty Neurites/Discarded and
+    write the result straight back, so a compaction erased every neurite
+    from mesh_state — and any name on them — without saying a word.
+    """
+    client, state = named_client
+    client.post("/name_neurite", json={"index": 0, "label": "dendrite 0"})
+    n_before = len(state["neurites"])
+    assert n_before == 2
+
+    assert client.post("/compact_mesh").status_code == 200
+
+    assert len(state["neurites"]) == n_before, "compaction must not drop components"
+    assert state["neurites"].labels[0] == "dendrite 0"
+
+
+def test_the_exported_components_carry_the_names(named_client, tmp_path):
+    from skeliner import io as skio
+
+    client, state = named_client
+    client.post("/name_neurite", json={"index": 0, "label": "dendrite 0"})
+
+    resp = client.get("/export_components?prefix=")
+    assert resp.status_code == 200
+    out = tmp_path / "components.npz"
+    out.write_bytes(resp.content)
+
+    back = skio.load_components_npz(out)
+    assert back.neurites.labels == ["dendrite 0", "neurite 1"]
+    assert back.neurites.swc_types == [3, 0]
+
+
+@pytest.mark.parametrize("fmt", ["npz", "swc"])
+def test_the_exported_skeleton_carries_the_names_and_types(named_client, tmp_path, fmt):
+    from skeliner import io as skio
+
+    client, _ = named_client
+    client.post("/name_neurite", json={"index": 0, "label": "axon"})
+    client.post("/name_neurite", json={"index": 1, "label": "dendrite 1"})
+    assert client.post("/skeletonize", json={}).status_code == 200
+
+    resp = client.get(f"/export_skeleton?name=skeleton&format={fmt}")
+    assert resp.status_code == 200, resp.text
+    out = tmp_path / f"s.{fmt}"
+    out.write_bytes(resp.content)
+
+    loader = skio.load_skeleton_npz if fmt == "npz" else skio.load_skeleton_swc
+    back = loader(out)
+    assert set(back.ntype[1:].tolist()) == {2, 3}
+    assert back.meta["neurite_labels"] == ["axon", "dendrite 1"]
+
+
+def test_a_dropped_components_file_shows_the_names_it_carries(named_client, tmp_path):
+    """Round trip through the file, the way the user does it.
+
+    The upload path built its own highlight list instead of going through
+    _publish_components, so a file whose neurites had been named came back
+    labelled "neurite 0" — the names were in the archive and on the
+    components, and only the drawing had forgotten them.
+    """
+    from skeliner import io as skio
+
+    client, state = named_client
+    client.post("/name_neurite", json={"index": 0, "label": "axon"})
+    client.post("/name_neurite", json={"index": 1, "label": "dendrite 1"})
+
+    out = tmp_path / "components.npz"
+    out.write_bytes(client.get("/export_components?prefix=").content)
+    assert skio.load_components_npz(out).neurites.labels == ["axon", "dendrite 1"]
+
+    # Forget them, then drop the file back in.
+    state["neurites"].clear_names()
+    r = client.post(
+        "/upload",
+        files={
+            "file": ("components.npz", out.read_bytes(), "application/octet-stream")
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    assert state["neurites"].labels == ["axon", "dendrite 1"]
+    ann = client.get("/annotations").json()
+    named = {h["neurite"]: h["label"] for h in ann["highlights"] if "neurite" in h}
+    assert named[0].startswith("axon (")
+    assert named[1].startswith("dendrite 1 (")
+
+
+def test_a_dropped_neurites_file_shows_the_names_it_carries(named_client, tmp_path):
+    from skeliner import io as skio
+
+    client, state = named_client
+    client.post("/name_neurite", json={"index": 0, "label": "axon"})
+
+    out = tmp_path / "neurites.npz"
+    skio.save_neurites_npz(state["neurites"], out)
+
+    r = client.post(
+        "/upload",
+        files={"file": ("neurites.npz", out.read_bytes(), "application/octet-stream")},
+    )
+    assert r.status_code == 200, r.text
+
+    ann = client.get("/annotations").json()
+    named = {h["neurite"]: h["label"] for h in ann["highlights"] if "neurite" in h}
+    assert named[0].startswith("axon (")

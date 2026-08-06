@@ -1440,3 +1440,24 @@ class TestRealMesh:
         clean = pre.remove_fragments(reference_mesh)
         # Should keep at least 90% of faces (main component)
         assert _live_faces(clean) > _live_faces(reference_mesh) * 0.5
+
+
+def test_compaction_remaps_names_rather_than_dropping_them():
+    """Compaction reindexes faces and leaves the partition alone, so it is
+    not a re-derive and not a reason to forget what a neurite was called."""
+    mesh, soma, org = _ball_with_stub()
+    stub = _arbor_pieces(mesh, soma, org)[0]
+    comp = pre.break_up_mesh(mesh, soma, org, rescued=stub[:1])
+    comp.neurites.name(0, "axon")
+
+    _, out = pre.compact_mesh(mesh, comp)
+    assert out.neurites.labels == ["axon"]
+    assert out.neurites.swc_types == [2]
+
+
+def test_compaction_leaves_unnamed_neurites_unnamed():
+    mesh, soma, org = _ball_with_stub()
+    stub = _arbor_pieces(mesh, soma, org)[0]
+    comp = pre.break_up_mesh(mesh, soma, org, rescued=stub[:1])
+    _, out = pre.compact_mesh(mesh, comp)
+    assert out.neurites.named is False

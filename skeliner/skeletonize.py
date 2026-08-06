@@ -2,7 +2,7 @@ import time
 from collections import deque
 from contextlib import contextmanager, nullcontext
 from importlib import metadata as _metadata
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import igraph as ig
 import numpy as np
@@ -1726,29 +1726,51 @@ def _skeletonize_preproc(
         r0 = float(list(radii_dict.values())[0][0])
         soma = Soma.from_sphere(nodes_arr[0], r0, verts=None)
 
-    # -- carry the neurites' hand-given SWC codes onto their nodes --
+    # -- carry the neurites' hand-given identity onto the skeleton --
     # Read through `vert2node` rather than by re-deriving the node ranges:
     # the assembly lays sub-skeletons down in order, but skips any that came
     # out empty, so an index into `components.neurites` is not an index into
     # the node blocks.  Ownership is exact and needs no such assumption.
     #
-    # Node 0 is excluded: under the >=2-of-3 face rule a face at the soma
-    # junction carries soma vertices, so a neurite's vertex set reaches node
-    # 0, and stamping it would retype the soma as a dendrite.
-    if components.neurites.swc_types is not None:
-        for face_idx, code in zip(
-            components.neurites.components, components.neurites.swc_types
+    # Node 0 is excluded throughout: under the >=2-of-3 face rule a face at
+    # the soma junction carries soma vertices, so a neurite's vertex set
+    # reaches node 0, and stamping it would retype the soma as a dendrite.
+    #
+    # Three things are recorded, because `ntype` alone loses information:
+    # it collapses "dendrite 0" and "dendrite 1" into the same code 3, and
+    # SWC has no field for a name.  The labels go in `meta`, which both the
+    # npz and the SWC header carry, and the per-node owner goes in `extra`,
+    # which is what lets a name be resolved back to nodes.
+    skel_meta = _skel_meta("preproc", unit, id, _params)
+    skel_extra: dict[str, Any] = (
+        {
+            "cl_dist_vids": np.asarray(cl_vids, dtype=np.int64),
+            "cl_dist_vals": np.asarray(cl_dists, dtype=np.float64),
+        }
+        if cl_vids
+        else {}
+    )
+
+    if components.neurites.named:
+        node2neurite = np.full(len(nodes_arr), -1, dtype=np.int32)
+        for ni, (face_idx, code) in enumerate(
+            zip(components.neurites.components, components.neurites.swc_types)
         ):
-            if not code:
-                continue
             nids = {
                 vert2node[int(v)]
                 for v in np.unique(mesh.faces[face_idx].ravel())
                 if int(v) in vert2node
             }
             nids.discard(0)
-            if nids:
-                ntype[np.fromiter(nids, dtype=np.int64, count=len(nids))] = code
+            if not nids:
+                continue
+            owned = np.fromiter(nids, dtype=np.int64, count=len(nids))
+            node2neurite[owned] = ni
+            if code:
+                ntype[owned] = code
+        skel_meta["neurite_labels"] = list(components.neurites.labels)
+        skel_meta["neurite_swc_types"] = [int(c) for c in components.neurites.swc_types]
+        skel_extra["node2neurite"] = node2neurite
 
     return Skeleton(
         nodes=nodes_arr,
@@ -1758,15 +1780,8 @@ def _skeletonize_preproc(
         soma=soma,
         node2verts=node2verts,
         vert2node=vert2node,
-        meta=_skel_meta("preproc", unit, id, _params),
-        extra=(
-            {
-                "cl_dist_vids": np.asarray(cl_vids, dtype=np.int64),
-                "cl_dist_vals": np.asarray(cl_dists, dtype=np.float64),
-            }
-            if cl_vids
-            else {}
-        ),
+        meta=skel_meta,
+        extra=skel_extra,
     )
 
 

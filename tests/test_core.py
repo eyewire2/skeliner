@@ -512,3 +512,75 @@ def test_a_zero_code_leaves_its_nodes_alone():
     comp.neurites.name(1, "axon")
     skel = skeletonize(mesh, components=comp, verbose=False)
     assert set(skel.ntype[1:].tolist()) == {0, 2}
+
+
+# ── the name and its SWC code reach every persisted form ──────────────
+#
+# `ntype` alone loses the name: "dendrite 0" and "dendrite 1" are both
+# code 3, and SWC has no field for a name.  So the labels ride in `meta`,
+# which both the npz and the SWC header carry, and the per-node owner in
+# `extra`, which is what resolves a name back to nodes.
+
+
+def _named_skeleton():
+    mesh, comp = _ball_with_two_processes()
+    comp.neurites.name(0, "axon")
+    comp.neurites.name(1, "dendrite 1")
+    return skeletonize(mesh, components=comp, verbose=False)
+
+
+def test_the_skeleton_records_the_names_and_the_owner_of_each_node():
+    skel = _named_skeleton()
+    assert skel.meta["neurite_labels"] == ["axon", "dendrite 1"]
+    assert skel.meta["neurite_swc_types"] == [2, 3]
+    owner = skel.extra["node2neurite"]
+    assert len(owner) == len(skel.nodes)
+    assert owner[0] == -1, "the soma belongs to no neurite"
+    assert set(owner.tolist()) == {-1, 0, 1}
+
+
+def test_an_unnamed_skeleton_records_neither():
+    mesh, comp = _ball_with_two_processes()
+    skel = skeletonize(mesh, components=comp, verbose=False)
+    assert "neurite_labels" not in skel.meta
+    assert "node2neurite" not in skel.extra
+
+
+def test_names_and_ntype_survive_the_skeleton_npz(tmp_path):
+    from skeliner import io
+
+    skel = _named_skeleton()
+    io.save_skeleton_npz(skel, tmp_path / "s.npz")
+    back = io.load_skeleton_npz(tmp_path / "s.npz")
+
+    assert set(back.ntype[1:].tolist()) == {2, 3}
+    assert back.meta["neurite_labels"] == ["axon", "dendrite 1"]
+    assert np.array_equal(back.extra["node2neurite"], skel.extra["node2neurite"])
+
+
+def test_names_and_ntype_survive_the_swc(tmp_path):
+    """SWC carries the type in its own column and the names in the
+    `# meta` header, which the loader parses back."""
+    from skeliner import io
+
+    skel = _named_skeleton()
+    io.save_skeleton_swc(skel, tmp_path / "s.swc")
+    back = io.load_skeleton_swc(tmp_path / "s.swc")
+
+    assert set(back.ntype[1:].tolist()) == {2, 3}
+    assert back.meta["neurite_labels"] == ["axon", "dendrite 1"]
+
+
+def test_the_swc_type_column_is_what_was_named(tmp_path):
+    """Read the file as text — the column is the whole point of naming."""
+    from skeliner import io
+
+    skel = _named_skeleton()
+    io.save_skeleton_swc(skel, tmp_path / "s.swc")
+    types = [
+        int(line.split()[1])
+        for line in (tmp_path / "s.swc").read_text().splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert types[0] == 1, "the soma"
+    assert set(types[1:]) == {2, 3}
