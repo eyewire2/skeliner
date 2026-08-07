@@ -10,6 +10,10 @@ robust contact‑site mapping between pairs of cells using both skeletons and me
 
 ## Features
 
+- Mesh Preprocessing
+    - remove mesh anomolies such as parallel faces due to chunk merging failures, gaps (broken neurites), fusions (wrong connections)
+    - find and classify soma, organelles, neurites and fragments that should be descarded 
+
 - Mesh → SWC skeletons
     - Center‑line, acyclic skeleton.
     - Per‑node radii with multiple estimators (median/mean/trim) and an automatic recommendation.
@@ -80,7 +84,7 @@ Problem (2) is adressed using ray‑casting to remove inner vertices of the mesh
 This is computationally expensive, so per default it is only done for nodes that have many vertices.
 This can be controlled via the `min_verts_q_outer` parameter.
 
-You can use sk.post.calibrate_radii to improve it:
+You can use `sk.post.calibrate_radii` to improve it:
 
 ```python
 import skeliner as sk
@@ -103,6 +107,21 @@ sk.post.calibrate_radii(
 )
 ```
 
+### Mesh preprocessing
+
+It's highly recommended to run the auto mesh preprocessing pipeline before skeletonization, as the raw mesh full of 
+artifacts that might bias the geodedic binning. 
+
+```python
+import skeliner as sk
+
+mesh = sk.io.load_mesh("cellA.obj")  # or trimesh.load_mesh directly
+mesh, components = sk.preprocess(mesh, compact=True, verbose=True)
+skel_preproc = sk.skeletonize(mesh=mesh, components=components, verbose=True)
+```
+
+But it will of course take longer time to produce the skeleton. 
+
 ### Find contact sites between two cells (skeleton + mesh)
 
 ```python
@@ -123,7 +142,6 @@ print("contact patches:", len(sites.faces_A))
 print("mean areas (mesh units^2):", sites.area_mean)
 
 # Optional: visualize patches
-# from skeliner.plot.vis3d import view_contacts
 # sk.plot.view_contacts(meshA, meshB, sites, sides="A")
 ```
 

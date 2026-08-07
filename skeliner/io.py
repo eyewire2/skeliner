@@ -9,14 +9,45 @@ import trimesh
 
 from ._core import _bfs_parents
 from ._state import rebuild_vert2node
-from .dataclass import Skeleton, Soma
+from .dataclass import (
+    Discarded,
+    MeshComponents,
+    MeshStats,
+    Neurites,
+    Organelles,
+    Skeleton,
+    Soma,
+)
 
 __all__ = [
     "load_mesh",
-    "load_swc",
-    "to_swc",
-    "load_npz",
-    "to_npz",
+    "save_mesh",
+    "load_skeleton",
+    "save_skeleton",
+    "load_skeleton_swc",
+    "save_skeleton_swc",
+    "load_skeleton_npz",
+    "save_skeleton_npz",
+    "load_soma",
+    "save_soma",
+    "load_soma_npz",
+    "save_soma_npz",
+    "load_organelles",
+    "save_organelles",
+    "load_organelles_npz",
+    "save_organelles_npz",
+    "load_mesh_stats",
+    "save_mesh_stats",
+    "load_mesh_stats_npz",
+    "save_mesh_stats_npz",
+    "load_neurites",
+    "save_neurites",
+    "load_discarded",
+    "save_discarded",
+    "load_components",
+    "save_components",
+    "load_contact_sites",
+    "save_contact_sites",
 ]
 
 _META_KV = re.compile(r"#\s*([^:]+)\s*:\s*(.+)")  #  key: value
@@ -49,12 +80,21 @@ def load_mesh(filepath: str | Path) -> trimesh.Trimesh:
     return mesh
 
 
+def save_mesh(mesh: trimesh.Trimesh, path: str | Path) -> None:
+    """Write a mesh to disk. Format is inferred from the file extension.
+
+    Supports any format that trimesh can export (obj, ply, stl, glb, ...).
+    """
+    path = Path(path)
+    mesh.export(str(path))
+
+
 # -----------
 # --- SWC ---
 # -----------
 
 
-def load_swc(
+def load_skeleton_swc(
     path: str | Path,
     *,
     scale: float = 1.0,
@@ -135,7 +175,11 @@ def load_swc(
     # --- core arrays ----------------------------------------------------
     nodes_arr = np.asarray(xyz, dtype=np.float64) * scale
     radii_arr = np.asarray(radii, dtype=np.float64) * scale
-    radii_dict = {"median": radii_arr, "mean": radii_arr, "trim": radii_arr}
+    radii_dict = {
+        "median": radii_arr,
+        "mean": radii_arr.copy(),
+        "trim": radii_arr.copy(),
+    }
     ntype_arr = np.asarray(ntype, dtype=np.int8)
     # --- edges (parent IDs → 0-based indices) ---------------------------
     id_map = {old: new for new, old in enumerate(ids)}
@@ -150,7 +194,7 @@ def load_swc(
         edges_arr = np.unique(edges_arr, axis=0)
 
     # --- minimal spherical soma around node 0 --------------------------
-    soma_centre = nodes_arr[0]
+    soma_centre = nodes_arr[0].copy()
     soma_radius = radii_arr[0]
     soma = Soma.from_sphere(soma_centre, soma_radius, verts=None)
 
@@ -167,7 +211,7 @@ def load_swc(
     )
 
 
-def to_swc(
+def save_skeleton_swc(
     skeleton,
     path: str | Path,
     include_header: bool = True,
@@ -242,7 +286,7 @@ def to_swc(
             zip(nodes[:, axis_order] * scale, radii * scale, parent, ntype), start=1
         ):
             fh.write(
-                f"{idx} {int(-1 if ((idx == 1) and not (t in [-1, 1])) else t)} "  # ensure soma has type -1 or +1
+                f"{idx} {int(-1 if ((idx == 1) and t not in [-1, 1]) else t)} "  # ensure soma has type -1 or +1
                 f"{coord[0]} {coord[1]} {coord[2]} {r} "
                 f"{(pa + 1) if pa != -1 else -1}\n"
             )
@@ -253,9 +297,9 @@ def to_swc(
 # -----------
 
 
-def load_npz(path: str | Path) -> Skeleton:
+def load_skeleton_npz(path: str | Path) -> Skeleton:
     """
-    Load a Skeleton that was written with `Skeleton.to_npz`.
+    Load a Skeleton that was written with `Skeleton.to_npz` / `save_skeleton_npz`.
     """
     path = Path(path)
 
@@ -331,7 +375,7 @@ def load_npz(path: str | Path) -> Skeleton:
     return skel
 
 
-def to_npz(
+def save_skeleton_npz(
     skeleton: Skeleton,
     path: str | Path,
     *,
@@ -372,11 +416,19 @@ def to_npz(
             idx_min, idx_max = n2v_idx.min(), n2v_idx.max()
             if idx_min >= 0 and idx_max <= np.iinfo(np.uint16).max:
                 n2v_idx = n2v_idx.astype(np.uint16)
-            elif idx_min < 0 and idx_min >= np.iinfo(np.int16).min and idx_max <= np.iinfo(np.int16).max:
+            elif (
+                idx_min < 0
+                and idx_min >= np.iinfo(np.int16).min
+                and idx_max <= np.iinfo(np.int16).max
+            ):
                 n2v_idx = n2v_idx.astype(np.int16)
             elif idx_min >= 0 and idx_max <= np.iinfo(np.uint32).max:
                 n2v_idx = n2v_idx.astype(np.uint32)
-            elif idx_min < 0 and idx_min >= np.iinfo(np.int32).min and idx_max <= np.iinfo(np.int32).max:
+            elif (
+                idx_min < 0
+                and idx_min >= np.iinfo(np.int32).min
+                and idx_max <= np.iinfo(np.int32).max
+            ):
                 n2v_idx = n2v_idx.astype(np.int32)
             else:
                 n2v_idx = n2v_idx.astype(np.int64)
@@ -387,11 +439,19 @@ def to_npz(
         off_min, off_max = n2v_off.min(), n2v_off.max()
         if off_min >= 0 and off_max <= np.iinfo(np.uint16).max:
             n2v_off = n2v_off.astype(np.uint16)
-        elif off_min < 0 and off_min >= np.iinfo(np.int16).min and off_max <= np.iinfo(np.int16).max:
+        elif (
+            off_min < 0
+            and off_min >= np.iinfo(np.int16).min
+            and off_max <= np.iinfo(np.int16).max
+        ):
             n2v_off = n2v_off.astype(np.int16)
         elif off_min >= 0 and off_max <= np.iinfo(np.uint32).max:
             n2v_off = n2v_off.astype(np.uint32)
-        elif off_min < 0 and off_min >= np.iinfo(np.int32).min and off_max <= np.iinfo(np.int32).max:
+        elif (
+            off_min < 0
+            and off_min >= np.iinfo(np.int32).min
+            and off_max <= np.iinfo(np.int32).max
+        ):
             n2v_off = n2v_off.astype(np.int32)
         else:
             n2v_off = n2v_off.astype(np.int64)
@@ -444,6 +504,372 @@ def to_npz(
         **extra,
         **meta,
         **tree_payload,
+    )
+
+
+# ------------
+# --- Soma ---
+# ------------
+
+
+def save_soma_npz(soma: Soma, path: str | Path, *, compress: bool = True) -> None:
+    """Write a standalone :class:`Soma` to a compressed ``.npz`` archive."""
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+
+    payload = dict(
+        center=soma.center,
+        axes=soma.axes,
+        R=soma.R,
+    )
+    if soma.verts is not None:
+        payload["verts"] = soma.verts.astype(np.int64, copy=False)
+    if soma.nucleus is not None:
+        nuc = soma.nucleus
+        payload["nucleus_center"] = np.asarray(nuc["center"], dtype=np.float64)
+        payload["nucleus_peak_r"] = np.array(nuc["peak_r"], dtype=np.float64)
+        payload["nucleus_z_range"] = np.array(nuc["z_range"], dtype=np.float64)
+        payload["nucleus_slices"] = np.asarray(nuc["slices"], dtype=np.float64)
+
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_soma_npz(path: str | Path) -> Soma:
+    """Load a :class:`Soma` written by :func:`save_soma_npz`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        nucleus = None
+        if "nucleus_center" in z:
+            nucleus = {
+                "center": z["nucleus_center"].astype(np.float64),
+                "peak_r": float(z["nucleus_peak_r"]) if "nucleus_peak_r" in z else 0.0,
+                "z_range": tuple(z["nucleus_z_range"].astype(np.float64))
+                if "nucleus_z_range" in z
+                else (0.0, 0.0),
+                "slices": z["nucleus_slices"].astype(np.float64)
+                if "nucleus_slices" in z
+                else np.empty((0, 4)),
+            }
+        return Soma(
+            center=z["center"].astype(np.float64),
+            axes=z["axes"].astype(np.float64),
+            R=z["R"].astype(np.float64),
+            verts=z["verts"].astype(np.int64) if "verts" in z else None,
+            nucleus=nucleus,
+        )
+
+
+# ---------------------------
+# --- Organelles NPZ I/O ---
+# ---------------------------
+
+
+def save_organelles_npz(
+    organelles: Organelles,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write an :class:`Organelles` to a compressed ``.npz`` archive.
+
+    Only stores the organelle masks.  See :func:`save_mesh_stats_npz`
+    for persisting the associated :class:`MeshStats` separately.
+    """
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+
+    payload: dict[str, np.ndarray] = {
+        "pocket": np.asarray(organelles.pocket, dtype=bool),
+        "isolated": np.asarray(organelles.isolated, dtype=bool),
+        "expanded": np.asarray(organelles.expanded, dtype=bool),
+        "manual": np.asarray(organelles.manual, dtype=bool),
+    }
+
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_organelles_npz(path: str | Path) -> Organelles:
+    """Load an :class:`Organelles` written by :func:`save_organelles_npz`.
+
+    Older files that bundled ``outward_dots``/``face_comp``/``main_ci``
+    are still readable — those fields are silently ignored.  Use
+    :func:`load_mesh_stats_npz` if you need the cached mesh statistics.
+    Files written before ``expanded``/``manual`` existed load with those
+    masks all False.
+    """
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        pocket = z["pocket"].astype(bool)
+        return Organelles(
+            pocket=pocket,
+            isolated=z["isolated"].astype(bool),
+            expanded=z["expanded"].astype(bool)
+            if "expanded" in z
+            else np.zeros_like(pocket),
+            manual=z["manual"].astype(bool) if "manual" in z else np.zeros_like(pocket),
+        )
+
+
+def save_mesh_stats_npz(
+    mesh_stats: MeshStats,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write a :class:`MeshStats` to a compressed ``.npz`` archive.
+
+    Persists ``outward_dots``, ``face_comp``, and ``main_ci`` so that
+    expensive recomputation can be skipped on reload.  The lifecycle
+    is tied to the mesh — if you mutate the mesh after saving, the
+    stored stats become stale.
+    """
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+
+    payload: dict[str, np.ndarray] = {
+        "outward_dots": np.asarray(mesh_stats.outward_dots),
+        "face_comp": np.asarray(mesh_stats.face_comp),
+        "main_ci": np.array(mesh_stats.main_ci),
+    }
+
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_mesh_stats_npz(
+    path: str | Path,
+    mesh: trimesh.Trimesh | None = None,
+) -> MeshStats:
+    """Load a :class:`MeshStats` written by :func:`save_mesh_stats_npz`.
+
+    Parameters
+    ----------
+    path : str or Path
+        Source archive.
+    mesh : trimesh.Trimesh or None, optional
+        If provided, the loaded face count is validated against
+        ``len(mesh.faces)``.  A mismatch raises :class:`ValueError`
+        because the cached stats no longer match the mesh.
+
+    Notes
+    -----
+    Face count is necessary but not sufficient — same face count can
+    still mean different topology after edits.  Treat the validation
+    as a sanity check, not a guarantee.
+    """
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        outward_dots = z["outward_dots"]
+        face_comp = z["face_comp"]
+        main_ci = int(z["main_ci"])
+
+    if mesh is not None:
+        n_faces = len(mesh.faces)
+        if len(outward_dots) != n_faces or len(face_comp) != n_faces:
+            raise ValueError(
+                f"Loaded mesh_stats face count "
+                f"({len(outward_dots)}) does not match mesh "
+                f"({n_faces}); the cached stats are stale."
+            )
+
+    return MeshStats(
+        outward_dots=outward_dots,
+        face_comp=face_comp,
+        main_ci=main_ci,
+    )
+
+
+# --------------------------------
+# --- Neurites / Discarded NPZ ---
+# --------------------------------
+
+
+def save_neurites_npz(
+    neurites: Neurites,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write a :class:`Neurites` to a compressed ``.npz`` archive."""
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+    payload: dict[str, np.ndarray] = {
+        "n": np.array(len(neurites.components)),
+    }
+    for i, comp in enumerate(neurites.components):
+        payload[f"c{i}"] = np.asarray(comp, dtype=np.int64)
+    if neurites.labels is not None:
+        payload["labels"] = np.asarray(neurites.labels, dtype=np.str_)
+        payload["swc_types"] = np.asarray(neurites.swc_types, dtype=np.int16)
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_neurites_npz(path: str | Path) -> Neurites:
+    """Load a :class:`Neurites` written by :func:`save_neurites_npz`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        n = int(z["n"])
+        components = [z[f"c{i}"].astype(np.int64) for i in range(n)]
+        labels = [str(x) for x in z["labels"]] if "labels" in z else None
+        swc_types = [int(x) for x in z["swc_types"]] if "swc_types" in z else None
+    return Neurites(components, labels=labels, swc_types=swc_types)
+
+
+def save_discarded_npz(
+    discarded: Discarded,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write a :class:`Discarded` to a compressed ``.npz`` archive."""
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+    payload: dict[str, np.ndarray] = {
+        "n": np.array(len(discarded.components)),
+    }
+    for i, comp in enumerate(discarded.components):
+        payload[f"c{i}"] = np.asarray(comp, dtype=np.int64)
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_discarded_npz(path: str | Path) -> Discarded:
+    """Load a :class:`Discarded` written by :func:`save_discarded_npz`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        n = int(z["n"])
+        components = [z[f"c{i}"].astype(np.int64) for i in range(n)]
+    return Discarded(components)
+
+
+# ----------------------------------
+# --- MeshComponents NPZ I/O ---
+# ----------------------------------
+
+
+def save_components_npz(
+    components: MeshComponents,
+    path: str | Path,
+    *,
+    compress: bool = True,
+) -> None:
+    """Write a :class:`MeshComponents` to a single ``.npz`` archive.
+
+    Packs soma, organelles, neurites, and discarded into one file.
+    """
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".npz")
+
+    payload: dict[str, np.ndarray] = {}
+
+    # Soma
+    if components.soma is not None:
+        s = components.soma
+        payload["soma_center"] = s.center
+        payload["soma_axes"] = s.axes
+        payload["soma_R"] = s.R
+        if s.verts is not None:
+            payload["soma_verts"] = s.verts.astype(np.int64, copy=False)
+        if s.nucleus is not None:
+            nuc = s.nucleus
+            payload["soma_nucleus_center"] = np.asarray(nuc["center"], dtype=np.float64)
+            payload["soma_nucleus_peak_r"] = np.array(nuc["peak_r"], dtype=np.float64)
+            payload["soma_nucleus_z_range"] = np.array(nuc["z_range"], dtype=np.float64)
+            payload["soma_nucleus_slices"] = np.asarray(nuc["slices"], dtype=np.float64)
+
+    # Organelles
+    organelles = components.organelles
+    payload["organelles_pocket"] = np.asarray(organelles.pocket, dtype=bool)
+    payload["organelles_isolated"] = np.asarray(organelles.isolated, dtype=bool)
+    payload["organelles_expanded"] = np.asarray(organelles.expanded, dtype=bool)
+    payload["organelles_manual"] = np.asarray(organelles.manual, dtype=bool)
+
+    # Neurites
+    payload["n_neurites"] = np.array(len(components.neurites.components))
+    for i, comp in enumerate(components.neurites.components):
+        payload[f"neurite_{i}"] = np.asarray(comp, dtype=np.int64)
+    if components.neurites.labels is not None:
+        payload["neurite_labels"] = np.asarray(
+            components.neurites.labels, dtype=np.str_
+        )
+        payload["neurite_swc_types"] = np.asarray(
+            components.neurites.swc_types, dtype=np.int16
+        )
+
+    # Discarded
+    payload["n_discarded"] = np.array(len(components.discarded.components))
+    for i, comp in enumerate(components.discarded.components):
+        payload[f"discarded_{i}"] = np.asarray(comp, dtype=np.int64)
+
+    save_fn = np.savez_compressed if compress else np.savez
+    save_fn(path, **payload)
+
+
+def load_components_npz(path: str | Path) -> MeshComponents:
+    """Load a :class:`MeshComponents` written by :func:`save_components_npz`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        # Soma
+        if "soma_center" in z:
+            nucleus = None
+            if "soma_nucleus_center" in z:
+                nucleus = {
+                    "center": z["soma_nucleus_center"].astype(np.float64),
+                    "peak_r": float(z["soma_nucleus_peak_r"]),
+                    "z_range": tuple(z["soma_nucleus_z_range"].astype(np.float64)),
+                    "slices": z["soma_nucleus_slices"].astype(np.float64),
+                }
+            soma = Soma(
+                center=z["soma_center"].astype(np.float64),
+                axes=z["soma_axes"].astype(np.float64),
+                R=z["soma_R"].astype(np.float64),
+                verts=z["soma_verts"].astype(np.int64) if "soma_verts" in z else None,
+                nucleus=nucleus,
+            )
+        else:
+            soma = None
+
+        # Organelles
+        organelles = Organelles(
+            pocket=z["organelles_pocket"].astype(bool),
+            isolated=z["organelles_isolated"].astype(bool),
+            expanded=z["organelles_expanded"].astype(bool),
+            manual=z["organelles_manual"].astype(bool)
+            if "organelles_manual" in z
+            else None,
+        )
+
+        # Neurites
+        n_n = int(z["n_neurites"])
+        neurites = Neurites(
+            [z[f"neurite_{i}"].astype(np.int64) for i in range(n_n)],
+            labels=(
+                [str(x) for x in z["neurite_labels"]] if "neurite_labels" in z else None
+            ),
+            swc_types=(
+                [int(x) for x in z["neurite_swc_types"]]
+                if "neurite_swc_types" in z
+                else None
+            ),
+        )
+
+        # Discarded
+        n_d = int(z["n_discarded"])
+        discarded = Discarded(
+            [z[f"discarded_{i}"].astype(np.int64) for i in range(n_d)]
+        )
+
+    return MeshComponents(
+        soma=soma, organelles=organelles, neurites=neurites, discarded=discarded
     )
 
 
@@ -642,3 +1068,85 @@ def load_contact_sites_npz(path: str | Path):
             stats_B=stats_B,
             stats_pair=stats_pair,
         )
+
+
+# Backward-compat wrappers — will be removed in a future release.
+
+
+def _deprecated_alias(old_name: str, new_func):
+    import functools
+    import warnings
+
+    @functools.wraps(new_func)
+    def wrapper(*args, **kwargs):
+        warnings.warn(
+            f"{old_name}() is deprecated, use {new_func.__name__}() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return new_func(*args, **kwargs)
+
+    return wrapper
+
+
+def save_skeleton(skeleton, path: str | Path, **kwargs) -> None:
+    """Save a skeleton to ``.swc`` or ``.npz``.
+
+    The format is inferred from the file extension.
+    Extra *kwargs* are forwarded to the format-specific
+    saver (e.g. ``scale=`` for SWC).
+    """
+    path = Path(path)
+    ext = path.suffix.lower()
+    if ext == ".swc":
+        return save_skeleton_swc(skeleton, path, **kwargs)
+    if ext == ".npz":
+        return save_skeleton_npz(skeleton, path, **kwargs)
+    raise ValueError(
+        f"Cannot infer skeleton format from extension '{ext}'. Use .swc or .npz."
+    )
+
+
+def load_skeleton(path: str | Path, **kwargs) -> "Skeleton":
+    """Load a skeleton from ``.swc`` or ``.npz``.
+
+    The format is inferred from the file extension.
+    Extra *kwargs* are forwarded to the format-specific
+    loader (e.g. ``scale=`` for SWC).
+    """
+    path = Path(path)
+    ext = path.suffix.lower()
+    if ext == ".swc":
+        return load_skeleton_swc(path, **kwargs)
+    if ext == ".npz":
+        return load_skeleton_npz(path, **kwargs)
+    raise ValueError(
+        f"Cannot infer skeleton format from extension '{ext}'. Use .swc or .npz."
+    )
+
+
+# -- short aliases (drop the _npz / _swc suffix) ----------
+
+load_soma = load_soma_npz
+load_organelles = load_organelles_npz
+load_mesh_stats = load_mesh_stats_npz
+load_neurites = load_neurites_npz
+load_discarded = load_discarded_npz
+load_components = load_components_npz
+load_contact_sites = load_contact_sites_npz
+
+save_soma = save_soma_npz
+save_organelles = save_organelles_npz
+save_mesh_stats = save_mesh_stats_npz
+save_neurites = save_neurites_npz
+save_discarded = save_discarded_npz
+save_components = save_components_npz
+save_contact_sites = save_contact_sites_npz
+
+
+# -- deprecated aliases ------------------------------------
+
+load_swc = _deprecated_alias("load_swc", load_skeleton_swc)
+to_swc = _deprecated_alias("to_swc", save_skeleton_swc)
+load_npz = _deprecated_alias("load_npz", load_skeleton_npz)
+to_npz = _deprecated_alias("to_npz", save_skeleton_npz)

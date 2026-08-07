@@ -11,6 +11,10 @@ __skeleton__ = [
     "connectivity",
     "check_acyclicity",
     "acyclicity",
+    "check_bins",
+    "edge_support",
+    "face_owner",
+    "bin_faces",
     "degree",
     "neighbors",
     "nodes_of_degree",
@@ -20,6 +24,8 @@ __skeleton__ = [
     "distance",
     "node_summary",
     "extract_neurites",
+    "neurite_names",
+    "neurite_nodes",
     "neurites_out_of_bounds",
     "volume",
     "total_path_length",
@@ -91,6 +97,238 @@ def acyclicity(skel, *, return_cycles: bool = False):
         stacklevel=2,
     )
     return check_acyclicity(skel, return_cycles=return_cycles)
+
+
+def check_bins(skel, *, mesh=None, return_report: bool = False):
+    """Verify that ``node2verts`` and ``vert2node`` still agree.
+
+    A node's position and every radius are computed from the mesh vertices it
+    owns, so a wrong entry here is invisible: the skeleton looks fine, exports
+    fine, and carries radii belonging to the wrong surface.  This turns that
+    into a loud failure.
+
+    What is checked
+    ---------------
+    * ``node2verts[1:]`` are **pairwise disjoint**.
+    * ``vert2node`` is exactly the inverse of ``node2verts``.
+
+    Node 0 is exempt from disjointness.  Its "bin" is ``soma.verts``, assigned
+    wholesale by the soma stitch, while neurites are binned over the *face*
+    based arbor — and under the ≥2-of-3 rule a face with one soma vertex is an
+    arbor face and still contains that vertex.  Boundary vertices therefore
+    belong to both by construction, and ``vert2node`` gives them to the arbor
+    node.  Coverage is not checked either: soma, organelle, discarded and
+    pruned surface are all legitimately unowned.
+
+    Parameters
+    ----------
+    skel
+        A :class:`skeliner.Skeleton` instance.
+    mesh
+        When given, additionally report which bins are split into more than one
+        connected patch of surface.  This is **reported, never failed**: the
+        binning's reunite pass is capped at 8 rounds and leaves a handful of
+        fragmented bins on real cells.
+    return_report
+        Return a dict of details instead of a boolean.
+
+    Returns
+    -------
+    bool or dict
+    """
+    n2v = skel.node2verts
+    v2n = skel.vert2node
+
+    if n2v is None or v2n is None:
+        ok = n2v is None and v2n is None
+        if not return_report:
+            return ok
+        return {
+            "ok": ok,
+            "reason": (
+                "no mesh data"
+                if ok
+                else "one of node2verts / vert2node is None but not the other"
+            ),
+        }
+
+    if len(n2v) != len(skel.nodes):
+        report = {"ok": False, "reason": "node2verts length != node count"}
+        return report if return_report else False
+
+    bins = [np.asarray(v, dtype=np.int64).ravel() for v in n2v]
+    arbor = bins[1:]
+
+    owned = (
+        np.concatenate([b for b in arbor if b.size])
+        if any(b.size for b in arbor)
+        else np.empty(0, dtype=np.int64)
+    )
+    uniq, counts = np.unique(owned, return_counts=True)
+    duplicated = uniq[counts > 1]
+
+    # `vert2node` must be what rebuild_vert2node() would produce: ascending
+    # node order, so an arbor bin overwrites node 0 on the shared boundary.
+    keys = np.fromiter(v2n.keys(), np.int64, len(v2n))
+    vals = np.fromiter(v2n.values(), np.int64, len(v2n))
+    size = 1 + int(
+        max(owned.max(initial=-1), bins[0].max(initial=-1), keys.max(initial=-1))
+    )
+
+    expect = np.full(size, -1, dtype=np.int64)
+    for nid, b in enumerate(bins):
+        if b.size:
+            expect[b] = nid
+    actual = np.full(size, -1, dtype=np.int64)
+    actual[keys] = vals
+    mismatched = np.flatnonzero(expect != actual)
+
+    ok = duplicated.size == 0 and mismatched.size == 0
+
+    if not return_report:
+        return bool(ok)
+
+    soma_overlap = (
+        np.intersect1d(bins[0], uniq, assume_unique=False).size if bins[0].size else 0
+    )
+    report: Dict[str, Any] = {
+        "ok": bool(ok),
+        "n_nodes": len(bins),
+        "n_owned": int(uniq.size),
+        "duplicated": duplicated,
+        "mismatched": mismatched,
+        "empty_bins": [i for i, b in enumerate(bins) if b.size == 0],
+        "soma_overlap": int(soma_overlap),
+    }
+    if mesh is not None:
+        report["fragmented"] = _fragmented_bins(bins, mesh)
+    return report
+
+
+def edge_support(skel, mesh) -> Dict[str, Any]:
+    """Which node pairs the mesh surface joins, against which ones the tree has.
+
+    ``skel.edges`` is a spanning tree *T* of the node-adjacency graph *G* the
+    mesh implies.  *G* is not stored but is recomputable at any time from the
+    mesh and ``vert2node``, and the two differences between them are what an
+    edge edit needs to know:
+
+    ``dropped`` (*G∖T*)
+        Pairs whose bins share surface that the tree does not carry.  Adding
+        one back is a **restore** — the surface really does join them —
+        as opposed to a **graft**, which asserts a connection nothing
+        supports.  That distinction is the whole reason this exists.
+    ``unsupported`` (*T∖G*)
+        Tree edges with no surface behind them at all: the soma stems from
+        ``_stitch_to_soma`` and the synthetic bridges from ``bridge_gaps``.
+        They are why a repartition must never simply re-span *G* — doing so
+        would silently delete precisely the edges holding a broken arbor
+        together.
+
+    What ``dropped`` is **not** is a defect report.  The surface graph has
+    cycles whether or not the arbor does: bins along one tube touch, and so do
+    bins on branches that merely pass close.  Measured on 549190673, 147 of the
+    156 dropped pairs at least three tree hops apart lie *within one branch*
+    with the two bins overlapping in space — a dense axon tuft, not a fusion.
+    A wrongly merged mesh and a tightly packed one look identical here, so
+    nothing in this list may be presented as something to fix.
+    """
+    from .skeletonize import _edges_from_mesh
+
+    v2n = skel.vert2node
+    if v2n is None:
+        raise ValueError("skeleton carries no vert2node — cannot rebuild G")
+
+    g_edges = _edges_from_mesh(np.asarray(mesh.edges_unique), v2n, len(mesh.vertices))
+    tree = np.unique(np.sort(np.asarray(skel.edges, dtype=np.int64), axis=1), axis=0)
+    tset = {(int(u), int(v)) for u, v in tree}
+    gset = {(int(u), int(v)) for u, v in g_edges}
+
+    return {
+        "n_nodes": len(skel.nodes),
+        "n_tree": len(tset),
+        "dropped": sorted(gset - tset),
+        "unsupported": sorted(tset - gset),
+    }
+
+
+def _fragmented_bins(bins: List[np.ndarray], mesh) -> Dict[int, int]:
+    """Map bin id → number of connected surface patches, for bins with >1.
+
+    One pass over the whole mesh rather than a BFS per bin: keep only the mesh
+    edges whose endpoints share an owner, label the connected components of
+    what is left, then count distinct labels within each bin.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n_verts = len(mesh.vertices)
+    owner = np.full(n_verts, -1, dtype=np.int64)
+    for nid, b in enumerate(bins):
+        if nid and b.size:  # node 0 is soma.verts, not a bin
+            owner[b] = nid
+
+    e = np.asarray(mesh.edges_unique)
+    keep = (owner[e[:, 0]] == owner[e[:, 1]]) & (owner[e[:, 0]] >= 1)
+    e = e[keep]
+
+    adj = coo_matrix(
+        (np.ones(len(e), dtype=np.int8), (e[:, 0], e[:, 1])),
+        shape=(n_verts, n_verts),
+    )
+    _, labels = connected_components(adj, directed=False)
+
+    out: Dict[int, int] = {}
+    for nid, b in enumerate(bins):
+        if nid and b.size > 1:
+            n_pieces = np.unique(labels[b]).size
+            if n_pieces > 1:
+                out[nid] = int(n_pieces)
+    return out
+
+
+def face_owner(skel, mesh) -> np.ndarray:
+    """Per-face owning node, ``-1`` where no node owns a majority.
+
+    Bins are sets of *vertices*; almost everything that looks at a mesh —
+    highlighting, picking, lassoing — works in *faces*.  The bridge is the same
+    ≥2-of-3 majority rule the soma already uses (:func:`skeliner.pre.
+    soma_face_mask`): a face belongs to the bin holding at least two of its
+    three vertices.
+
+    Measured on two cells, the rule resolves 77–84 % of faces to exactly one
+    bin and leaves 0.2–0.3 % straddling three; the rest are soma, organelle or
+    discarded surface that no node owns.
+
+    Returns
+    -------
+    (F,) int64
+    """
+    if skel.vert2node is None:
+        return np.full(len(mesh.faces), -1, dtype=np.int64)
+
+    lut = np.full(len(mesh.vertices), -1, dtype=np.int64)
+    keys = np.fromiter(skel.vert2node.keys(), np.int64, len(skel.vert2node))
+    vals = np.fromiter(skel.vert2node.values(), np.int64, len(skel.vert2node))
+    lut[keys] = vals
+
+    per_face = np.sort(lut[np.asarray(mesh.faces)], axis=1)
+    return np.where(
+        per_face[:, 0] == per_face[:, 1],
+        per_face[:, 0],
+        np.where(per_face[:, 1] == per_face[:, 2], per_face[:, 1], -1),
+    )
+
+
+def bin_faces(skel, mesh, node: int, *, owner: np.ndarray | None = None) -> np.ndarray:
+    """Face ids owned by one node — the surface its radius is measured over.
+
+    Pass a cached :func:`face_owner` array as *owner* to avoid recomputing it
+    for every query.
+    """
+    if owner is None:
+        owner = face_owner(skel, mesh)
+    return np.flatnonzero(owner == int(node)).astype(np.int64)
 
 
 # -----------------------------------------------------------------------------
@@ -276,7 +514,7 @@ def distance(
         allowed_nodes_set = {int(n) for n in allowed_nodes if 0 <= int(n) < len(nodes)}
     if allowed_edges is not None:
         allowed_edges_set = set()
-        for (u, v) in allowed_edges:
+        for u, v in allowed_edges:
             u2 = int(u)
             v2 = int(v)
             if u2 == v2:
@@ -306,7 +544,11 @@ def distance(
                 diffs = nodes[centres_list] - p_skel
                 nn_dist_arr = np.linalg.norm(diffs, axis=1)
                 if surface:
-                    rad = (np.asarray([radii[c] for c in centres_list], dtype=np.float64) if radii is not None else 0.0)
+                    rad = (
+                        np.asarray([radii[c] for c in centres_list], dtype=np.float64)
+                        if radii is not None
+                        else 0.0
+                    )
                     best = float(np.min(nn_dist_arr - rad))
                 else:
                     best = float(np.min(nn_dist_arr))
@@ -802,6 +1044,72 @@ def extract_neurites(
     return sorted(out)
 
 
+def neurite_names(skel) -> Dict[int, str]:
+    """The names the neurites had when this skeleton was built.
+
+    ``{index: label}``, empty when the neurites were unnamed or the
+    skeleton did not come from the preprocessing track.  Recorded because
+    ``ntype`` cannot carry it — "dendrite 0" and "dendrite 1" are both
+    code 3.
+
+    Examples
+    --------
+    >>> skel.dx.neurite_names()
+    {0: 'dendrite 0', 1: 'dendrite 1', 2: 'axon'}
+    """
+    labels = (skel.meta or {}).get("neurite_labels")
+    return {} if labels is None else {i: str(x) for i, x in enumerate(labels)}
+
+
+def neurite_nodes(skel, which: int | str) -> np.ndarray:
+    """The nodes belonging to one neurite, by index or by name.
+
+    ``ntype`` groups neurites by *kind*, which is not the same question:
+    two dendrites share code 3.  This resolves a single neurite.
+
+    Parameters
+    ----------
+    skel
+        A :class:`skeliner.Skeleton` from the preprocessing track.
+    which : int or str
+        The neurite's position, or the name it was given.
+
+    Returns
+    -------
+    np.ndarray
+        Node ids, ascending.  The soma is never included: it belongs to no
+        neurite, and under the >=2-of-3 face rule a junction face carries
+        soma vertices, so it would otherwise be claimed by whichever
+        neurite touches it.
+
+    Examples
+    --------
+    >>> skel.dx.neurite_nodes("axon")
+    array([412, 413, 414, ...])
+    """
+    owner = (skel.extra or {}).get("node2neurite")
+    if owner is None:
+        raise KeyError(
+            "this skeleton has no per-node neurite map — it was built from "
+            "unnamed neurites, or not by the preprocessing track"
+        )
+
+    if isinstance(which, str):
+        names = neurite_names(skel)
+        hits = [i for i, label in names.items() if label == which]
+        if not hits:
+            raise KeyError(
+                f"no neurite called {which!r}; have {sorted(names.values())}"
+            )
+        if len(hits) > 1:
+            raise KeyError(f"{len(hits)} neurites are called {which!r}: {hits}")
+        index = hits[0]
+    else:
+        index = int(which)
+
+    return np.flatnonzero(np.asarray(owner) == index)
+
+
 def neurites_out_of_bounds(
     skel,
     bounds: tuple[np.ndarray, np.ndarray] | tuple[Sequence[float], Sequence[float]],
@@ -960,12 +1268,6 @@ def _voxelize_union(
     edges = skel.edges.astype(np.int64, copy=False)
 
     # ---------------- helpers ----------------
-    def _idx_range(lo_e, hi_e):
-        """Index range [i0,i1] (clipped) for an axis."""
-        i0 = int(max(0, np.floor((lo_e - lo) / h)))
-        i1 = int(min([nx - 1, ny - 1, nz - 1]))  # overwritten per-axis
-        return i0, i1
-
     def _range_x(x0, x1):
         i0 = int(max(0, np.floor((x0 - lo[0]) / h)))
         i1 = int(min(nx - 1, np.floor((x1 - lo[0]) / h)))
