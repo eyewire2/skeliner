@@ -2017,3 +2017,137 @@ def test_preprocess_does_not_announce_a_drop_it_repairs(reassign_client, capsys)
     said = capsys.readouterr().out
     assert "components dropped" not in said, said
     assert state["neurites"] is not None, "preprocess must republish"
+
+
+# ── which track a run takes, and which parameters it reads ────────────
+#
+# `skeletonize` accepts every parameter on either track and forwards only
+# the applicable ones, so a setting made against the track that is not
+# running is ignored in silence.  The viewer picks the track from state the
+# user cannot see, so it has to say which one it picked and which of the
+# parameters that one reads.
+
+TRACK_HEADERS = {
+    "direct": "skeletonize from raw mesh",
+    "preprocessing": "skeletonize from preprocessed mesh components",
+}
+
+
+def _skel_defaults_tracks():
+    """Parse the dialog's per-parameter track tags out of viewer.html."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    block = html.split("const SKEL_DEFAULTS = {")[1].split("\n            };")[0]
+
+    tags = {}
+    for m in re.finditer(r"(\w+):\s*\{", block):
+        depth, j = 1, m.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(block[j], 0)
+            j += 1
+        body = block[m.end() : j - 1]
+        raw = re.search(r"tracks:\s*(BOTH|\[[^\]]*\])", body)
+        assert raw, f"{m.group(1)} carries no tracks tag"
+        tags[m.group(1)] = (
+            ["direct", "preprocessing"]
+            if raw.group(1) == "BOTH"
+            else re.findall(r'"(\w+)"', raw.group(1))
+        )
+    return tags
+
+
+def test_the_dialog_greys_exactly_what_the_track_ignores():
+    """The tags decide which fields are disabled.  Wrong ones would either
+    grey out a live parameter or leave a dead one editable, and both read as
+    the dialog working."""
+    import inspect
+    import re
+    import sys
+    from pathlib import Path
+
+    src = Path(sys.modules["skeliner.skeletonize"].__file__).read_text()
+    forwarded = src.split("return _skeletonize_preproc(")[1].split("\n        )")[0]
+    prepro = set(re.findall(r"(\w+)=", forwarded))
+    direct = set(
+        inspect.signature(
+            sys.modules["skeliner.skeletonize"]._skeletonize_direct
+        ).parameters
+    )
+
+    tags = _skel_defaults_tracks()
+    assert len(tags) > 10, "parser found almost nothing — it has drifted"
+
+    for key, declared in tags.items():
+        actual = sorted(
+            (["direct"] if key in direct else [])
+            + (["preprocessing"] if key in prepro else [])
+        )
+        assert sorted(declared) == actual, (
+            f"{key}: dialog says {sorted(declared)}, tracks forward {actual}"
+        )
+
+
+@pytest.mark.parametrize("track", ["direct", "preprocessing"])
+def test_the_run_reports_and_logs_the_track_it_took(reassign_client, capsys, track):
+    """Reported by the server rather than inferred by the page, so the label
+    and the branch cannot disagree."""
+    client, state, _ = reassign_client
+    if track == "direct":
+        state["neurites"] = None
+
+    assert client.get("/loaded").json()["track"] == track
+
+    r = client.post("/skeletonize", json={"params": {}})
+    assert r.status_code == 200, r.text
+    assert r.json()["ranTrack"] == track
+    assert TRACK_HEADERS[track] in capsys.readouterr().out
+
+
+def _skel_defaults_values():
+    """Parse the dialog's declared default for each parameter."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    block = html.split("const SKEL_DEFAULTS = {")[1].split("\n            };")[0]
+
+    literals = {"true": True, "false": False}
+    out = {}
+    for m in re.finditer(r"(\w+):\s*\{", block):
+        depth, j = 1, m.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(block[j], 0)
+            j += 1
+        raw = re.search(r"value:\s*([^,]+),", block[m.end() : j - 1]).group(1).strip()
+        out[m.group(1)] = (
+            literals[raw]
+            if raw in literals
+            else (float(raw) if "." in raw else int(raw))
+        )
+    return out
+
+
+def test_the_dialog_agrees_with_skeletonize_about_the_defaults():
+    """The dialog decides what counts as "unchanged", and `getSkelParams`
+    sends only what differs.  A dialog default drifting from the signature
+    would either send a value the user never chose, or withhold one they
+    did — and the panel would look right either way."""
+    import inspect
+    import sys
+
+    sig = inspect.signature(sys.modules["skeliner.skeletonize"].skeletonize).parameters
+    declared = _skel_defaults_values()
+    assert len(declared) > 10, "parser found almost nothing — it has drifted"
+
+    for key, val in declared.items():
+        assert key in sig, f"{key} is offered by the dialog but is not a parameter"
+        assert sig[key].default == val, (
+            f"{key}: dialog offers {val!r}, skeletonize defaults to "
+            f"{sig[key].default!r}"
+        )

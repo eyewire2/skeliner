@@ -1579,7 +1579,7 @@ def _skeletonize_preproc(
         _global_start = time.perf_counter()
         soma_tag = "with soma" if has_soma else "no soma"
         print(
-            f"[skeliner] preprocessing track "
+            f"[skeliner] skeletonize from preprocessed mesh components "
             f"({len(mesh.vertices):,} vertices, "
             f"{len(mesh.faces):,} faces, "
             f"{len(components.neurites)} neurites, "
@@ -1851,8 +1851,12 @@ def _skeletonize_direct(
     # ------------------------------------------------------------------
     if verbose:
         _global_start = time.perf_counter()
+        # Named for what it consumes, and matching how the other track names
+        # itself: which of the two ran decides which parameters were
+        # consulted, so a header saying only "starting" cannot answer it.
         print(
-            f"[skeliner] starting skeletonisation ({len(mesh.vertices):,} vertices, "
+            f"[skeliner] skeletonize from raw mesh "
+            f"({len(mesh.vertices):,} vertices, "
             f"{len(mesh.faces):,} faces)"
         )
         soma_ms = 0.0  # soma detection time
@@ -2125,30 +2129,37 @@ def skeletonize(
 ) -> Skeleton:
     """Compute a center-line skeleton with radii from a neuronal mesh.
 
-    Two tracks are available, selected by the *components* parameter:
+    Two tracks are available, named for what they read and selected by
+    the *components* parameter:
 
-    **Direct track** (``components=None``, the default):
+    **From a raw mesh** (``components=None``, the default):
       Full pipeline — geodesic binning, post-skel soma detection,
       gap bridging, MST, neurite pruning.  Works on any raw mesh.
 
-    **Preprocessing track** (``components=MeshComponents(...)``):
+    **From preprocessed mesh components**
+    (``components=MeshComponents(...)``):
       Per-neurite skeletonization using the soma and neurite
       partition from :func:`~skeliner.pre.preprocess` or
       :func:`~skeliner.pre.break_up_mesh`.  Skips soma detection,
       gap bridging, and pruning (all handled upstream).  Supports
       meshes with or without a soma.
 
+    Which one ran is the first line of the verbose log, because it
+    decides which of the parameters below were consulted at all.
+
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Surface mesh of the neuron.
     components : MeshComponents or None
-        If provided, selects the preprocessing track.  The soma
-        and neurite partition are taken from *components*; most
-        other parameters (bridging, pruning, soma detection) are
-        ignored.
+        If provided, skeletonize from preprocessed mesh components.
+        The soma and neurite partition are taken from *components*;
+        most other parameters (bridging, pruning, soma detection)
+        are accepted and then ignored, so setting one against the
+        wrong track is silent rather than refused.
     soma_init_guess : str or None
-        Soma-seed heuristic for the direct track.  ``"nucleus"``
+        Soma-seed heuristic when skeletonizing from a raw mesh.
+        ``"nucleus"``
         runs :func:`~skeliner.pre.find_nucleus_center` to locate
         the soma before binning.  ``"<axis>-<mode>"`` (e.g.
         ``"z-min"``) selects an extreme vertex.  ``None`` falls
@@ -2160,8 +2171,8 @@ def skeletonize(
         build a rough skeleton, then every degree-2 chain is re-binned
         by projecting its vertices onto that path, and a ``centerline``
         radius is recorded.  Roughly halves median bin tilt.
-        **Preprocessing track only** — ignored when ``components`` is
-        not given.
+        **Read only when skeletonizing from preprocessed mesh
+        components** — ignored when ``components`` is not given.
 
     Returns
     -------

@@ -488,8 +488,21 @@ def _create_app(
     _UNDO_LIMIT = 10
 
     # ── Broadcast helper ──────────────────────────────────────────────
+    def _current_track() -> str:
+        """Which track ``/skeletonize`` would take if pressed right now.
+
+        Asked in one place so that the label the user reads and the branch
+        that actually runs cannot disagree — ``run_skeletonize`` reads this
+        too rather than repeating the test.
+        """
+        return "preprocessing" if mesh_state.get("neurites") is not None else "direct"
+
     async def broadcast(msg: dict):
-        data = json.dumps(msg)
+        # Stamped on the way out rather than announced by whoever changed the
+        # components: six places publish them and three drop them, and the
+        # track is derived from state anyway.  A message that carries it
+        # cannot be the one site that forgot to send it.
+        data = json.dumps({**msg, "track": _current_track()})
         for ws in connected_clients:
             try:
                 await ws.send_text(data)
@@ -592,7 +605,9 @@ def _create_app(
 
     async def get_loaded(_request):
         """Return what's currently loaded."""
-        result = {"mesh": None, "skeletons": {}}
+        # The page asks once on load; after that the track rides on every
+        # broadcast, so this is the starting value rather than the channel.
+        result = {"mesh": None, "skeletons": {}, "track": _current_track()}
         if mesh_state["path"]:
             result["mesh"] = {
                 "path": mesh_state["path"],
@@ -3586,8 +3601,10 @@ def _create_app(
         params = body.get("params", {})
         mesh = mesh_state["mesh"]
 
-        # If break_up_mesh has run, use the preprocessing track
-        if mesh_state.get("neurites") is not None:
+        # If break_up_mesh has run, use the preprocessing track.  Asked of
+        # _current_track so the panel cannot label one track and run the other.
+        track = _current_track()
+        if track == "preprocessing":
             from skeliner.dataclass import (
                 Discarded,
                 MeshComponents,
@@ -3640,6 +3657,10 @@ def _create_app(
                 "ok": True,
                 "nNodes": len(skel.nodes),
                 "nEdges": len(skel.edges),
+                # Which track produced this one.  Reported rather than
+                # inferred by the client, so a run and its label agree even
+                # if the components changed while it was working.
+                "ranTrack": track,
             }
         )
 

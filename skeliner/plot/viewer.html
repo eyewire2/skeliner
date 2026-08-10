@@ -624,6 +624,11 @@
                         Skeletonize
                     </button>
                     <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
+                    <span
+                        id="skelTrackBadge"
+                        style="margin-left: 6px; color: #7fb3d5; font-size: 11px"
+                        title="What Skeletonize will read. Preprocessed mesh components are used whenever components exist; that route ignores the soma-detection, bridging and pruning parameters, which are only read when skeletonizing from the raw mesh."
+                    ></span>
                     <span id="skelStaleHint" style="margin-left: 8px; color: #e08a3c"></span>
                     <span
                         style="color: #888; margin-left: 12px"
@@ -1198,6 +1203,7 @@ let meshCentroid = [0, 0, 0];
                 try {
                     const resp = await fetch("/loaded");
                     const data = await resp.json();
+                    setTrack(data.track);
                     const meshEl = document.getElementById("loadedMesh");
                     const skelEl = document.getElementById("loadedSkel");
                     if (data.mesh) {
@@ -3643,45 +3649,95 @@ let meshCentroid = [0, 0, 0];
             }
 
             // ── Skeletonize ───────────────────────────────────────────────────
+            //
+            // `tracks` is which tracks actually consult a parameter.
+            // `skeletonize()` accepts every one of these on either track and
+            // simply does not forward the inapplicable ones, so a setting made
+            // against the wrong track is not refused — it is ignored in
+            // silence.  Only three of these apply to both.
+            const BOTH = ["direct", "preprocessing"];
             const SKEL_DEFAULTS = {
-                second_pass: { value: true, type: "bool", label: "Perpendicular re-bin (2nd pass)" },
-                geodesic_shell_count: { value: 1000, type: "int", label: "Shell count" },
-                min_shell_vertices: { value: 6, type: "int", label: "Min shell vertices" },
-                max_shell_width_factor: { value: 50, type: "int", label: "Max shell width factor" },
-                detect_soma: { value: true, type: "bool", label: "Detect soma" },
+                second_pass: { value: true, type: "bool", label: "Perpendicular re-bin (2nd pass)", tracks: ["preprocessing"] },
+                geodesic_shell_count: { value: 1000, type: "int", label: "Shell count", tracks: BOTH },
+                min_shell_vertices: { value: 6, type: "int", label: "Min shell vertices", tracks: BOTH },
+                max_shell_width_factor: { value: 50, type: "int", label: "Max shell width factor", tracks: BOTH },
+                detect_soma: { value: true, type: "bool", label: "Detect soma", tracks: ["direct"] },
                 soma_radius_percentile_threshold: {
                     value: 99.9,
                     type: "float",
                     label: "Soma radius percentile",
+                    tracks: ["direct"],
                 },
-                soma_radius_distance_factor: { value: 4, type: "float", label: "Soma radius dist factor" },
-                soma_min_nodes: { value: 3, type: "int", label: "Soma min nodes" },
-                bridge_gaps: { value: true, type: "bool", label: "Bridge gaps" },
-                collapse_soma: { value: true, type: "bool", label: "Collapse soma" },
-                collapse_soma_dist_factor: { value: 1.2, type: "float", label: "Collapse soma dist factor" },
+                soma_radius_distance_factor: { value: 4, type: "float", label: "Soma radius dist factor", tracks: ["direct"] },
+                soma_min_nodes: { value: 3, type: "int", label: "Soma min nodes", tracks: ["direct"] },
+                bridge_gaps: { value: true, type: "bool", label: "Bridge gaps", tracks: ["direct"] },
+                collapse_soma: { value: true, type: "bool", label: "Collapse soma", tracks: ["direct"] },
+                collapse_soma_dist_factor: { value: 1.2, type: "float", label: "Collapse soma dist factor", tracks: ["direct"] },
                 collapse_soma_radius_factor: {
                     value: 0.2,
                     type: "float",
                     label: "Collapse soma radius factor",
+                    tracks: ["direct"],
                 },
-                prune_tiny_neurites: { value: true, type: "bool", label: "Prune tiny neurites" },
-                prune_tip_extent_factor: { value: 1.2, type: "float", label: "Prune tip extent factor" },
-                prune_stem_extent_factor: { value: 3.0, type: "float", label: "Prune stem extent factor" },
+                prune_tiny_neurites: { value: true, type: "bool", label: "Prune tiny neurites", tracks: ["direct"] },
+                prune_tip_extent_factor: { value: 1.2, type: "float", label: "Prune tip extent factor", tracks: ["direct"] },
+                prune_stem_extent_factor: { value: 3.0, type: "float", label: "Prune stem extent factor", tracks: ["direct"] },
                 merge_nodes_overlap_fraction: {
                     value: 0.8,
                     type: "float",
                     label: "Merge nodes overlap frac",
+                    tracks: ["direct"],
                 },
-                split_elongated_shells: { value: false, type: "bool", label: "Split elongated shells" },
-                split_aspect_thr: { value: 3.0, type: "float", label: "Split aspect threshold" },
-                postprocess: { value: true, type: "bool", label: "Postprocess" },
+                split_elongated_shells: { value: false, type: "bool", label: "Split elongated shells", tracks: ["direct"] },
+                split_aspect_thr: { value: 3.0, type: "float", label: "Split aspect threshold", tracks: ["direct"] },
+                postprocess: { value: true, type: "bool", label: "Postprocess", tracks: ["direct"] },
             };
+
+            // The wire keeps the short ids; what a user reads names what the
+            // track consumes, since "direct" and "preprocessing" say nothing
+            // about which mesh a run is reading.
+            const TRACK_LABEL = {
+                direct: "skeletonize from raw mesh",
+                preprocessing: "skeletonize from preprocessed mesh components",
+            };
+            const trackLabel = (t) => TRACK_LABEL[t] || t;
+
+            // Which track /skeletonize would take now.  Ships on every
+            // broadcast, so this is only ever as stale as the last message.
+            let currentTrack = "direct";
+            let trackShown = false;
+
+            function applies(def) {
+                return (def.tracks || BOTH).includes(currentTrack);
+            }
+
+            function refreshTrackCue() {
+                const badge = document.getElementById("skelTrackBadge");
+                if (badge) badge.textContent = trackLabel(currentTrack);
+                const dialog = document.getElementById("skel-params-dialog");
+                if (dialog && dialog.style.display !== "none") openSkelParams();
+            }
+
+            function setTrack(track) {
+                // The first call still paints, even when the track equals the
+                // default it was initialised to — otherwise a session that
+                // never leaves the direct track shows no badge at all.
+                if (!track || (track === currentTrack && trackShown)) return;
+                currentTrack = track;
+                trackShown = true;
+                refreshTrackCue();
+            }
             let skelParams = {};
             try { const s = JSON.parse(localStorage.getItem('skeliner_skelParams')); if (s) skelParams = s; } catch (e) {}
 
             function getSkelParams() {
                 const params = {};
                 for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
+                    // A value the current track never reads is left out
+                    // rather than sent and dropped, so what goes over the
+                    // wire is what the run can actually act on.  The setting
+                    // itself is kept, and returns when its track does.
+                    if (!applies(def)) continue;
                     if (key in skelParams && skelParams[key] !== def.value) {
                         params[key] = skelParams[key];
                     }
@@ -3692,11 +3748,62 @@ let meshCentroid = [0, 0, 0];
             function openSkelParams() {
                 const body = document.getElementById("skelParamsBody");
                 body.innerHTML = "";
-                for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
+
+                const note = document.createElement("div");
+                note.style.cssText =
+                    "grid-column:1/-1;color:#7fb3d5;font-size:11px;margin-bottom:6px;";
+                note.textContent =
+                    `${trackLabel(currentTrack)} — greyed parameters belong ` +
+                    `to the other track and are ignored on this one.`;
+                body.appendChild(note);
+
+                // Settings persist in localStorage across sessions, so this
+                // is the only place the page can say that what it shows is
+                // not what skeliner defaults to.
+                const nOver = Object.entries(SKEL_DEFAULTS).filter(
+                    ([k, d]) => k in skelParams && skelParams[k] !== d.value,
+                ).length;
+                if (nOver) {
+                    const warn = document.createElement("div");
+                    warn.style.cssText =
+                        "grid-column:1/-1;color:#e0b03c;font-size:11px;margin-bottom:6px;";
+                    warn.textContent =
+                        `${nOver} setting${nOver === 1 ? "" : "s"} (•) kept from an ` +
+                        `earlier session, not skeliner's default. Reset Defaults restores them.`;
+                    body.appendChild(warn);
+                }
+
+                // Applicable first: the dimmed ones are context, not the
+                // list you are meant to read past to reach the live settings.
+                const entries = Object.entries(SKEL_DEFAULTS).sort(
+                    (a, b) => applies(b[1]) - applies(a[1]),
+                );
+                for (const [key, def] of entries) {
+                    const live = applies(def);
                     const val = key in skelParams ? skelParams[key] : def.value;
+                    // A stored value renders exactly like a default, so a
+                    // setting changed in some earlier session reads as "this
+                    // is how skeliner ships" — which is how an unticked
+                    // second_pass got mistaken for a backend default.  Marked
+                    // instead, with the default it replaced.
+                    const overridden = key in skelParams && skelParams[key] !== def.value;
                     const label = document.createElement("label");
-                    label.textContent = def.label;
-                    label.style.color = "#ccc";
+                    label.textContent = def.label + (overridden ? " •" : "");
+                    label.style.color = !live ? "#666" : overridden ? "#e0b03c" : "#ccc";
+                    const why = [];
+                    if (!live) {
+                        why.push(
+                            "Only read when you " +
+                            def.tracks.map(trackLabel).join(" / ") + ".",
+                        );
+                    }
+                    if (overridden) {
+                        why.push(
+                            `Changed from the default (${def.value}) in an ` +
+                            `earlier session — Reset Defaults restores it.`,
+                        );
+                    }
+                    if (why.length) label.title = why.join(" ");
                     body.appendChild(label);
 
                     if (def.type === "bool") {
@@ -3704,6 +3811,7 @@ let meshCentroid = [0, 0, 0];
                         cb.type = "checkbox";
                         cb.checked = val;
                         cb.dataset.key = key;
+                        cb.disabled = !live;
                         cb.addEventListener("change", () => {
                             skelParams[key] = cb.checked;
                             localStorage.setItem('skeliner_skelParams', JSON.stringify(skelParams));
@@ -3714,8 +3822,11 @@ let meshCentroid = [0, 0, 0];
                         inp.type = "text";
                         inp.value = val;
                         inp.dataset.key = key;
+                        inp.disabled = !live;
                         inp.style.cssText =
-                            "width:80px;font-size:11px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:2px 4px;";
+                            "width:80px;font-size:11px;font-family:monospace;background:#222;color:" +
+                            (live ? "#ccc" : "#666") +
+                            ";border:1px solid #555;padding:2px 4px;";
                         inp.addEventListener("change", () => {
                             skelParams[key] =
                                 def.type === "int" ? parseInt(inp.value) : parseFloat(inp.value);
@@ -5111,6 +5222,10 @@ let meshCentroid = [0, 0, 0];
                 ws.onopen = () => console.log("[skeliner] WebSocket connected");
                 ws.onmessage = (event) => {
                     const msg = JSON.parse(event.data);
+                    // Every broadcast carries the track, so the badge and the
+                    // dialog follow whatever last changed the components
+                    // without needing a message of their own.
+                    setTrack(msg.track);
                     if (msg.type === "annotations") applyAnnotations(msg.payload);
                     else if (msg.type === "annotations_updated") {
                         fetch("/annotations").then(r => r.json()).then(ann => {
