@@ -322,7 +322,7 @@ def test_organelle_target_writes_the_manual_mask(reassign_client):
 
 # ── /bin ──────────────────────────────────────────────────────────────
 #
-# A node *is* the set of mesh vertices it owns, so Edit Partition renders a
+# A node *is* the set of mesh vertices it owns, so Edit ▸ Skeleton renders a
 # selected node as that surface.  A bin is small enough to fetch per click,
 # which is why the partition is never shipped in bulk.
 
@@ -392,7 +392,7 @@ def test_bins_do_not_overlap(bin_client):
 
 def test_node_0_is_reported_as_not_editable(bin_client):
     """Node 0's "bin" is ``soma.verts``, assigned wholesale by the soma
-    stitch.  It belongs to Edit Mesh, not Edit Partition."""
+    stitch.  It belongs to Edit ▸ Mesh Comp., not Edit ▸ Skeleton."""
     client, name, _, _ = bin_client
     assert (
         client.post("/bin", json={"name": name, "node": 0}).json()["editable"] is False
@@ -2151,3 +2151,72 @@ def test_the_dialog_agrees_with_skeletonize_about_the_defaults():
             f"{key}: dialog offers {val!r}, skeletonize defaults to "
             f"{sig[key].default!r}"
         )
+
+
+# ── the mode selector ─────────────────────────────────────────────────
+#
+# Three modes, named after the three objects in the derivation chain: the
+# mesh, the components broken out of it, the skeleton built from those.
+# Each is wired through three parallel tables — the buttons, the row
+# containers they reveal, and the click handlers — so renaming one means
+# editing all three.  A site missed leaves a button that lights up over an
+# empty panel, which reads as the mode simply having nothing in it.
+
+
+def _mode_wiring():
+    """Parse the mode keys, their element ids and the click wiring."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+
+    def table(name):
+        block = html.split(f"const {name} = {{")[1].split("};")[0]
+        return dict(re.findall(r'(\w+):\s*"([^"]+)"', block))
+
+    wired = dict(
+        re.findall(
+            r'getElementById\("(\w+)"\)\s*\.addEventListener\('
+            r'"click",\s*\(\)\s*=>\s*setMode\("(\w+)"\)',
+            html,
+        )
+    )
+    default = re.search(r'let panelMode = "(\w+)"', html).group(1)
+    return html, table("MODE_ROWS"), table("MODE_BTNS"), wired, default
+
+
+def test_every_mode_has_a_button_a_panel_and_a_handler():
+    """`setMode` shows one row container and lights one button, both looked
+    up by id.  An id that names nothing throws inside the loop, leaving the
+    panel on whichever mode it was already displaying."""
+    html, rows, btns, wired, default = _mode_wiring()
+
+    assert set(rows) == set(btns), (
+        f"MODE_ROWS has {sorted(rows)}, MODE_BTNS has {sorted(btns)}"
+    )
+    assert len(rows) == 3, f"expected three modes, parsed {sorted(rows)}"
+    assert default in rows, f"panelMode starts at {default!r}, not a mode"
+
+    for mode, row_id in rows.items():
+        assert f'id="{row_id}"' in html, f"{mode}: no element id={row_id!r}"
+    for mode, btn_id in btns.items():
+        assert f'id="{btn_id}"' in html, f"{mode}: no element id={btn_id!r}"
+        assert wired.get(btn_id) == mode, (
+            f"{btn_id} calls setMode({wired.get(btn_id)!r}), expected {mode!r}"
+        )
+
+
+def test_the_mode_buttons_are_exactly_the_ones_styled_as_modes():
+    """The active-mode highlight is CSS on `button.mode-btn[data-active]`.
+    A mode button without the class switches the panel while still looking
+    inactive; anything else carrying it looks like a fourth mode."""
+    import re
+
+    html, _, btns, _, _ = _mode_wiring()
+
+    styled = set(re.findall(r'<button\s+id="(\w+)"\s+class="mode-btn"', html))
+    assert styled == set(btns.values()), (
+        f"styled as modes: {sorted(styled)}, declared: {sorted(btns.values())}"
+    )

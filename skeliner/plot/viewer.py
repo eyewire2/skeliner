@@ -2274,8 +2274,8 @@ def _create_app(
         mesh_state["discarded"] = None
         if had_components and not rederived:
             await _log(
-                "[skeliner] Mesh changed — components dropped. Re-run "
-                "Break Up Mesh once the mesh is settled."
+                "[skeliner] Mesh changed — components dropped. Press Break "
+                "again once the mesh is settled."
             )
         # A preview names faces of the mesh it was computed against.  Face
         # ids do not survive a mesh change, so applying it afterwards would
@@ -3818,7 +3818,7 @@ def _create_app(
                 {
                     "ok": False,
                     "error": "node 0 is the soma, not a bin — its vertices "
-                    "belong to the components. Edit Mesh owns those.",
+                    "belong to the components. Edit ▸ Mesh Comp. owns those.",
                 },
                 status_code=400,
             )
@@ -3888,7 +3888,9 @@ def _create_app(
                     "only take surface from its neighbours"
                 )
             elif n_unowned:
-                why = "soma, organelle or discarded surface, which Edit Mesh owns"
+                why = (
+                    "soma, organelle or discarded surface, which Edit ▸ Mesh Comp. owns"
+                )
             return JSONResponse(
                 {"ok": False, "error": f"Nothing to move: the selection is {why}"},
                 status_code=400,
@@ -4169,7 +4171,8 @@ def _create_app(
                 "neighbors": nbrs.tolist(),
                 "scopeFaces": scope.tolist(),
                 # node 0's "bin" is soma.verts, not a bin: it is assigned
-                # wholesale by the soma stitch and is Edit Mesh's to change.
+                # wholesale by the soma stitch and is Edit ▸ Mesh Comp.'s to
+                # change.
                 "editable": node != 0,
             }
         )

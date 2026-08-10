@@ -388,40 +388,43 @@
         </div>
 
         <div id="detect-panel">
-            <!-- Which stage of the workflow the rows below belong to, and
-                 nothing else.  A verb parked on this row reads as part of
-                 the mode selector; the ones that work in every mode live in
-                 the footer at the bottom of the panel instead. -->
+            <!-- Which object the rows below edit, and nothing else.  The
+                 three are the derivation chain — the mesh, the components
+                 broken out of it, the skeleton built from those — so naming
+                 them after the object states both what a row may change and
+                 what it leaves alone.  A verb parked on this row reads as a
+                 fourth mode; the ones that work on every object live in the
+                 footer at the bottom of the panel instead. -->
             <div style="white-space: nowrap">
-                <span style="color: #888">Mode:</span>
+                <span style="color: #888">Edit:</span>
                 <button
-                    id="modePreprocessBtn"
+                    id="modeMeshBtn"
                     class="mode-btn"
                     style="margin-left: 4px"
                     data-active="1"
-                    title="Run the automatic pipeline"
+                    title="Change the mesh itself — its faces and vertices. Detect and remove defects one at a time, or run the whole pipeline at once."
                 >
-                    Preprocess
+                    Mesh
                 </button>
                 <button
-                    id="modeEditBtn"
+                    id="modeCompBtn"
                     class="mode-btn"
                     style="margin-left: 4px"
-                    title="Hand faces between components — needs Break first"
+                    title="Change which component owns a face — soma, organelle, neurite or discarded. The geometry is left alone. Needs Break first."
                 >
-                    Edit Mesh
+                    Mesh Comp.
                 </button>
                 <button
                     id="modeSkelBtn"
                     class="mode-btn"
                     style="margin-left: 4px"
-                    title="Edit the bins the neurites are partitioned into, and the edges between them — needs Skeletonize first"
+                    title="Change the bins the neurites are partitioned into, and the edges between them — needs Skeletonize first"
                 >
-                    Edit Skeleton
+                    Skeleton
                 </button>
             </div>
 
-            <div id="preprocess-rows">
+            <div id="mesh-rows">
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span style="color: #888">Detect:</span>
                     <button id="detectParallelBtn" style="margin-left:4px">Parallel</button>
@@ -460,7 +463,7 @@
                 </div>
             </div>
 
-            <div id="editmesh-rows" style="display: none">
+            <div id="components-rows" style="display: none">
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span style="color: #888" title="Only faces of a lit component can be picked">Scope:</span>
                     <span id="scopeChips"></span>
@@ -517,7 +520,7 @@
                 </div>
             </div>
 
-            <div id="editskel-rows" style="display: none">
+            <div id="skeleton-rows" style="display: none">
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span style="color: #888" title="Which loaded skeleton the bin and edge edits below act on">Editing:</span>
                     <select id="binSkelSel" style="font-size: 11px; margin-left: 4px"></select>
@@ -1061,14 +1064,14 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("reassignApplyBtn").addEventListener("click", applyReassign);
                 document.getElementById("reassignCancelBtn").addEventListener("click", cancelReassign);
                 document
-                    .getElementById("modePreprocessBtn")
-                    .addEventListener("click", () => setMode("preprocess"));
+                    .getElementById("modeMeshBtn")
+                    .addEventListener("click", () => setMode("mesh"));
                 document
-                    .getElementById("modeEditBtn")
-                    .addEventListener("click", () => setMode("editmesh"));
+                    .getElementById("modeCompBtn")
+                    .addEventListener("click", () => setMode("components"));
                 document
                     .getElementById("modeSkelBtn")
-                    .addEventListener("click", () => setMode("editskel"));
+                    .addEventListener("click", () => setMode("skeleton"));
                 document.getElementById("binSkelSel").addEventListener("change", () => {
                     clearBinSelection();
                     fetchEdgeSupport();
@@ -1610,7 +1613,7 @@ let meshCentroid = [0, 0, 0];
                 // so this is the one place that has to notice.  Which pairs
                 // the tree already has is a function of this layer's edges, so
                 // it is re-asked when *this* layer is the one being looked at.
-                if (panelMode === "editskel") {
+                if (panelMode === "skeleton") {
                     refreshBinSkelSel();
                     if (document.getElementById("binSkelSel").value === name)
                         fetchEdgeSupport();
@@ -1813,9 +1816,9 @@ let meshCentroid = [0, 0, 0];
                     const radius = skelNodeRadii ? skelNodeRadii[nodeIndex] : null;
                     const key = `${bestSkelName}:${nodeIndex}`;
 
-                    // In Edit Skeleton a node is shown as the surface it
+                    // In the Skeleton panel a node is shown as the surface it
                     // owns, not as a ball: the bin is what a node actually is.
-                    if (panelMode === "editskel") {
+                    if (panelMode === "skeleton") {
                         const sel = document.getElementById("binSkelSel");
                         // Node ids mean different things in different layers,
                         // so a click that switches layer starts a new
@@ -1884,7 +1887,7 @@ let meshCentroid = [0, 0, 0];
                 // shift-click adjusts the face selection here as it does
                 // everywhere else.  Letting it pick a bin as well gave one
                 // modifier two meanings in the mode where both are live.
-                if (panelMode === "editskel" && !event.shiftKey) {
+                if (panelMode === "skeleton" && !event.shiftKey) {
                     selectBin(faceIndex, true);
                     return;
                 }
@@ -2279,54 +2282,54 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            // ── Edit Mesh mode ───────────────────────────────────────────
-            // The two panels are different activities — run the automatic
+            // ── Mode selector ────────────────────────────────────────────
+            // Three modes, one per object in the derivation chain: the mesh,
+            // the components broken out of it, then the skeleton built from
+            // those.  They are also different activities — run the automatic
             // steps in order, versus select/assign/commit — and separating
             // them is what keeps a lasso from meaning two things.
-            // Three modes, because they are the workflow stages: run the
-            // automatic steps, then correct the components, then correct the
-            // partition.  `editMode` stays a boolean for Edit Mesh so the
-            // scope block below reads exactly one thing.
-            let panelMode = "preprocess"; // preprocess | editmesh | editskel
-            let editMode = false;
+            // `componentMode` stays a boolean because the scope block below
+            // reads exactly one of the three.
+            let panelMode = "mesh"; // mesh | components | skeleton
+            let componentMode = false;
 
             const MODE_ROWS = {
-                preprocess: "preprocess-rows",
-                editmesh: "editmesh-rows",
-                editskel: "editskel-rows",
+                mesh: "mesh-rows",
+                components: "components-rows",
+                skeleton: "skeleton-rows",
             };
             const MODE_BTNS = {
-                preprocess: "modePreprocessBtn",
-                editmesh: "modeEditBtn",
-                editskel: "modeSkelBtn",
+                mesh: "modeMeshBtn",
+                components: "modeCompBtn",
+                skeleton: "modeSkelBtn",
             };
 
             function setMode(mode) {
-                // Preprocess and Edit Mesh both read a selection as faces to
-                // operate on; Edit Skeleton reads it as surface to move
-                // between bins.  Carrying one across that line would hand the
-                // new mode a selection made under the other's scope.
-                if ((panelMode === "editskel") !== (mode === "editskel")) {
+                // Mesh and Mesh Comp. both read a selection as faces to
+                // operate on; Skeleton reads it as surface to move between
+                // bins.  Carrying one across that line would hand the new
+                // mode a selection made under the other's scope.
+                if ((panelMode === "skeleton") !== (mode === "skeleton")) {
                     manualHighlightFaces.clear();
                     rebuildManualHighlight();
                     syncManualHighlight();
                 }
                 panelMode = mode;
-                editMode = mode === "editmesh";
+                componentMode = mode === "components";
                 for (const [m, id] of Object.entries(MODE_ROWS))
                     document.getElementById(id).style.display =
                         m === mode ? "block" : "none";
                 for (const [m, id] of Object.entries(MODE_BTNS))
                     document.getElementById(id).dataset.active = m === mode ? "1" : "0";
 
-                // Scoping is an Edit Mesh notion; leaving a mask applied on the
+                // Scoping is a Mesh Comp. notion; leaving a mask applied on the
                 // way out would silently narrow selection in a panel with no
-                // scope UI to explain it.  rebuildScopeMask reads editMode.
+                // scope UI to explain it.  rebuildScopeMask reads componentMode.
                 rebuildScopeMask();
-                if (editMode) renderScopeChips();
+                if (componentMode) renderScopeChips();
                 else cancelReassign();
 
-                if (mode === "editskel") {
+                if (mode === "skeleton") {
                     refreshBinSkelSel();
                     // The edge verb cannot be named without knowing which
                     // pairs the surface supports, so this is not optional.
@@ -2345,7 +2348,7 @@ let meshCentroid = [0, 0, 0];
             //
             // scopeOn is an allow-list of indices into
             // currentAnnotations.highlights.  `null` means "not chosen yet",
-            // which shows every chip lit and behaves like Preprocess does; an
+            // which shows every chip lit and behaves like Mesh does; an
             // *empty* set is a deliberate choice that nothing is pickable.
             // Keeping those two apart is what lets "All" and "None" be
             // different buttons rather than two ways to say the same thing.
@@ -2354,7 +2357,7 @@ let meshCentroid = [0, 0, 0];
             // the lookup is the lasso's inner loop, over every face.
             let scopeMask = null; // null → unscoped, everything pickable
             let scopeOn = null;
-            // Edit Skeleton's scope, filled in by rebuildBinScopeMask.  Here
+            // Skeleton's scope, filled in by rebuildBinScopeMask.  Here
             // rather than with the bin code because inScope is the one pick
             // path both modes go through, and a scope it cannot see is a scope
             // that silently does not apply.  Note `null` means the opposite of
@@ -2374,7 +2377,7 @@ let meshCentroid = [0, 0, 0];
             }
 
             function rebuildScopeMask() {
-                if (!editMode || scopeOn === null || !meshGeometry) {
+                if (!componentMode || scopeOn === null || !meshGeometry) {
                     scopeMask = null;
                     return;
                 }
@@ -2386,12 +2389,12 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
-            // Two modes, two scopes, one pick path.  Edit Mesh bounds the
-            // lasso by component; Edit Skeleton bounds it by the destination
+            // Two modes, two scopes, one pick path.  Mesh Comp. bounds the
+            // lasso by component; Skeleton bounds it by the destination
             // bin's graph neighbours, which is a correctness constraint and
             // not only a convenience — see binScopeMask.
             function inScope(faceIndex) {
-                if (panelMode === "editskel") {
+                if (panelMode === "skeleton") {
                     return binScopeMask !== null && binScopeMask[faceIndex] === 1;
                 }
                 return scopeMask === null || scopeMask[faceIndex] === 1;
@@ -2533,7 +2536,7 @@ let meshCentroid = [0, 0, 0];
                 // different components than the user lit.
                 scopeOn = null;
                 rebuildScopeMask();
-                if (editMode) renderScopeChips();
+                if (componentMode) renderScopeChips();
             }
 
             // ── Rescue discarded fragments ───────────────────────────────
@@ -2713,7 +2716,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("reassignSummary").style.display = "none";
             }
 
-            // ── Bin selection (Edit Skeleton) ───────────────────────────
+            // ── Bin selection (Edit ▸ Skeleton) ─────────────────────────
             // A node *is* the set of mesh vertices it owns: its position is
             // their centroid and every radius is an aggregate over them.  So
             // in this mode a selected node renders as the surface it owns
@@ -3038,7 +3041,7 @@ let meshCentroid = [0, 0, 0];
              */
             async function fetchEdgeSupport() {
                 const sname = document.getElementById("binSkelSel").value;
-                if (panelMode !== "editskel" || !sname) {
+                if (panelMode !== "skeleton" || !sname) {
                     clearEdgeSupport();
                     return;
                 }
