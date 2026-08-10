@@ -2228,8 +2228,13 @@ def _create_app(
                 }
             )
 
-    async def _apply_new_mesh(new_mesh):
-        """Replace the current mesh with a modified one and broadcast."""
+    async def _apply_new_mesh(new_mesh, *, rederived: bool = False):
+        """Replace the current mesh with a modified one and broadcast.
+
+        ``rederived`` says the caller publishes fresh components straight
+        after — it only silences the note below, since the drop itself is
+        unconditional and a republish overwrites it either way.
+        """
         # Save current mesh for undo
         old = mesh_state["mesh"]
         if old is not None:
@@ -2243,6 +2248,20 @@ def _create_app(
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None
         mesh_state["hole_loops"] = None
+        # break_up_mesh runs once the mesh is settled, so a components split
+        # and a mesh edit should not coexist: the split describes the surface
+        # as it was, and /skeletonize reads it to choose the preprocessing
+        # track.  Dropped rather than remapped — re-deriving is the honest
+        # response, and it is what the one caller that continues past here
+        # does anyway.
+        had_components = mesh_state.get("neurites") is not None
+        mesh_state["neurites"] = None
+        mesh_state["discarded"] = None
+        if had_components and not rederived:
+            await _log(
+                "[skeliner] Mesh changed — components dropped. Re-run "
+                "Break Up Mesh once the mesh is settled."
+            )
         # A preview names faces of the mesh it was computed against.  Face
         # ids do not survive a mesh change, so applying it afterwards would
         # reassign whatever now sits at those indices.
@@ -2892,7 +2911,10 @@ def _create_app(
             verbose=True,
         )
 
-        await _apply_new_mesh(new_mesh)
+        # rederived: the run ends in break_up_mesh, so the components dropped
+        # below are replaced a few lines down rather than left for the user
+        # to rebuild.
+        await _apply_new_mesh(new_mesh, rederived=True)
         # _apply_new_mesh drops the caches keyed to the mesh it replaced;
         # these two are keyed to it as well, and the run has already consumed
         # and removed what they name.

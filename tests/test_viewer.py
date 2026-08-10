@@ -1969,3 +1969,51 @@ def test_a_new_mesh_clears_the_components_that_chose_the_track(drop_client, drop
         files={"file": (mesh_path.name, mesh_path.read_bytes(), "application/octet")},
     )
     assert not _neurite_labels(drop_client)
+
+
+# ── a mesh edit invalidates the components ────────────────────────────
+#
+# `break_up_mesh` runs once the mesh is settled, so a components split and a
+# mesh edit should not coexist.  The split names faces of the surface as it
+# was, and `/skeletonize` reads it to choose the preprocessing track — left
+# behind, it sends the next run down that track naming faces of a mesh that
+# has moved on.
+
+
+def test_a_mesh_edit_drops_the_components(reassign_client):
+    """The routes a user actually clicks, which is where a missed site
+    shows — the same reason the skeleton rule is tested through one."""
+    client, state, neurites = reassign_client
+    assert state["neurites"] is not None
+
+    r = client.post(
+        "/remove_selected", json={"faces": [int(f) for f in neurites[0][:5]]}
+    )
+    assert r.status_code == 200, r.text
+
+    assert state["neurites"] is None
+    assert state["discarded"] is None
+
+
+def test_dropping_the_components_is_announced(reassign_client, capsys):
+    """An invalidation that happens quietly is read as a bug.  Checked on
+    stdout because ``_log`` prints and broadcasts the same line."""
+    client, _, neurites = reassign_client
+
+    client.post("/remove_selected", json={"faces": [int(f) for f in neurites[0][:5]]})
+
+    said = capsys.readouterr().out
+    assert "components dropped" in said, said
+
+
+def test_preprocess_does_not_announce_a_drop_it_repairs(reassign_client, capsys):
+    """It ends in break_up_mesh, so the components come straight back; a
+    note telling the user to rebuild them would be wrong."""
+    client, state, _ = reassign_client
+
+    r = client.post("/preprocess", json={})
+    assert r.status_code == 200, r.text
+
+    said = capsys.readouterr().out
+    assert "components dropped" not in said, said
+    assert state["neurites"] is not None, "preprocess must republish"
