@@ -4455,11 +4455,23 @@ let meshCentroid = [0, 0, 0];
                     mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
                     raycaster.setFromCamera(mouse, camera);
                     const targets = [];
-                    if (meshObj) targets.push(meshObj);
+                    if (meshObj && meshObj.visible) targets.push(meshObj);
                     for (const em of Object.values(extraMeshObjs)) {
                         if (em && em.mesh) targets.push(em.mesh);
                     }
+                    // Skeleton nodes are recentre targets in their own right.
+                    // Without them, hiding the mesh to see a junction — the
+                    // reason anyone hides it — also takes away the only way to
+                    // navigate to one, and a skeleton loaded on its own has no
+                    // recentre at all.  The mesh is skipped while hidden for
+                    // the same reason: it would otherwise keep winning the
+                    // depth test against the nodes it is drawn over.
+                    for (const sg of Object.values(skelGroups)) {
+                        if (sg && sg.nodePoints && sg.group.visible) targets.push(sg.nodePoints);
+                    }
                     if (targets.length === 0) return;
+                    raycaster.params.Points.threshold =
+                        camera.position.distanceTo(controls.target) * 0.02;
                     let best = null;
                     for (const t of targets) {
                         const h = raycaster.intersectObject(t);
@@ -4820,6 +4832,44 @@ let meshCentroid = [0, 0, 0];
                 scheduleStateUpdate();
             }
 
+            // A marker is a point, so unlike the other two channels there is
+            // no extent to frame — the distance comes from the marker's own
+            // radius, with a floor so a small one does not put the camera
+            // inside it.
+            //
+            // A marker carrying `node` is a *skeleton node*, which is what a
+            // diagnostic emits: flying there and leaving the node unselected
+            // would make every row a two-step gesture, and the second step is
+            // finding a bin you are already looking at.  So focusing one also
+            // selects its bin, which is what arms the edit verbs.  Cleared
+            // first rather than toggled, so focusing the same row twice is
+            // idempotent instead of deselecting.
+            function focusOnMarker(idx) {
+                const sphere = markerMeshes[idx];
+                if (!sphere) return;
+                const mk = (currentAnnotations.markers || [])[idx] || {};
+                const center = sphere.position.clone();
+
+                const offset = camera.position.clone().sub(controls.target).normalize();
+                controls.target.copy(center);
+                camera.position
+                    .copy(center)
+                    .addScaledVector(offset, Math.max((mk.radius || 50) * 6, 500));
+                controls.update();
+                scheduleStateUpdate();
+
+                if (mk.node == null || panelMode !== "skeleton") return;
+                const sel = document.getElementById("binSkelSel");
+                if (mk.skelName && sel.value !== mk.skelName && skelGroups[mk.skelName]) {
+                    sel.value = mk.skelName;
+                    clearBinSelection();
+                    fetchEdgeSupport();
+                } else {
+                    clearBinSelection();
+                }
+                selectBin(mk.node);
+            }
+
             function removeEdgeGroup(idx) {
                 if (!currentAnnotations || !currentAnnotations.edge_groups) return;
                 currentAnnotations.edge_groups.splice(idx, 1);
@@ -4972,7 +5022,33 @@ let meshCentroid = [0, 0, 0];
                         const div = document.createElement("div");
                         div.className = "hl-item";
                         const rgb = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
-                        div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}; border-radius:50%"></span>${label}</span>`;
+                        const left = document.createElement("span");
+                        const swatch = document.createElement("span");
+                        swatch.className = "hl-swatch";
+                        swatch.style.cssText = `background:${rgb}; border-radius:50%`;
+                        left.appendChild(swatch);
+                        // A marker naming a node says so, since the id is what
+                        // a diagnostic reports and what the reader has to
+                        // match against a list elsewhere.
+                        const nameSpan = document.createElement("span");
+                        nameSpan.textContent =
+                            label + (mk.node != null ? ` · node ${mk.node}` : "");
+                        nameSpan.title =
+                            mk.node != null
+                                ? "Double-click to centre on this node and select its bin"
+                                : "Double-click to centre on this marker";
+                        nameSpan.style.cssText =
+                            "cursor:pointer;border-bottom:1px dashed #555;";
+                        nameSpan.addEventListener("dblclick", () => focusOnMarker(idx));
+                        left.appendChild(nameSpan);
+                        div.appendChild(left);
+
+                        const focusBtn = document.createElement("button");
+                        focusBtn.className = "icon-btn";
+                        focusBtn.textContent = "⌖";
+                        focusBtn.title = "Center camera on this marker";
+                        focusBtn.addEventListener("click", () => focusOnMarker(idx));
+                        div.appendChild(focusBtn);
 
                         const toggleBtn = document.createElement("button");
                         toggleBtn.className = "toggle-vis icon-btn";

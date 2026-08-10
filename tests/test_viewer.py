@@ -2320,3 +2320,59 @@ def test_the_pairing_verdict_rides_along_with_the_layer(mismatch_client):
         "meshVertices": 770,
         "meshFaces": 1536,
     }
+
+
+# ── every annotation channel you can list, you can fly to ─────────────
+#
+# `markers` had a list row, a colour swatch, a visibility toggle and a
+# remove button — and no way to centre the camera on it, while `highlights`
+# and `edge_groups` had both a focus button and a double-click.  Nothing
+# failed; the channel was simply unreachable, which reads as "the list is
+# for reading".  It is also the channel a node-level diagnostic emits into,
+# so the omission was on the one that most needed it.
+
+
+def _focus_wiring():
+    """Which channels have a focus helper, and how it is reachable."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    defined = set(re.findall(r"function (focusOn\w+)\(", html))
+    dblclick = set(re.findall(r'"dblclick",\s*\(\)\s*=>\s*(focusOn\w+)\(', html))
+    buttons = set(re.findall(r'"click",\s*\(\)\s*=>\s*(focusOn\w+)\(', html))
+    return html, defined, dblclick, buttons
+
+
+def test_every_listed_annotation_channel_can_be_centred_on():
+    html, defined, dblclick, buttons = _focus_wiring()
+
+    # The channels applyAnnotations renders, that also get a list row.
+    channels = {
+        "highlights": "focusOnAnnotation",
+        "edge_groups": "focusOnEdgeGroup",
+        "markers": "focusOnMarker",
+    }
+    for channel, fn in channels.items():
+        assert f"annotations.{channel}" in html, f"{channel} is no longer rendered"
+        assert fn in defined, f"{channel} has a list but no {fn}()"
+        assert fn in dblclick, f"{fn} is not reachable by double-clicking the row"
+        assert fn in buttons, f"{fn} has no focus button"
+
+
+def test_a_marker_can_name_the_node_it_marks():
+    """What makes a marker a diagnostic result rather than a pin: carrying
+    the node id lets focusing one select its bin, which is what arms the
+    edit verbs the row exists to lead to."""
+    html, _, _, _ = _focus_wiring()
+    body = html.split("function focusOnMarker(")[1].split("\n            }")[0]
+
+    assert "mk.node" in body, "focusOnMarker ignores the node a marker names"
+    assert "selectBin(mk.node)" in body, "focusing a node marker does not select it"
+    # Toggling would make focusing the same row twice deselect it.
+    assert "clearBinSelection()" in body, "selection is toggled rather than set"
+    assert 'panelMode !== "skeleton"' in body, (
+        "bin selection is attempted outside the mode that has a bin panel"
+    )
