@@ -428,3 +428,91 @@ def test_distance_point_queries(skel):
     assert distances_center.shape == (2,)
     assert distances_center[0] == pytest.approx(expected_center_nm, rel=1e-6)
     assert distances_center[1] == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------
+# check_mesh_pairing — is this the mesh the bins were built over?
+# ---------------------------------------------------------------------
+# A skeleton's bins name vertex *ids*, which say nothing about which mesh
+# they index.  Paired with a larger unrelated mesh every id stays in range,
+# so bins resolve to real faces and every answer downstream is confidently
+# wrong.  Nothing else in `dx` notices: `check_bins` compares node2verts
+# against vert2node, and both are internally consistent with each other no
+# matter which mesh is standing next to them.
+
+
+@pytest.fixture(scope="session")
+def bigger_mesh(mesh):
+    """An unrelated mesh with strictly more vertices than the reference."""
+    import trimesh
+
+    other = trimesh.creation.icosphere(subdivisions=5, radius=1000.0)
+    assert len(other.vertices) > len(mesh.vertices)
+    return other
+
+
+@pytest.fixture(scope="session")
+def smaller_mesh():
+    import trimesh
+
+    return trimesh.creation.icosphere(subdivisions=1, radius=1000.0)
+
+
+def test_skeletonize_records_the_mesh_it_measured(skel, mesh):
+    """Written at skeletonize time or not at all — a skeleton cannot be told
+    afterwards which mesh it came from."""
+    assert skel.meta["mesh"] == {
+        "n_vertices": len(mesh.vertices),
+        "n_faces": len(mesh.faces),
+    }
+
+
+def test_the_right_mesh_is_verified(skel, mesh):
+    rep = dx.check_mesh_pairing(skel, mesh, return_report=True)
+    assert rep["ok"] and rep["verified"]
+
+
+def test_a_larger_unrelated_mesh_is_refused(skel, bigger_mesh):
+    """The dangerous direction: every vertex id is in range, so nothing
+    raises and every bin resolves to real faces of the wrong cell."""
+    assert dx.check_mesh_pairing(skel, bigger_mesh) is False
+    rep = dx.check_mesh_pairing(skel, bigger_mesh, return_report=True)
+    assert str(len(bigger_mesh.vertices)) in rep["reason"].replace(",", "")
+
+
+def test_a_smaller_unrelated_mesh_is_refused_without_the_counts(skel, smaller_mesh):
+    """The bounds half stands alone, which is what covers skeletons written
+    before the counts existed."""
+    legacy = copy.deepcopy(skel)
+    legacy.meta.pop("mesh")
+    assert dx.check_mesh_pairing(legacy, smaller_mesh) is False
+
+
+def test_a_legacy_skeleton_is_not_contradicted_but_not_confirmed(
+    skel, mesh, bigger_mesh
+):
+    """`ok` and `verified` say different things, and collapsing them would
+    present every pre-existing npz as confirmed."""
+    legacy = copy.deepcopy(skel)
+    legacy.meta.pop("mesh")
+
+    right = dx.check_mesh_pairing(legacy, mesh, return_report=True)
+    assert right["ok"] and not right["verified"]
+
+    # Bounds alone cannot see this one; saying so is the point.
+    wrong = dx.check_mesh_pairing(legacy, bigger_mesh, return_report=True)
+    assert wrong["ok"] and not wrong["verified"]
+
+
+def test_face_owner_names_the_mismatch_instead_of_indexerror(skel, smaller_mesh):
+    """Left to numpy this is an IndexError naming an array the caller never
+    passed in."""
+    with pytest.raises(ValueError, match="not built from this mesh"):
+        dx.face_owner(skel, smaller_mesh)
+
+
+def test_check_bins_cannot_see_a_wrong_mesh(skel, bigger_mesh):
+    """Why this check has to exist separately: node2verts and vert2node are
+    consistent with each other whatever mesh is loaded."""
+    assert dx.check_bins(skel) is True
+    assert dx.check_bins(skel, mesh=bigger_mesh) is True

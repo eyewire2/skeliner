@@ -46,7 +46,7 @@ def _jsonable(v):
     return v
 
 
-def _skel_meta(track: str, unit: str, id, params: dict) -> dict:
+def _skel_meta(track: str, unit: str, id, params: dict, mesh=None) -> dict:
     """Provenance for one skeletonize run.
 
     *track* and *params* are recorded by the assembler that ran, not by the
@@ -58,8 +58,17 @@ def _skel_meta(track: str, unit: str, id, params: dict) -> dict:
     Without this a saved skeleton cannot say which track produced it, and the
     two tracks disagree about the same cell by construction.  It is written
     into every export, so it cannot be added retroactively.
+
+    ``mesh`` records the surface ``node2verts`` indexes into.  A skeleton is
+    only meaningful beside that mesh — the bins name vertex ids, and every
+    radius was measured over them — but nothing in the vertex ids themselves
+    says which mesh they belong to.  Pairing a skeleton with a *larger*
+    unrelated mesh keeps every index in range, so bins resolve to real faces
+    and read as a correct answer.  Counts settle it: they are exact, they
+    survive the ``.obj``/``.ply`` round trip that perturbs coordinates in the
+    ninth decimal, and they cost two integers.
     """
-    return {
+    meta = {
         "skeliner_version": _SKELINER_VERSION,
         "skeletonized_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "unit": unit,
@@ -67,6 +76,12 @@ def _skel_meta(track: str, unit: str, id, params: dict) -> dict:
         "track": track,
         "params": {k: _jsonable(v) for k, v in params.items()},
     }
+    if mesh is not None:
+        meta["mesh"] = {
+            "n_vertices": int(len(mesh.vertices)),
+            "n_faces": int(len(mesh.faces)),
+        }
+    return meta
 
 
 # -----------------------------------------------------------------------------
@@ -1741,7 +1756,7 @@ def _skeletonize_preproc(
     # SWC has no field for a name.  The labels go in `meta`, which both the
     # npz and the SWC header carry, and the per-node owner goes in `extra`,
     # which is what lets a name be resolved back to nodes.
-    skel_meta = _skel_meta("preproc", unit, id, _params)
+    skel_meta = _skel_meta("preproc", unit, id, _params, mesh)
     skel_extra: dict[str, Any] = (
         {
             "cl_dist_vids": np.asarray(cl_vids, dtype=np.int64),
@@ -2076,7 +2091,7 @@ def _skeletonize_direct(
         soma=soma,
         node2verts=node2verts,
         vert2node=vert2node,
-        meta=_skel_meta("direct", unit, id, _params),
+        meta=_skel_meta("direct", unit, id, _params, mesh),
     )
 
 

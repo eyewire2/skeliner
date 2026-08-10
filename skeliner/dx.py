@@ -12,6 +12,7 @@ __skeleton__ = [
     "check_acyclicity",
     "acyclicity",
     "check_bins",
+    "check_mesh_pairing",
     "edge_support",
     "face_owner",
     "bin_faces",
@@ -205,6 +206,105 @@ def check_bins(skel, *, mesh=None, return_report: bool = False):
     return report
 
 
+def check_mesh_pairing(skel, mesh, *, return_report: bool = False):
+    """Is *mesh* the surface ``skel`` was built from?
+
+    A skeleton's bins name vertex *ids* and nothing else, so the ids alone
+    cannot say which mesh they belong to.  Paired with a **larger** unrelated
+    mesh every id stays in range, bins resolve to real faces, and every answer
+    downstream — the surface a node owns, which pairs the surface joins, what
+    a repartition would do — is computed against the wrong cell and returned
+    without complaint.  A *smaller* one merely raises ``IndexError``, which is
+    the safer failure of the two.
+
+    Two independent things are asked, and they answer differently:
+
+    ``in range``
+        Every id ``node2verts`` names exists in the mesh.  A **necessary**
+        condition, checkable on any skeleton ever written, and the one that
+        rules out the smaller-mesh crash.
+    ``counts``
+        ``meta["mesh"]`` against the loaded mesh, when the skeleton carries
+        it.  Exact, and it survives the ``.obj`` / ``.ply`` round trip that
+        moves coordinates in the ninth decimal — which is why this is counts
+        and not a hash of the vertex array.
+
+    Skeletons written before ``meta["mesh"]`` existed carry no counts, so
+    ``ok`` is the most that can be said of them and ``verified`` stays
+    *False*.  The two are kept apart deliberately: *nothing contradicts this*
+    is a weaker claim than *this is the right mesh*, and collapsing them would
+    present a legacy skeleton as confirmed.
+
+    Parameters
+    ----------
+    skel
+        A :class:`skeliner.Skeleton` instance.
+    mesh
+        The mesh to test it against.
+    return_report
+        Return a dict of details instead of a boolean.
+
+    Returns
+    -------
+    bool or dict
+        ``ok`` is *False* only when something is positively contradicted.
+        The dict also carries ``verified`` and a human-readable ``reason``.
+    """
+    n_verts = int(len(mesh.vertices))
+    n_faces = int(len(mesh.faces))
+    recorded = (skel.meta or {}).get("mesh") or {}
+
+    def _out(ok, verified, reason, **extra):
+        if not return_report:
+            return bool(ok)
+        return {
+            "ok": bool(ok),
+            "verified": bool(verified),
+            "reason": reason,
+            "meshVertices": n_verts,
+            "meshFaces": n_faces,
+            **extra,
+        }
+
+    n2v = skel.node2verts
+    if n2v is None:
+        return _out(False, False, "skeleton carries no mesh data")
+
+    highest = -1
+    for b in n2v:
+        b = np.asarray(b, dtype=np.int64).ravel()
+        if b.size:
+            highest = max(highest, int(b.max()))
+    if highest >= n_verts:
+        return _out(
+            False,
+            False,
+            f"the skeleton names vertex {highest:,}, but the mesh has only "
+            f"{n_verts:,} vertices — it was not built from this mesh",
+            highestVertex=highest,
+        )
+
+    want_v, want_f = recorded.get("n_vertices"), recorded.get("n_faces")
+    if want_v is None:
+        return _out(
+            True,
+            False,
+            "the skeleton records no mesh counts, so the pairing cannot be "
+            "confirmed — only that nothing contradicts it",
+            highestVertex=highest,
+        )
+    if int(want_v) != n_verts or (want_f is not None and int(want_f) != n_faces):
+        return _out(
+            False,
+            False,
+            f"the skeleton was built from a mesh of {int(want_v):,} vertices / "
+            f"{int(want_f):,} faces; this one has {n_verts:,} / {n_faces:,}",
+            expectedVertices=int(want_v),
+            expectedFaces=int(want_f) if want_f is not None else None,
+        )
+    return _out(True, True, "counts match the mesh this was built from")
+
+
 def edge_support(skel, mesh) -> Dict[str, Any]:
     """Which node pairs the mesh surface joins, against which ones the tree has.
 
@@ -310,6 +410,16 @@ def face_owner(skel, mesh) -> np.ndarray:
     lut = np.full(len(mesh.vertices), -1, dtype=np.int64)
     keys = np.fromiter(skel.vert2node.keys(), np.int64, len(skel.vert2node))
     vals = np.fromiter(skel.vert2node.values(), np.int64, len(skel.vert2node))
+    # An id past the end means this is not the mesh the bins were built over.
+    # Left to numpy it is an IndexError naming an array nobody passed in; a
+    # mesh one vertex *larger* than the original would not raise at all, which
+    # is what :func:`check_mesh_pairing` is for.
+    if keys.size and int(keys.max()) >= len(mesh.vertices):
+        raise ValueError(
+            f"skeleton names vertex {int(keys.max()):,} but the mesh has "
+            f"{len(mesh.vertices):,} vertices — it was not built from this "
+            "mesh (see dx.check_mesh_pairing)"
+        )
     lut[keys] = vals
 
     per_face = np.sort(lut[np.asarray(mesh.faces)], axis=1)

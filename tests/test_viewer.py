@@ -2220,3 +2220,103 @@ def test_the_mode_buttons_are_exactly_the_ones_styled_as_modes():
     assert styled == set(btns.values()), (
         f"styled as modes: {sorted(styled)}, declared: {sorted(btns.values())}"
     )
+
+
+# ── a skeleton must belong to the mesh it is loaded beside ────────────
+#
+# Binding is not checking.  A skeleton binds to whatever mesh is loaded when
+# it arrives, which is the *claim* that the two go together; nothing tested
+# the claim.  `_skel_is_stale` cannot: it compares mesh identity, so it sees
+# a mesh swapped mid-session and is blind to a pair that never matched.
+#
+# The failure was asymmetric and the quiet half was the dangerous one — a
+# smaller wrong mesh raised IndexError inside dx.face_owner (a 500), while a
+# larger one kept every vertex id in range and returned bins, surface support
+# and edit previews computed against the wrong cell, all with 200.
+
+
+@pytest.fixture
+def mismatch_client(tmp_path, monkeypatch):
+    """A skeleton of a tube, and two unrelated meshes to mispair it with."""
+    from starlette.testclient import TestClient
+
+    from skeliner import skeletonize
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+    own = trimesh.creation.cylinder(radius=40.0, height=1200.0, sections=24)
+    own = own.subdivide().subdivide()
+    skel = skeletonize(own, verbose=False)
+    (tmp_path / "skeleton.npz").write_bytes(b"")
+    skel.to_npz(tmp_path / "skeleton.npz")
+
+    bigger = trimesh.creation.icosphere(subdivisions=4, radius=300.0)
+    smaller = trimesh.creation.icosphere(subdivisions=1, radius=300.0)
+    assert len(bigger.vertices) > len(own.vertices) > len(smaller.vertices)
+    for m, n in ((own, "own.obj"), (bigger, "bigger.obj"), (smaller, "smaller.obj")):
+        m.export(tmp_path / n)
+
+    def load(mesh_file):
+        client = TestClient(viewer_mod._create_app(port=8914))
+        client.__enter__()
+        client.post(
+            "/upload_batch",
+            files=[
+                ("files", (mesh_file, (tmp_path / mesh_file).read_bytes())),
+                ("files", ("skeleton.npz", (tmp_path / "skeleton.npz").read_bytes())),
+            ],
+        )
+        name = next(iter(client.get("/skeletons").json()))
+        return client, name
+
+    yield load
+
+
+@pytest.mark.parametrize("mesh_file", ["bigger.obj", "smaller.obj"])
+def test_a_mispaired_skeleton_is_refused_by_every_route_that_reads_the_mesh(
+    mismatch_client, mesh_file
+):
+    client, name = mismatch_client(mesh_file)
+    for url, payload in (
+        ("/bin", {"name": name, "node": 2}),
+        ("/edge_support", {"name": name}),
+        ("/bin_reassign_preview", {"name": name, "to": 2, "faces": [0, 1, 2]}),
+        ("/bin_split_preview", {"name": name, "node": 2, "faces": [0, 1]}),
+        ("/edge_edit_preview", {"name": name, "u": 1, "v": 2}),
+    ):
+        r = client.post(url, json=payload)
+        assert r.status_code == 409, f"{url} returned {r.status_code}"
+        assert "does not belong to the loaded mesh" in r.json()["error"], url
+
+
+def test_the_matching_mesh_is_still_allowed(mismatch_client):
+    """The guard has to let the real pair through, or it has just disabled
+    the feature it protects."""
+    client, name = mismatch_client("own.obj")
+    assert client.post("/bin", json={"name": name, "node": 2}).status_code == 200
+    assert client.post("/edge_support", json={"name": name}).status_code == 200
+
+
+def test_export_survives_a_mispairing(mismatch_client):
+    """The skeleton is not damaged by a wrong mesh standing next to it, and
+    edits are already refused, so there is nothing left to protect against."""
+    client, name = mismatch_client("bigger.obj")
+    assert client.get(f"/export_skeleton?name={name}").status_code == 200
+
+
+def test_the_pairing_verdict_rides_along_with_the_layer(mismatch_client):
+    """The client cannot ask a question it does not know to ask, so the
+    verdict travels with the skeleton rather than waiting for a click."""
+    client, name = mismatch_client("bigger.obj")
+    layer = client.get("/skeletons").json()[name]
+    assert layer["pairing"]["ok"] is False
+    assert layer["pairing"]["verified"] is False
+
+    good, gname = mismatch_client("own.obj")
+    assert good.get("/skeletons").json()[gname]["pairing"] == {
+        "ok": True,
+        "verified": True,
+        "reason": "counts match the mesh this was built from",
+        "meshVertices": 770,
+        "meshFaces": 1536,
+    }

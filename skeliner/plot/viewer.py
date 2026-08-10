@@ -977,9 +977,29 @@ def _create_app(
                     "color": color,
                     # An uploaded skeleton was built from some mesh offline;
                     # loading it alongside this one is the claim that they go
-                    # together, so bind it to whatever is loaded now.
+                    # together, so bind it to whatever is loaded now — then
+                    # test the claim, because binding does not establish it.
                     "mesh": mesh_state["mesh"],
                 }
+
+                # Said now rather than on the first click.  Every edit and
+                # every diagnostic reads the mesh through this pairing, so a
+                # wrong one is not a failed operation but a whole session's
+                # worth of confident wrong answers.
+                pairing = _skel_pairing(skeleton_states[filename])
+                buffers["pairing"] = pairing
+                if not pairing["ok"]:
+                    print(
+                        f"  {filename} does NOT match the loaded mesh: {pairing['reason']}."
+                    )
+                    print(
+                        "  Editing and bin queries are refused until the right mesh is loaded."
+                    )
+                elif not pairing["verified"] and skel.node2verts is not None:
+                    print(
+                        f"  {filename} carries no mesh counts (written before "
+                        "skeliner recorded them), so the pairing cannot be confirmed."
+                    )
 
                 await broadcast(
                     {
@@ -2209,11 +2229,40 @@ def _create_app(
         maps mean anything.  A drop applies its own mesh before its skeletons
         (see :func:`upload_batch`), so a skeleton arriving in one gesture
         still binds to the mesh it came with.
+
+        What identity cannot see is a skeleton that *never* belonged to the
+        mesh it bound to.  Binding happens on arrival and asks nothing about
+        the pair, so dropping a cell's skeleton beside another cell's mesh
+        produces a "current" layer whose bins name the wrong surface.  That is
+        :func:`_skel_pairing` — a different question, asked separately.
         """
         origin = sstate.get("mesh")
         if origin is None:
             return mesh_state["mesh"] is not None
         return origin is not mesh_state["mesh"]
+
+    def _skel_pairing(sstate) -> dict:
+        """Does this skeleton belong to the loaded mesh at all?
+
+        Distinct from :func:`_skel_is_stale`, which asks whether the mesh has
+        *changed since* the skeleton was built.  Both can be false while the
+        pair is nonsense: a skeleton binds to whatever mesh is loaded when it
+        arrives, and nothing on arrival checks that the two go together.
+
+        Cached against the pair it was computed for, as the face-owner map is,
+        so a click does not re-walk every bin.
+        """
+        from skeliner import dx
+
+        mesh, skel = mesh_state["mesh"], sstate.get("skeleton")
+        if mesh is None or skel is None or skel.node2verts is None:
+            return {"ok": True, "verified": False, "reason": "nothing to check"}
+        cached = sstate.get("_pairing")
+        if cached is not None and cached[0] is mesh and cached[1] is skel:
+            return cached[2]
+        rep = dx.check_mesh_pairing(skel, mesh, return_report=True)
+        sstate["_pairing"] = (mesh, skel, rep)
+        return rep
 
     async def _rebroadcast_skeletons():
         """Re-send every skeleton layer, e.g. after the centroid moved."""
@@ -2229,6 +2278,14 @@ def _create_app(
             sstate["buffers"]["color"] = sstate["color"]
             stale = _skel_is_stale(sstate)
             sstate["buffers"]["stale"] = stale
+            pairing = _skel_pairing(sstate)
+            sstate["buffers"]["pairing"] = pairing
+            if not pairing["ok"] and not sstate.get("_pairing_announced"):
+                sstate["_pairing_announced"] = True
+                await _log(
+                    f"[skeliner] '{sname}' does not belong to the loaded mesh: "
+                    f"{pairing['reason']}."
+                )
             if stale and not sstate.get("_stale_announced"):
                 sstate["_stale_announced"] = True
                 await _log(
@@ -3751,6 +3808,21 @@ def _create_app(
                     status_code=409,
                 ),
             )
+        pairing = _skel_pairing(sstate)
+        if not pairing["ok"]:
+            return (
+                None,
+                None,
+                None,
+                JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"'{name}' does not belong to the loaded mesh: "
+                        f"{pairing['reason']}.",
+                    },
+                    status_code=409,
+                ),
+            )
         return name, sstate, skel, None
 
     async def bin_reassign_preview(request):
@@ -4120,6 +4192,19 @@ def _create_app(
                     "ok": False,
                     "error": f"'{name}' was built from a different mesh — its "
                     "vertex maps no longer match. Re-skeletonize first.",
+                },
+                status_code=409,
+            )
+        pairing = _skel_pairing(skeleton_states[name])
+        if not pairing["ok"]:
+            # Same consequence as staleness, different cause: this skeleton was
+            # never this mesh's.  Against a *larger* wrong mesh every id is in
+            # range, so the patch returned would look like an answer.
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"'{name}' does not belong to the loaded mesh: "
+                    f"{pairing['reason']}.",
                 },
                 status_code=409,
             )
