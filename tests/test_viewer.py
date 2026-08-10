@@ -1835,3 +1835,137 @@ def test_a_dropped_neurites_file_shows_the_names_it_carries(named_client, tmp_pa
     ann = client.get("/annotations").json()
     named = {h["neurite"]: h["label"] for h in ann["highlights"] if "neurite" in h}
     assert named[0].startswith("axon (")
+
+
+# ── uploading a drop as one gesture ───────────────────────────────────
+#
+# A drag-drop is one gesture, but the browser hands the files over in the
+# OS's order.  Applied independently, a mesh arriving after its companions
+# clears them as though they had belonged to a previous session — and the
+# sweep unlinks them from the port directory too, so nothing is recoverable.
+
+
+@pytest.fixture
+def drop_files(tmp_path):
+    """A mesh, the components naming its faces, and a skeleton of it."""
+    from skeliner import io as skio
+    from skeliner.dataclass import MeshComponents
+    from skeliner.skeletonize import skeletonize
+
+    mesh, soma, org, neurites = _tube_with_components()
+    comp = MeshComponents(
+        soma=soma, organelles=org, neurites=neurites, discarded=Discarded([])
+    )
+
+    mesh_path = tmp_path / "mesh_cleaned.obj"
+    comp_path = tmp_path / "components.npz"
+    skel_path = tmp_path / "skeleton.npz"
+    mesh.export(mesh_path)
+    skio.save_components_npz(comp, comp_path)
+    skeletonize(mesh, verbose=False).to_npz(skel_path)
+
+    # The order a Finder selection arrives in, and the one that used to lose
+    # the components: "components.npz" sorts ahead of "mesh_cleaned.obj".
+    assert sorted(p.name for p in (mesh_path, comp_path)) == [
+        "components.npz",
+        "mesh_cleaned.obj",
+    ]
+    return mesh_path, comp_path, skel_path
+
+
+@pytest.fixture
+def drop_client(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path / "state", raising=False)
+    with TestClient(_create_app(port=8913)) as client:
+        yield client
+
+
+def _as_batch(*paths):
+    return [
+        ("files", (p.name, p.read_bytes(), "application/octet-stream")) for p in paths
+    ]
+
+
+def _neurite_labels(client):
+    ann = client.get("/annotations").json()
+    return [h.get("label", "") for h in ann.get("highlights", []) if "neurite" in h]
+
+
+def test_a_drop_applies_the_mesh_before_the_files_that_index_it(
+    drop_client, drop_files
+):
+    """Ordered by what the files are, not by when they arrived.  Sorting on
+    the client would fix the drag-drop path and leave every other caller
+    with the old behaviour."""
+    mesh_path, comp_path, _ = drop_files
+    r = drop_client.post("/upload_batch", files=_as_batch(comp_path, mesh_path))
+
+    assert r.status_code == 200, r.text
+    assert [x["name"] for x in r.json()["results"]] == [
+        "mesh_cleaned.obj",
+        "components.npz",
+    ]
+
+
+def test_components_survive_a_mesh_that_arrived_after_them(drop_client, drop_files):
+    mesh_path, comp_path, _ = drop_files
+    drop_client.post("/upload_batch", files=_as_batch(comp_path, mesh_path))
+
+    assert drop_client.get("/loaded").json()["mesh"] is not None
+    assert _neurite_labels(drop_client), "the mesh cleared the components it came with"
+
+
+def test_a_drop_still_clears_what_belonged_to_the_previous_mesh(
+    drop_client, drop_files
+):
+    """Batching spares the gesture's own files, not the session before it."""
+    mesh_path, comp_path, _ = drop_files
+    drop_client.post("/upload_batch", files=_as_batch(comp_path, mesh_path))
+    assert _neurite_labels(drop_client)
+
+    drop_client.post("/upload_batch", files=_as_batch(mesh_path))
+    assert not _neurite_labels(drop_client)
+
+
+def test_a_skeleton_in_a_drop_binds_to_the_mesh_it_came_with(drop_client, drop_files):
+    """It is applied after the mesh, so ``_skel_is_stale`` sees the object
+    the drop carried rather than whatever happened to be loaded."""
+    mesh_path, _, skel_path = drop_files
+    drop_client.post("/upload_batch", files=_as_batch(skel_path, mesh_path))
+
+    r = drop_client.post(
+        "/edge_edit_preview", json={"name": "skeleton.npz", "u": 1, "v": 2}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"], r.json()
+
+
+def test_a_drop_naming_two_meshes_is_refused(drop_client, drop_files, tmp_path):
+    """Which mesh the companions belong to is unanswerable, and guessing
+    silently discards one set."""
+    mesh_path, comp_path, _ = drop_files
+    other = tmp_path / "other.obj"
+    trimesh.creation.box(extents=(4, 4, 4)).export(other)
+
+    r = drop_client.post("/upload_batch", files=_as_batch(mesh_path, other, comp_path))
+    assert r.status_code == 400
+    assert "more than one mesh" in r.json()["error"]
+
+
+def test_a_new_mesh_clears_the_components_that_chose_the_track(drop_client, drop_files):
+    """``/skeletonize`` reads ``neurites`` to pick the preprocessing track.
+    Left behind, a components file from the mesh being replaced sends the
+    next run down that track naming faces that no longer exist."""
+    mesh_path, comp_path, _ = drop_files
+    drop_client.post("/upload_batch", files=_as_batch(comp_path, mesh_path))
+    assert _neurite_labels(drop_client)
+
+    drop_client.post(
+        "/upload",
+        files={"file": (mesh_path.name, mesh_path.read_bytes(), "application/octet")},
+    )
+    assert not _neurite_labels(drop_client)

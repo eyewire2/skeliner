@@ -182,6 +182,43 @@ def _is_l2_graph(path: Path) -> bool:
         return "graph_nodes" in data and "graph_edges" in data
 
 
+#: Order in which the files of one drop are applied.  A mesh has to land
+#: before anything that indexes it — components and annotations name its
+#: faces, and a skeleton binds to whichever mesh is loaded when it arrives
+#: (see ``_skel_is_stale``).  The browser hands over a multi-file drop in the
+#: OS's order, usually alphabetical, so without this a ``components.npz`` that
+#: sorts ahead of ``mesh.obj`` was applied first and then wiped by the very
+#: mesh it belongs to.
+_TIER_MESH = 0
+_TIER_MESH_DERIVED = 1
+_TIER_SKELETON = 2
+_TIER_ANNOTATION = 3
+
+
+def _upload_tier(path: Path) -> int:
+    """Which tier *path* belongs to; lower tiers are applied first."""
+    suffix = path.suffix.lower()
+    if suffix in (".obj", ".ply", ".stl"):
+        return _TIER_MESH
+    if suffix == ".swc":
+        return _TIER_SKELETON
+    if suffix == ".json":
+        return _TIER_ANNOTATION
+    if suffix == ".npz":
+        # Sniffed in the same order as _apply_upload dispatches, so a file
+        # lands in the tier belonging to the branch that will handle it.
+        if (
+            _is_organelle_data(path)
+            or _is_mesh_stats_data(path)
+            or _is_soma_data(path)
+            or _is_components_data(path)
+            or _is_neurites_data(path)
+        ):
+            return _TIER_MESH_DERIVED
+        return _TIER_SKELETON  # L2 graph or skeleton npz
+    return _TIER_ANNOTATION
+
+
 def _l2_graph_to_buffers(path: Path, centroid: np.ndarray) -> dict[str, Any]:
     """Load an L2 supervoxel graph and convert to skeleton-like buffers."""
     with np.load(path, allow_pickle=False) as data:
@@ -571,23 +608,45 @@ def _create_app(
             }
         return JSONResponse(result)
 
-    async def upload_file(request):
-        """Handle file upload (mesh or skeleton)."""
-        try:
-            form = await request.form()
-        except Exception:
-            # Client disconnected during upload (e.g. drag-drop retry)
-            return JSONResponse(
-                {"ok": False, "error": "Upload interrupted"}, status_code=499
-            )
-        upload = form["file"]
-        filename = upload.filename
-        content = await upload.read()
-        suffix = Path(filename).suffix.lower()
+    async def _reset_for_new_mesh(*, keep: set[Path]) -> None:
+        """Clear every piece of state keyed to the mesh being replaced.
 
-        # Save to temp
-        tmp_path = port_dir / filename
-        tmp_path.write_bytes(content)
+        A different mesh invalidates anything naming its faces or vertices,
+        so the session is cleared rather than left describing a mesh that is
+        gone.  ``keep`` names the files that arrived in the *same gesture* as
+        the new mesh; without it the sweep below deletes the very companions
+        the user dropped alongside it — see :func:`upload_batch`.
+        """
+        for old_file in port_dir.iterdir():
+            if old_file in keep:
+                continue
+            if old_file.suffix in (".obj", ".ply", ".stl", ".npz", ".swc"):
+                old_file.unlink(missing_ok=True)
+        skeleton_states.clear()
+        mesh_state["soma"] = None
+        mesh_state["organelles"] = None
+        mesh_state["mesh_stats"] = None
+        # Set by _publish_components and read by /skeletonize to choose the
+        # track.  Left behind, components belonging to the mesh being
+        # replaced silently send the next skeletonization down the
+        # preprocessing path naming faces that no longer exist.
+        mesh_state["neurites"] = None
+        mesh_state["discarded"] = None
+        mesh_state["rescued"] = np.empty(0, dtype=np.int64)
+        mesh_state["released"] = np.empty(0, dtype=np.int64)
+        annotations_path.write_text("{}", encoding="utf-8")
+        await broadcast({"type": "all_skeletons_removed"})
+
+    async def _apply_upload(tmp_path: Path, *, reset: bool = True):
+        """Apply one upload that has already been written to ``port_dir``.
+
+        Shared by ``/upload`` and ``/upload_batch``.  ``reset`` is False for
+        a batch member: a batch clears the session once, up front, so that a
+        mesh landing partway through does not wipe the files that arrived
+        with it.
+        """
+        filename = tmp_path.name
+        suffix = tmp_path.suffix.lower()
 
         try:
             if suffix in (".obj", ".ply", ".stl"):
@@ -596,22 +655,8 @@ def _create_app(
                     f"Uploaded mesh: {len(mesh.vertices):,} verts, {len(mesh.faces):,} faces"
                 )
 
-                # ── Clear previous session data ──────────────────────
-                # Remove old mesh/skeleton files (keep the new upload)
-                for old_file in port_dir.iterdir():
-                    if old_file == tmp_path:
-                        continue
-                    if old_file.suffix in (".obj", ".ply", ".stl", ".npz", ".swc"):
-                        old_file.unlink(missing_ok=True)
-                # Reset skeletons and annotations
-                skeleton_states.clear()
-                mesh_state["soma"] = None
-                mesh_state["organelles"] = None
-                mesh_state["mesh_stats"] = None
-                mesh_state["rescued"] = np.empty(0, dtype=np.int64)
-                mesh_state["released"] = np.empty(0, dtype=np.int64)
-                annotations_path.write_text("{}", encoding="utf-8")
-                await broadcast({"type": "all_skeletons_removed"})
+                if reset:
+                    await _reset_for_new_mesh(keep={tmp_path})
 
                 buffers = _mesh_to_buffers(mesh)
 
@@ -896,6 +941,15 @@ def _create_app(
                 print(
                     f"Uploaded skeleton: {len(skel.nodes):,} nodes, {len(skel.edges):,} edges"
                 )
+                # SWC carries no vertex map, so `node2verts` is None and every
+                # edit is refused by _skel_edit_target with an error naming a
+                # cause but not a cure.  Say it here, where the fix — export
+                # npz instead — still applies.
+                if skel.node2verts is None:
+                    print(
+                        f"  {filename} has no mesh data; it can be viewed but "
+                        "not edited. Save as .npz to keep the vertex maps."
+                    )
 
                 color = SKEL_COLORS[len(skeleton_states) % len(SKEL_COLORS)]
                 buffers = _skeleton_to_buffers(skel, mesh_state["centroid"])
@@ -922,7 +976,7 @@ def _create_app(
 
             elif suffix == ".json":
                 # Annotation JSON — merge with deduplication
-                incoming = json.loads(content.decode("utf-8"))
+                incoming = json.loads(tmp_path.read_text(encoding="utf-8"))
                 current = {}
                 if annotations_path.exists():
                     current = json.loads(annotations_path.read_text(encoding="utf-8"))
@@ -972,6 +1026,89 @@ def _create_app(
 
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    async def upload_file(request):
+        """Handle a single file upload."""
+        try:
+            form = await request.form()
+        except Exception:
+            # Client disconnected during upload (e.g. drag-drop retry)
+            return JSONResponse(
+                {"ok": False, "error": "Upload interrupted"}, status_code=499
+            )
+        upload = form["file"]
+        tmp_path = port_dir / upload.filename
+        tmp_path.write_bytes(await upload.read())
+        return await _apply_upload(tmp_path)
+
+    async def upload_batch(request):
+        """Apply a whole drag-drop as one gesture.
+
+        The files of one drop are related — a mesh with its components, its
+        skeleton, its annotations — but arrive in whatever order the OS
+        listed them.  Applied independently, a mesh landing after its
+        companions clears them as though they belonged to a previous
+        session.  So the batch is ordered here, by type rather than by
+        arrival, and the session is cleared once before any of it lands.
+
+        Ordering on the server rather than in the drop handler is deliberate:
+        it is a property of what the files *are*, and a second caller that
+        forgot to sort would silently get the old behaviour back.
+        """
+        try:
+            form = await request.form()
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "error": "Upload interrupted"}, status_code=499
+            )
+
+        uploads = form.getlist("files")
+        if not uploads:
+            return JSONResponse(
+                {"ok": False, "error": "No files in batch"}, status_code=400
+            )
+
+        # Written before anything is applied because the tier of an .npz is
+        # decided by sniffing its contents, which needs it on disk.
+        paths: list[Path] = []
+        for upload in uploads:
+            tmp_path = port_dir / upload.filename
+            tmp_path.write_bytes(await upload.read())
+            paths.append(tmp_path)
+
+        meshes = [p for p in paths if _upload_tier(p) == _TIER_MESH]
+        if len(meshes) > 1:
+            names = ", ".join(p.name for p in meshes)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"Drop names more than one mesh ({names}). Which "
+                    "one the companions belong to is ambiguous — drop one "
+                    "mesh with its files.",
+                },
+                status_code=400,
+            )
+
+        # Once, up front, and told to spare this batch's own files.  Doing it
+        # here rather than in the mesh branch is what makes the drop one
+        # gesture: nothing a batch carries can be cleared by a sibling.
+        if meshes:
+            await _reset_for_new_mesh(keep=set(paths))
+
+        paths.sort(key=lambda p: (_upload_tier(p), p.name))
+
+        results = []
+        for tmp_path in paths:
+            resp = await _apply_upload(tmp_path, reset=False)
+            results.append(
+                {
+                    "name": tmp_path.name,
+                    "ok": 200 <= resp.status_code < 300,
+                    **json.loads(bytes(resp.body).decode("utf-8")),
+                }
+            )
+
+        return JSONResponse({"ok": True, "results": results})
 
     async def remove_item(request):
         """Remove mesh or skeleton."""
@@ -2047,9 +2184,21 @@ def _create_app(
         the right direction to be wrong in — a spurious stale costs one
         re-skeletonize, a spurious current costs radii measured against
         surface that is no longer there, with nothing downstream able to tell.
+
+        A skeleton uploaded while no mesh was loaded binds to ``None``, which
+        is not "current" but "never checked against anything", so it reads as
+        stale the moment a mesh exists.  Nothing reaches that state today —
+        every path back to a loaded mesh goes through the upload branch,
+        whose reset clears ``skeleton_states`` first — but the two are
+        independent mechanisms, and only this one is about whether the vertex
+        maps mean anything.  A drop applies its own mesh before its skeletons
+        (see :func:`upload_batch`), so a skeleton arriving in one gesture
+        still binds to the mesh it came with.
         """
         origin = sstate.get("mesh")
-        return origin is not None and origin is not mesh_state["mesh"]
+        if origin is None:
+            return mesh_state["mesh"] is not None
+        return origin is not mesh_state["mesh"]
 
     async def _rebroadcast_skeletons():
         """Re-send every skeleton layer, e.g. after the centroid moved."""
@@ -4515,6 +4664,7 @@ def _create_app(
             Route("/annotations", get_annotations, methods=["GET"]),
             Route("/update_annotations", update_annotations, methods=["POST"]),
             Route("/upload", upload_file, methods=["POST"]),
+            Route("/upload_batch", upload_batch, methods=["POST"]),
             Route("/remove", remove_item, methods=["POST"]),
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),

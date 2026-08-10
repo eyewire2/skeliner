@@ -1313,20 +1313,27 @@ let meshCentroid = [0, 0, 0];
                     dragCounter = 0;
                     overlay.style.display = "none";
 
-                    for (const file of e.dataTransfer.files) {
-                        const formData = new FormData();
-                        formData.append("file", file);
-                        try {
-                            const resp = await fetch("/upload", { method: "POST", body: formData });
-                            const data = await resp.json();
-                            if (data.ok) {
-                                console.log(`[skeliner] Loaded ${data.type}: ${data.name}`);
-                            } else {
-                                console.error(`[skeliner] Upload failed: ${data.error}`);
+                    // One drop is one gesture: the files go up together so the
+                    // server can order them by type and clear the previous
+                    // session once, instead of a mesh arriving second and
+                    // wiping the components that came with it.
+                    const files = [...e.dataTransfer.files];
+                    if (!files.length) return;
+                    const formData = new FormData();
+                    for (const file of files) formData.append("files", file);
+                    try {
+                        const resp = await fetch("/upload_batch", { method: "POST", body: formData });
+                        const data = await resp.json();
+                        if (data.ok) {
+                            for (const r of data.results) {
+                                if (r.ok) console.log(`[skeliner] Loaded ${r.type}: ${r.name}`);
+                                else console.error(`[skeliner] Failed ${r.name}: ${r.error}`);
                             }
-                        } catch (err) {
-                            console.error("[skeliner] Upload error:", err);
+                        } else {
+                            console.error(`[skeliner] Upload failed: ${data.error}`);
                         }
+                    } catch (err) {
+                        console.error("[skeliner] Upload error:", err);
                     }
                 });
             }
