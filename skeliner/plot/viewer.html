@@ -573,6 +573,26 @@
                         <button id="skelCancelBtn" style="margin-left: 4px">Cancel</button>
                     </span>
                 </div>
+                <!-- Diagnostics list candidates and never edit.  Every
+                     threshold here is a heuristic with nothing validating it,
+                     so the cut is exposed rather than baked in: change it,
+                     re-run, and watch which nodes come and go.  Results land
+                     as markers, so the existing list gives focus, colour,
+                     visibility and remove for free — and focusing one selects
+                     its bin, which is what arms the verbs above. -->
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <span style="color: #888" title="List candidates as markers to look at. Nothing here changes the skeleton.">Find:</span>
+                    <select id="dxKindSel" style="font-size: 11px; margin-left: 4px">
+                        <option value="junctions">merge candidates</option>
+                        <option value="twigs">short twigs</option>
+                        <option value="degree">high-degree nodes</option>
+                        <option value="tips">suspicious tips</option>
+                        <option value="orphans">unreachable nodes</option>
+                    </select>
+                    <span id="dxParams" style="margin-left: 6px"></span>
+                    <button id="dxRunBtn" style="margin-left: 6px">List</button>
+                    <span id="dxStatus" style="margin-left: 8px; color: #888"></span>
+                </div>
                 <div
                     id="binReadout"
                     style="margin-top: 4px; color: #888; white-space: nowrap; overflow-x: auto"
@@ -1082,6 +1102,12 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("binMergeBtn").addEventListener("click", runBinMerge);
                 document.getElementById("binSplitBtn").addEventListener("click", runBinSplit);
                 document.getElementById("edgeEditBtn").addEventListener("click", runEdgeEdit);
+                document.getElementById("dxKindSel").addEventListener("change", () => {
+                    renderDxParams();
+                    document.getElementById("dxStatus").textContent = "";
+                });
+                document.getElementById("dxRunBtn").addEventListener("click", runDiagnostic);
+                renderDxParams();
                 document.getElementById("skelApplyBtn").addEventListener("click", runSkelApply);
                 document.getElementById("skelCancelBtn").addEventListener("click", runSkelCancel);
                 document.getElementById("scopeAllBtn").addEventListener("click", () => setScopeAll(true));
@@ -3039,6 +3065,94 @@ let meshCentroid = [0, 0, 0];
              * told from a restore to a graft, and those are different claims.
              * ~15 ms on a 583-node cell, ~110 ms on an 11k-node one.
              */
+            // ── Diagnostics ──────────────────────────────────────────────────
+            // Each entry declares the cuts it exposes.  They are inputs rather
+            // than constants because no value here is settled: the corpus can
+            // rank candidates but cannot say which are real, so the honest
+            // interface is one you can turn and watch.
+            const DX_PARAMS = {
+                junctions: [
+                    { id: "minDegree", label: "deg≥", value: 4, size: 2,
+                      title: "Minimum graph degree to consider at all." },
+                    { id: "minCable", label: "arm≥", value: 5, size: 4,
+                      title: "How much cable a distal arm must carry to count as substantial, in um. Two arms must clear it independently." },
+                    { id: "minComponents", label: "arms", value: 2, size: 2,
+                      title: "How many distal arms must clear the bar." },
+                ],
+                twigs: [
+                    { id: "maxRatio", label: "≤", value: 3, size: 3,
+                      title: "Twig cable as a multiple of the radius of the branch node it hangs off. Small means the twig is shorter than its host is thick." },
+                    { id: "maxNodes", label: "nodes≤", value: 3, size: 2,
+                      title: "Longest twig, in nodes, to list." },
+                ],
+                degree: [
+                    { id: "minDegree", label: "deg≥", value: 4, size: 2,
+                      title: "List every node at or above this degree." },
+                ],
+                tips: [
+                    { id: "nearFactor", label: "near", value: 1.2, size: 3,
+                      title: "Multiple of the largest soma semi-axis inside which a tip counts as close." },
+                    { id: "pathRatio", label: "path≥", value: 2.0, size: 3,
+                      title: "Minimum path-length / straight-line ratio." },
+                ],
+                orphans: [],
+            };
+
+            function renderDxParams() {
+                const kind = document.getElementById("dxKindSel").value;
+                const host = document.getElementById("dxParams");
+                host.innerHTML = "";
+                for (const p of DX_PARAMS[kind] || []) {
+                    const lab = document.createElement("span");
+                    lab.style.color = "#888";
+                    lab.style.marginLeft = "6px";
+                    lab.textContent = p.label;
+                    lab.title = p.title;
+                    const inp = document.createElement("input");
+                    inp.type = "text";
+                    inp.id = "dxp_" + p.id;
+                    inp.value = p.value;
+                    inp.size = p.size;
+                    inp.title = p.title;
+                    inp.style.marginLeft = "3px";
+                    inp.style.fontSize = "11px";
+                    host.appendChild(lab);
+                    host.appendChild(inp);
+                }
+            }
+
+            async function runDiagnostic() {
+                const kind = document.getElementById("dxKindSel").value;
+                const sname = document.getElementById("binSkelSel").value;
+                const status = document.getElementById("dxStatus");
+                const btn = document.getElementById("dxRunBtn");
+                if (!sname) {
+                    status.textContent = "no skeleton";
+                    return;
+                }
+                const params = {};
+                for (const p of DX_PARAMS[kind] || []) {
+                    const el = document.getElementById("dxp_" + p.id);
+                    if (el) params[p.id] = parseFloat(el.value);
+                }
+                btn.disabled = true;
+                status.textContent = "…";
+                try {
+                    const r = await fetch("/diagnose", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: sname, kind, params }),
+                    });
+                    const data = await r.json();
+                    status.textContent = data.ok
+                        ? `${data.n} found — open Annotations to step through`
+                        : data.error || "error";
+                } catch (e) {
+                    status.textContent = "error: " + e.message;
+                }
+                btn.disabled = false;
+            }
+
             async function fetchEdgeSupport() {
                 const sname = document.getElementById("binSkelSel").value;
                 if (panelMode !== "skeleton" || !sname) {

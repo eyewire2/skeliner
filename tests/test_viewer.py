@@ -2322,6 +2322,200 @@ def test_the_pairing_verdict_rides_along_with_the_layer(mismatch_client):
     }
 
 
+# ---------------------------------------------------------------------
+# diagnostics — listing candidates to look at
+#
+# The panel's whole purpose is that a threshold here is unvalidated, so a
+# candidate has to be reachable by eye.  These check the route produces
+# something the marker channel can carry, and that it stays a *lister*.
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "kind",
+    ["junctions", "twigs", "degree", "tips", "orphans"],
+)
+def test_every_offered_diagnostic_runs(bin_client, kind):
+    """A panel entry that 500s is worse than no panel entry.
+
+    The dropdown is built from `DIAGNOSTICS`, so each key has to survive a
+    real skeleton — several of these reach for `soma`, `radii` or a rooted
+    traversal, and a fixture without one would take the route down.
+    """
+    client, name, _mesh, _skel = bin_client
+    r = client.post("/diagnose", json={"name": name, "kind": kind})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["kind"] == kind
+    assert body["n"] >= 0
+
+
+def test_the_dropdown_offers_exactly_the_diagnostics_that_exist(bin_client):
+    """A named option with no implementation is a dead menu entry, and an
+    implementation with no option is unreachable."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    client, name, _mesh, _skel = bin_client
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    sel = re.search(r'id="dxKindSel".*?</select>', html, re.S | re.I)
+    assert sel, "diagnostics dropdown not found"
+    offered = set(re.findall(r'<option value="([a-z_]+)"', sel.group(0)))
+
+    for kind in offered:
+        assert (
+            client.post("/diagnose", json={"name": name, "kind": kind}).status_code
+            == 200
+        ), f"dropdown offers {kind!r} but the route refuses it"
+
+    declared = set(
+        re.findall(
+            r"^\s*(\w+):\s*\[",
+            re.search(r"const DX_PARAMS = \{(.*?)\n            \};", html, re.S).group(
+                1
+            ),
+            re.M,
+        )
+    )
+    assert declared == offered, (
+        f"DX_PARAMS and the dropdown disagree: {declared ^ offered}"
+    )
+
+
+def test_a_diagnostic_marks_nodes_without_touching_the_skeleton(bin_client):
+    """It reports candidates and never edits — the same split `pre` draws
+    between its `find_*` and `remove_*` functions."""
+    client, name, _mesh, skel = bin_client
+    before_nodes = skel.nodes.copy()
+    before_edges = np.asarray(skel.edges).copy()
+
+    # The fixture is a tube, so its skeleton is a chain with no node above
+    # degree 2 — asking for degree>=3 here would pass on an empty list and
+    # assert nothing.  Degree 1 is what this fixture actually has.
+    r = client.post(
+        "/diagnose",
+        json={"name": name, "kind": "degree", "params": {"minDegree": 1}},
+    )
+    assert r.status_code == 200
+    assert r.json()["n"] > 0, "fixture produced no candidates to check with"
+
+    after = client.get("/skeletons").json()[name]
+    assert after["nNodes"] == len(before_nodes)
+    assert np.array_equal(np.asarray(skel.edges), before_edges)
+
+    markers = client.get("/annotations").json().get("markers", [])
+    assert markers, "a diagnostic must leave something to look at"
+    for m in markers:
+        assert m["skelName"] == name
+        assert isinstance(m["node"], int)
+        assert m["dx"] == "degree"
+        assert len(m["position"]) == 3
+        assert m["radius"] > 0
+
+
+def test_re_running_a_diagnostic_replaces_its_own_markers_only(bin_client):
+    """Turning a threshold and re-running must answer *what does this cut do*,
+    not stack three answers on top of each other — while leaving the other
+    diagnostics', and the user's own, markers alone."""
+    client, name, _mesh, _skel = bin_client
+
+    client.post(
+        "/diagnose",
+        json={"name": name, "kind": "degree", "params": {"minDegree": 1}},
+    )
+    wide = client.get("/annotations").json()["markers"]
+    assert len(wide) > 0, "fixture produced no candidates to check with"
+
+    client.post("/diagnose", json={"name": name, "kind": "tips"})
+    both = client.get("/annotations").json()["markers"]
+    assert len([m for m in both if m["dx"] == "degree"]) == len(wide)
+
+    client.post(
+        "/diagnose",
+        json={"name": name, "kind": "degree", "params": {"minDegree": 99}},
+    )
+    after = client.get("/annotations").json()["markers"]
+    assert [m for m in after if m["dx"] == "degree"] == []
+    assert len([m for m in after if m["dx"] == "tips"]) == len(
+        [m for m in both if m["dx"] == "tips"]
+    )
+
+
+def test_a_diagnostic_refuses_a_skeleton_that_is_not_the_loaded_mesh(
+    mismatch_client,
+):
+    """Deciding a junction is wrong needs the surface it came from.  Computing
+    the list mesh-free is possible but pointless: the answer exists only to be
+    checked against a mesh, so an unpaired one is refused rather than shown."""
+    client, name = mismatch_client("bigger.obj")
+    r = client.post("/diagnose", json={"name": name, "kind": "degree"})
+    assert r.status_code == 409
+    assert "does not belong to the loaded mesh" in r.json()["error"]
+
+
+def test_a_marker_lands_exactly_on_the_node_it_marks(tmp_path, monkeypatch):
+    """Everything the client draws is centroid-relative.
+
+    `_mesh_to_buffers` subtracts the centroid from the vertices and
+    `_skeleton_to_buffers` subtracts the same one from the nodes, so the two
+    overlay.  A marker built from raw skeleton coordinates is off by a whole
+    centroid — on a CAVE cell that is hundreds of microns, far outside the
+    mesh, and it reads as "the diagnostic found nothing there" rather than
+    as a coordinate bug.
+
+    The mesh is deliberately built **away from the origin**.  Every other
+    fixture here is a trimesh primitive centred on it, where the centroid is
+    zero and subtracting it is a no-op — this test passes on the broken code
+    against any of them.
+    """
+    from starlette.testclient import TestClient
+
+    from skeliner import skeletonize
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+    mesh = trimesh.creation.cylinder(radius=40.0, height=1200.0, sections=24)
+    mesh = mesh.subdivide().subdivide()
+    mesh.apply_translation([480_000.0, -310_000.0, 205_000.0])
+    assert np.linalg.norm(mesh.vertices.mean(axis=0)) > 1e5, (
+        "the fixture must sit away from the origin or a missing centroid "
+        "subtraction is invisible"
+    )
+    skel = skeletonize(mesh, verbose=False)
+
+    app = _create_app(preload_mesh=mesh, port=8917)
+    with TestClient(app) as client:
+        path = tmp_path / "skeleton.npz"
+        skel.to_npz(path)
+        client.post("/upload", files={"file": ("skeleton.npz", path.read_bytes())})
+        name = next(iter(client.get("/skeletons").json()))
+
+        r = client.post(
+            "/diagnose",
+            json={"name": name, "kind": "degree", "params": {"minDegree": 1}},
+        )
+        assert r.json()["n"] > 0, "fixture produced no candidates to check with"
+
+        drawn = client.get("/skeletons").json()[name]["nodes"]
+        markers = client.get("/annotations").json()["markers"]
+        assert markers
+
+        for m in markers:
+            nid = m["node"]
+            expected = drawn[3 * nid : 3 * nid + 3]
+            assert m["position"] == pytest.approx(expected, abs=1.0), (
+                f"marker for node {nid} is not where that node is drawn"
+            )
+
+
+def test_an_unknown_diagnostic_is_named_rather_than_crashing(bin_client):
+    client, name, _mesh, _skel = bin_client
+    r = client.post("/diagnose", json={"name": name, "kind": "nonesuch"})
+    assert r.status_code == 400
+    assert "nonesuch" in r.json()["error"]
+
+
 # ── every annotation channel you can list, you can fly to ─────────────
 #
 # `markers` had a list row, a colour swatch, a visibility toggle and a

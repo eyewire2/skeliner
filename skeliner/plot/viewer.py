@@ -4313,6 +4313,199 @@ def _create_app(
             }
         )
 
+    #: Diagnostics offered in the skeleton panel.  Each returns a list of
+    #: ``(node_id, label)``; the route turns them into markers.  They are
+    #: *candidate listers* — none of them edits, and none of them ranks by a
+    #: threshold the corpus has not justified, so every cut is a parameter
+    #: the user sets and can see the effect of.
+    def _dx_junctions(skel, p):
+        from skeliner import dx
+
+        flagged, stats = dx.suspicious_junctions(
+            skel,
+            min_degree=int(p.get("minDegree", 4)),
+            min_distal_cable=float(p.get("minCable", 5.0)),
+            cable_unit=p.get("cableUnit", "um"),
+            min_components=int(p.get("minComponents", 2)),
+            return_stats=True,
+        )
+        out = []
+        for nid in flagged:
+            d = sorted(stats[nid]["distal_cables"], reverse=True)
+            arms = ", ".join(f"{c / 1000:.1f}" for c in d[:4])
+            out.append((nid, f"deg {stats[nid]['degree']} · arms {arms} um"))
+        return out
+
+    def _dx_short_twigs(skel, p):
+        """Terminal twigs, measured against the branch node they hang off.
+
+        Deliberately *not* called phantom-anything.  Whether a short twig is
+        a binning artefact or a real branch is exactly what cannot be decided
+        from the numbers — it is why ``postprocess=False`` leaves pruning off
+        — so this lists them for a human and names the ratio it sorted by.
+        """
+        import numpy as _np
+
+        edges = _np.asarray(skel.edges, dtype=_np.int64).reshape(-1, 2)
+        n = len(skel.nodes)
+        if not len(edges):
+            return []
+        adj = [[] for _ in range(n)]
+        for a, b in edges:
+            adj[int(a)].append(int(b))
+            adj[int(b)].append(int(a))
+        deg = _np.zeros(n, dtype=_np.int64)
+        for a, b in edges:
+            deg[a] += 1
+            deg[b] += 1
+        par = _np.full(n, -1, dtype=_np.int64)
+        seen = _np.zeros(n, dtype=bool)
+        seen[0] = True
+        order = [0]
+        for v in order:
+            for w in adj[v]:
+                if not seen[w]:
+                    seen[w] = True
+                    par[w] = v
+                    order.append(w)
+
+        def _len(u, w):
+            return float(_np.linalg.norm(skel.nodes[u] - skel.nodes[w]))
+
+        radii = skel.r
+        max_ratio = float(p.get("maxRatio", 3.0))
+        max_nodes = int(p.get("maxNodes", 3))
+        out = []
+        for leaf in range(1, n):
+            if deg[leaf] != 1:
+                continue
+            chain = [leaf]
+            u = int(par[leaf])
+            while u > 0 and deg[u] == 2:
+                chain.append(u)
+                u = int(par[u])
+            if u < 0 or deg[u] < 3 or len(chain) > max_nodes:
+                continue
+            host_r = float(radii[u])
+            if host_r <= 0:
+                continue
+            cable = sum(_len(c, int(par[c])) for c in chain)
+            ratio = cable / host_r
+            if ratio > max_ratio:
+                continue
+            out.append(
+                (
+                    leaf,
+                    f"{len(chain)}-node twig · {cable / 1000:.2f} um "
+                    f"= {ratio:.1f}x host radius (node {u})",
+                )
+            )
+        out.sort(key=lambda t: float(t[1].split("= ")[1].split("x")[0]))
+        return out
+
+    def _dx_degree(skel, p):
+        from skeliner import dx
+
+        k = int(p.get("minDegree", 4))
+        out = []
+        for d in range(k, 12):
+            for nid in dx.nodes_of_degree(skel, d):
+                out.append((int(nid), f"degree {d}"))
+        return out
+
+    def _dx_orphans(skel, _p):
+        from skeliner import dx
+
+        iso = dx.check_connectivity(skel, return_isolated=True)
+        if iso is True:
+            return []
+        return [(int(nid), "unreachable from soma") for nid in iso]
+
+    def _dx_tips(skel, p):
+        from skeliner import dx
+
+        tips = dx.suspicious_tips(
+            skel,
+            near_factor=float(p.get("nearFactor", 1.2)),
+            path_ratio_thresh=float(p.get("pathRatio", 2.0)),
+        )
+        return [(int(nid), "tip near soma, long path") for nid in tips]
+
+    DIAGNOSTICS = {
+        "junctions": ("merge candidates", [0.95, 0.35, 0.25], _dx_junctions),
+        "twigs": ("short twigs", [0.35, 0.75, 0.95], _dx_short_twigs),
+        "degree": ("high-degree nodes", [0.95, 0.75, 0.2], _dx_degree),
+        "orphans": ("unreachable nodes", [0.9, 0.3, 0.9], _dx_orphans),
+        "tips": ("suspicious tips", [0.4, 0.9, 0.5], _dx_tips),
+    }
+
+    async def diagnose(request):
+        """List candidate defects as markers so they can be looked at.
+
+        The whole point is the looking.  Every threshold below is a heuristic
+        with no validation behind it, and the corpus can rank candidates but
+        cannot say which are real — that needs the mesh beside the skeleton,
+        which is why this refuses to run without a paired one.  Nothing here
+        edits; the verbs stay where they already are.
+
+        Markers replace the previous run of the *same* diagnostic rather than
+        accumulating, so re-running with a different cut answers "what does
+        this threshold do" instead of piling three answers on top of
+        each other.
+        """
+        body = await request.json()
+        kind = body.get("kind")
+        if kind not in DIAGNOSTICS:
+            return JSONResponse(
+                {"ok": False, "error": f"Unknown diagnostic {kind!r}"},
+                status_code=400,
+            )
+        name, sstate, skel, err = _skel_edit_target(body)
+        if err is not None:
+            return err
+
+        label, color, fn = DIAGNOSTICS[kind]
+        try:
+            found = fn(skel, body.get("params") or {})
+        except Exception as exc:  # noqa: BLE001 - report, do not 500 the panel
+            return JSONResponse(
+                {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+                status_code=400,
+            )
+
+        # The client renders everything centroid-relative — `_mesh_to_buffers`
+        # subtracts it from the vertices and `_skeleton_to_buffers` subtracts
+        # the same one from the nodes, so the two overlay.  A marker built
+        # from raw node coordinates lands a whole centroid away, which on CAVE
+        # cells is hundreds of microns off screen.
+        centroid = np.asarray(mesh_state["centroid"], dtype=np.float64)
+        radii = skel.r
+        markers = []
+        for nid, detail in found:
+            r = float(radii[nid]) if nid < len(radii) else 0.0
+            markers.append(
+                {
+                    "position": [float(x) for x in (skel.nodes[nid] - centroid)],
+                    "color": color,
+                    "radius": max(r * 2.5, 150.0),
+                    "label": f"{label}: {detail}",
+                    "skelName": name,
+                    "node": int(nid),
+                    "dx": kind,
+                }
+            )
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        kept = [m for m in ann.get("markers", []) if m.get("dx") != kind]
+        ann["markers"] = kept + markers
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        await broadcast({"type": "annotations_updated"})
+
+        await _log(f"[skeliner.dx] {label}: {len(markers)} candidate(s) on '{name}'")
+        return JSONResponse({"ok": True, "kind": kind, "n": len(markers)})
+
     async def edge_edit_preview(request):
         """Work out what clipping or grafting one edge would do.
 
@@ -4854,6 +5047,7 @@ def _create_app(
             Route("/bin_split_preview", bin_split_preview, methods=["POST"]),
             Route("/bin_reassign_cancel", bin_reassign_cancel, methods=["POST"]),
             Route("/edge_support", edge_support, methods=["POST"]),
+            Route("/diagnose", diagnose, methods=["POST"]),
             Route("/edge_edit_preview", edge_edit_preview, methods=["POST"]),
             Route("/edge_edit_apply", edge_edit_apply, methods=["POST"]),
             Route("/edge_edit_cancel", edge_edit_cancel, methods=["POST"]),
