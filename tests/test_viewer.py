@@ -2383,6 +2383,53 @@ def test_the_dropdown_offers_exactly_the_diagnostics_that_exist(bin_client):
     )
 
 
+def test_the_diagnostics_are_listed_in_the_order_dx_lists_them():
+    """Three places name this list, and a menu with no rule gets appended to.
+
+    `dx.__skeleton__` already runs invariant checks, then enumerations, then
+    heuristics, so the panel follows it rather than inventing an order —
+    which also makes the dropdown read from "this is broken" down to "this
+    might repay a look".
+    """
+    import re
+    from pathlib import Path
+
+    from skeliner import dx
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    sel = re.search(r'id="dxKindSel".*?</select>', html, re.S | re.I)
+    dropdown = re.findall(r'<option value="([a-z_]+)"', sel.group(0))
+    params = re.findall(
+        r"^\s*(\w+):\s*\[",
+        re.search(r"const DX_PARAMS = \{(.*?)\n            \};", html, re.S).group(1),
+        re.M,
+    )
+    source = Path(viewer_mod.__file__).read_text()
+    registry = re.findall(
+        r'^\s*"([a-z_]+)": \(',
+        re.search(r"DIAGNOSTICS = \{(.*?)\n    \}", source, re.S).group(1),
+        re.M,
+    )
+
+    assert dropdown == params, f"dropdown {dropdown} vs DX_PARAMS {params}"
+    assert dropdown == registry, f"dropdown {dropdown} vs DIAGNOSTICS {registry}"
+
+    # and that shared order is dx's own
+    backing = {
+        "orphans": "check_connectivity",
+        "degree": "nodes_of_degree",
+        "twigs": "twigs_of_length",
+        "tips": "suspicious_tips",
+        "junctions": "suspicious_junctions",
+    }
+    assert set(backing) == set(dropdown), "a diagnostic has no declared dx backing"
+    ranks = [dx.__skeleton__.index(backing[k]) for k in dropdown]
+    assert ranks == sorted(ranks), (
+        f"panel order {dropdown} does not follow dx.__skeleton__ (ranks {ranks})"
+    )
+
+
 def test_a_diagnostic_marks_nodes_without_touching_the_skeleton(bin_client):
     """It reports candidates and never edits — the same split `pre` draws
     between its `find_*` and `remove_*` functions."""
@@ -2507,6 +2554,66 @@ def test_a_marker_lands_exactly_on_the_node_it_marks(tmp_path, monkeypatch):
             assert m["position"] == pytest.approx(expected, abs=1.0), (
                 f"marker for node {nid} is not where that node is drawn"
             )
+
+
+def test_a_proposed_cut_is_drawn_and_not_only_named(tmp_path, monkeypatch):
+    """ "cut 79+84" asks the eye to resolve two node ids into two branches.
+
+    That is the one job the viewer exists to do, so a diagnostic with an
+    opinion about *which cable* has to put it on the geometry.  A proposal
+    living only in a label is not reviewable.
+
+    Driven through `twigs`, the one diagnostic that still has an opinion
+    about which edges belong to a candidate.
+    """
+    from pathlib import Path
+
+    from starlette.testclient import TestClient
+
+    from skeliner import skeletonize
+    from skeliner.io import load_mesh
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+    mesh = load_mesh(Path(__file__).parent / "data" / "60427.obj")
+    skel = skeletonize(mesh, verbose=False)
+
+    app = _create_app(preload_mesh=mesh, port=8919)
+    with TestClient(app) as client:
+        path = tmp_path / "skeleton.npz"
+        skel.to_npz(path)
+        client.post("/upload", files={"file": ("skeleton.npz", path.read_bytes())})
+        name = next(iter(client.get("/skeletons").json()))
+
+        r = client.post(
+            "/diagnose",
+            json={
+                "name": name,
+                "kind": "twigs",
+                "params": {"maxRatio": 1000.0, "maxNodes": 10},
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["n"] > 0, "fixture produced no candidates to draw"
+        assert body["nCut"] > 0, "candidates were found but nothing was drawn"
+
+        ann = client.get("/annotations").json()
+        groups = [g for g in ann.get("edge_groups", []) if g.get("dx") == "twigs"]
+        assert groups, "the diagnostic never reached the geometry"
+
+        drawn = np.asarray(client.get("/skeletons").json()[name]["nodes"]).reshape(
+            -1, 3
+        )
+        lo, hi = drawn.min(axis=0) - 1.0, drawn.max(axis=0) + 1.0
+        for g in groups:
+            assert g["segments"], "an empty group draws nothing"
+            for seg in g["segments"]:
+                for point in seg:
+                    p = np.asarray(point)
+                    assert ((p >= lo) & (p <= hi)).all(), (
+                        "segment drawn outside the skeleton — centroid not applied"
+                    )
 
 
 def test_an_unknown_diagnostic_is_named_rather_than_crashing(bin_client):

@@ -4314,10 +4314,11 @@ def _create_app(
         )
 
     #: Diagnostics offered in the skeleton panel.  Each returns a list of
-    #: ``(node_id, label)``; the route turns them into markers.  They are
-    #: *candidate listers* — none of them edits, and none of them ranks by a
-    #: threshold the corpus has not justified, so every cut is a parameter
-    #: the user sets and can see the effect of.
+    #: ``{"node", "detail"}``, optionally with ``"cut"`` / ``"keep"`` edge
+    #: lists which the route draws.  They are *candidate listers* — none of
+    #: them edits, and none of them ranks by a threshold the corpus has not
+    #: justified, so every cut is a parameter the user sets and can see the
+    #: effect of.
     def _dx_junctions(skel, p):
         from skeliner import dx
 
@@ -4329,11 +4330,22 @@ def _create_app(
             min_components=int(p.get("minComponents", 2)),
             return_stats=True,
         )
+        # Lists junctions and what each arm carries.  It proposes no cut:
+        # `arm_pairing` used to ride along here and was removed, because its
+        # score is purely directional and cannot tell a 0.8 um binning stub
+        # from a 261 um dendrite — so it paired stubs with major arms and
+        # ranked its most destructive proposals highest.  See
+        # `.claude/labbook/2026-08-11-arm-pairing-retracted.md`.
         out = []
         for nid in flagged:
             d = sorted(stats[nid]["distal_cables"], reverse=True)
             arms = ", ".join(f"{c / 1000:.1f}" for c in d[:4])
-            out.append((nid, f"deg {stats[nid]['degree']} · arms {arms} um"))
+            out.append(
+                {
+                    "node": nid,
+                    "detail": f"deg {stats[nid]['degree']} · arms {arms} um",
+                }
+            )
         return out
 
     def _dx_short_twigs(skel, p):
@@ -4394,13 +4406,19 @@ def _create_app(
             if ratio > max_ratio:
                 continue
             out.append(
-                (
-                    leaf,
-                    f"{len(chain)}-node twig · {cable / 1000:.2f} um "
-                    f"= {ratio:.1f}x host radius (node {u})",
-                )
+                {
+                    "node": leaf,
+                    "detail": (
+                        f"{len(chain)}-node twig · {cable / 1000:.2f} um "
+                        f"= {ratio:.1f}x host radius (node {u})"
+                    ),
+                    "ratio": ratio,
+                    # The twig itself, so the candidate is a visible stretch
+                    # of cable rather than a dot you have to trace by eye.
+                    "cut": [(c, int(par[c])) for c in chain],
+                }
             )
-        out.sort(key=lambda t: float(t[1].split("= ")[1].split("x")[0]))
+        out.sort(key=lambda r: r["ratio"])
         return out
 
     def _dx_degree(skel, p):
@@ -4410,7 +4428,7 @@ def _create_app(
         out = []
         for d in range(k, 12):
             for nid in dx.nodes_of_degree(skel, d):
-                out.append((int(nid), f"degree {d}"))
+                out.append({"node": int(nid), "detail": f"degree {d}"})
         return out
 
     def _dx_orphans(skel, _p):
@@ -4419,7 +4437,7 @@ def _create_app(
         iso = dx.check_connectivity(skel, return_isolated=True)
         if iso is True:
             return []
-        return [(int(nid), "unreachable from soma") for nid in iso]
+        return [{"node": int(nid), "detail": "unreachable from soma"} for nid in iso]
 
     def _dx_tips(skel, p):
         from skeliner import dx
@@ -4429,14 +4447,21 @@ def _create_app(
             near_factor=float(p.get("nearFactor", 1.2)),
             path_ratio_thresh=float(p.get("pathRatio", 2.0)),
         )
-        return [(int(nid), "tip near soma, long path") for nid in tips]
+        return [
+            {"node": int(nid), "detail": "tip near soma, long path"} for nid in tips
+        ]
 
+    #: Named after the `dx` function each one runs, and ordered the way
+    #: `dx.__skeleton__` orders them — the one invariant check, then the
+    #: plain enumerations, then the heuristics.  Both so that what the panel
+    #: calls a thing and what the library calls it cannot drift apart, and
+    #: so the list reads from "this is broken" to "this might repay a look".
     DIAGNOSTICS = {
-        "junctions": ("merge candidates", [0.95, 0.35, 0.25], _dx_junctions),
+        "orphans": ("isolated nodes", [0.9, 0.3, 0.9], _dx_orphans),
+        "degree": ("nodes of degree", [0.95, 0.75, 0.2], _dx_degree),
         "twigs": ("short twigs", [0.35, 0.75, 0.95], _dx_short_twigs),
-        "degree": ("high-degree nodes", [0.95, 0.75, 0.2], _dx_degree),
-        "orphans": ("unreachable nodes", [0.9, 0.3, 0.9], _dx_orphans),
         "tips": ("suspicious tips", [0.4, 0.9, 0.5], _dx_tips),
+        "junctions": ("suspicious junctions", [0.95, 0.35, 0.25], _dx_junctions),
     }
 
     async def diagnose(request):
@@ -4479,18 +4504,52 @@ def _create_app(
         # from raw node coordinates lands a whole centroid away, which on CAVE
         # cells is hundreds of microns off screen.
         centroid = np.asarray(mesh_state["centroid"], dtype=np.float64)
+
+        def _seg(u, v):
+            return [
+                [float(x) for x in (skel.nodes[int(u)] - centroid)],
+                [float(x) for x in (skel.nodes[int(v)] - centroid)],
+            ]
+
         radii = skel.r
-        markers = []
-        for nid, detail in found:
+        markers, cut_segs, keep_segs = [], [], []
+        for row in found:
+            nid = int(row["node"])
             r = float(radii[nid]) if nid < len(radii) else 0.0
             markers.append(
                 {
                     "position": [float(x) for x in (skel.nodes[nid] - centroid)],
                     "color": color,
                     "radius": max(r * 2.5, 150.0),
-                    "label": f"{label}: {detail}",
+                    "label": f"{label}: {row['detail']}",
                     "skelName": name,
-                    "node": int(nid),
+                    "node": nid,
+                    "dx": kind,
+                }
+            )
+            cut_segs.extend(_seg(u, v) for u, v in row.get("cut", ()))
+            keep_segs.extend(_seg(u, v) for u, v in row.get("keep", ()))
+
+        # A proposal about which branches to sever is a statement about
+        # geometry, so it is drawn on the geometry.  Named only in the label,
+        # "cut 79+84" leaves the eye to resolve two node ids into two
+        # branches — the one job the viewer exists to do.
+        groups = []
+        if cut_segs:
+            groups.append(
+                {
+                    "segments": cut_segs,
+                    "color": [1.0, 0.25, 0.25],
+                    "label": f"{label}: proposed cut ({len(cut_segs)} edges)",
+                    "dx": kind,
+                }
+            )
+        if keep_segs:
+            groups.append(
+                {
+                    "segments": keep_segs,
+                    "color": [0.3, 0.9, 0.4],
+                    "label": f"{label}: cable that continues ({len(keep_segs)} edges)",
                     "dx": kind,
                 }
             )
@@ -4498,13 +4557,24 @@ def _create_app(
         ann = {}
         if annotations_path.exists():
             ann = json.loads(annotations_path.read_text(encoding="utf-8"))
-        kept = [m for m in ann.get("markers", []) if m.get("dx") != kind]
-        ann["markers"] = kept + markers
+        ann["markers"] = [
+            m for m in ann.get("markers", []) if m.get("dx") != kind
+        ] + markers
+        ann["edge_groups"] = [
+            g for g in ann.get("edge_groups", []) if g.get("dx") != kind
+        ] + groups
         annotations_path.write_text(json.dumps(ann), encoding="utf-8")
         await broadcast({"type": "annotations_updated"})
 
         await _log(f"[skeliner.dx] {label}: {len(markers)} candidate(s) on '{name}'")
-        return JSONResponse({"ok": True, "kind": kind, "n": len(markers)})
+        return JSONResponse(
+            {
+                "ok": True,
+                "kind": kind,
+                "n": len(markers),
+                "nCut": len(cut_segs),
+            }
+        )
 
     async def edge_edit_preview(request):
         """Work out what clipping or grafting one edge would do.

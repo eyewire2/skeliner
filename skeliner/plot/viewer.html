@@ -583,11 +583,18 @@
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span style="color: #888" title="List candidates as markers to look at. Nothing here changes the skeleton.">Find:</span>
                     <select id="dxKindSel" style="font-size: 11px; margin-left: 4px">
-                        <option value="junctions">merge candidates</option>
+                        <!-- Named after the dx function each one runs, and
+                             ordered as dx.__skeleton__ orders them: the one
+                             invariant check first, then plain enumerations,
+                             then the heuristics.  So the list reads from
+                             "this is broken" to "this might repay a look",
+                             and the panel neither renames nor resequences
+                             what the library already settled. -->
+                        <option value="orphans">isolated nodes</option>
+                        <option value="degree">nodes of degree</option>
                         <option value="twigs">short twigs</option>
-                        <option value="degree">high-degree nodes</option>
                         <option value="tips">suspicious tips</option>
-                        <option value="orphans">unreachable nodes</option>
+                        <option value="junctions">suspicious junctions</option>
                     </select>
                     <span id="dxParams" style="margin-left: 6px"></span>
                     <button id="dxRunBtn" style="margin-left: 6px">List</button>
@@ -3070,7 +3077,25 @@ let meshCentroid = [0, 0, 0];
             // than constants because no value here is settled: the corpus can
             // rank candidates but cannot say which are real, so the honest
             // interface is one you can turn and watch.
+            // Keys are in the dropdown's order, which is dx.__skeleton__'s.
             const DX_PARAMS = {
+                orphans: [],
+                degree: [
+                    { id: "minDegree", label: "deg≥", value: 4, size: 2,
+                      title: "List every node at or above this degree." },
+                ],
+                twigs: [
+                    { id: "maxRatio", label: "≤", value: 3, size: 3,
+                      title: "Twig cable as a multiple of the radius of the branch node it hangs off. Small means the twig is shorter than its host is thick." },
+                    { id: "maxNodes", label: "nodes≤", value: 3, size: 2,
+                      title: "Longest twig, in nodes, to list." },
+                ],
+                tips: [
+                    { id: "nearFactor", label: "near", value: 1.2, size: 3,
+                      title: "Multiple of the largest soma semi-axis inside which a tip counts as close." },
+                    { id: "pathRatio", label: "path≥", value: 2.0, size: 3,
+                      title: "Minimum path-length / straight-line ratio." },
+                ],
                 junctions: [
                     { id: "minDegree", label: "deg≥", value: 4, size: 2,
                       title: "Minimum graph degree to consider at all." },
@@ -3079,23 +3104,6 @@ let meshCentroid = [0, 0, 0];
                     { id: "minComponents", label: "arms", value: 2, size: 2,
                       title: "How many distal arms must clear the bar." },
                 ],
-                twigs: [
-                    { id: "maxRatio", label: "≤", value: 3, size: 3,
-                      title: "Twig cable as a multiple of the radius of the branch node it hangs off. Small means the twig is shorter than its host is thick." },
-                    { id: "maxNodes", label: "nodes≤", value: 3, size: 2,
-                      title: "Longest twig, in nodes, to list." },
-                ],
-                degree: [
-                    { id: "minDegree", label: "deg≥", value: 4, size: 2,
-                      title: "List every node at or above this degree." },
-                ],
-                tips: [
-                    { id: "nearFactor", label: "near", value: 1.2, size: 3,
-                      title: "Multiple of the largest soma semi-axis inside which a tip counts as close." },
-                    { id: "pathRatio", label: "path≥", value: 2.0, size: 3,
-                      title: "Minimum path-length / straight-line ratio." },
-                ],
-                orphans: [],
             };
 
             function renderDxParams() {
