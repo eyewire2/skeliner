@@ -523,9 +523,18 @@ def _bin_one_component(
         sub = gsurf.induced_subgraph(inner)
         comps = []
         for comp in sub.components():
-            if len(comp) < min_shell_vertices:
-                continue
             comp_idx = np.fromiter((inner[i] for i in comp), dtype=np.int64)
+            if len(comp) < min_shell_vertices:
+                # Too thin to stand as its own bin — but its vertices are
+                # still surface, so they go to the fragment merge below
+                # instead of being dropped.  Dropping them severs the
+                # skeleton: `_edges_from_mesh` joins two nodes only when a
+                # mesh edge has *both* endpoints binned, so a discarded band
+                # leaves no edge across it however continuous the surface is.
+                # At a narrow neck the sub-components are small for several
+                # consecutive shells, which is exactly where the band forms.
+                pending_frags.append(comp_idx)
+                continue
             if split_elongated_shells and len(comp) < 1500:  # hard-coded, might be soma
                 for part in _split_comp_if_elongated(
                     comp_idx,
