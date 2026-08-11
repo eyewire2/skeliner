@@ -46,7 +46,7 @@ def _jsonable(v):
     return v
 
 
-def _skel_meta(track: str, unit: str, id, params: dict) -> dict:
+def _skel_meta(track: str, unit: str, id, params: dict, mesh=None) -> dict:
     """Provenance for one skeletonize run.
 
     *track* and *params* are recorded by the assembler that ran, not by the
@@ -58,8 +58,17 @@ def _skel_meta(track: str, unit: str, id, params: dict) -> dict:
     Without this a saved skeleton cannot say which track produced it, and the
     two tracks disagree about the same cell by construction.  It is written
     into every export, so it cannot be added retroactively.
+
+    ``mesh`` records the surface ``node2verts`` indexes into.  A skeleton is
+    only meaningful beside that mesh — the bins name vertex ids, and every
+    radius was measured over them — but nothing in the vertex ids themselves
+    says which mesh they belong to.  Pairing a skeleton with a *larger*
+    unrelated mesh keeps every index in range, so bins resolve to real faces
+    and read as a correct answer.  Counts settle it: they are exact, they
+    survive the ``.obj``/``.ply`` round trip that perturbs coordinates in the
+    ninth decimal, and they cost two integers.
     """
-    return {
+    meta = {
         "skeliner_version": _SKELINER_VERSION,
         "skeletonized_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "unit": unit,
@@ -67,6 +76,12 @@ def _skel_meta(track: str, unit: str, id, params: dict) -> dict:
         "track": track,
         "params": {k: _jsonable(v) for k, v in params.items()},
     }
+    if mesh is not None:
+        meta["mesh"] = {
+            "n_vertices": int(len(mesh.vertices)),
+            "n_faces": int(len(mesh.faces)),
+        }
+    return meta
 
 
 # -----------------------------------------------------------------------------
@@ -508,9 +523,18 @@ def _bin_one_component(
         sub = gsurf.induced_subgraph(inner)
         comps = []
         for comp in sub.components():
-            if len(comp) < min_shell_vertices:
-                continue
             comp_idx = np.fromiter((inner[i] for i in comp), dtype=np.int64)
+            if len(comp) < min_shell_vertices:
+                # Too thin to stand as its own bin — but its vertices are
+                # still surface, so they go to the fragment merge below
+                # instead of being dropped.  Dropping them severs the
+                # skeleton: `_edges_from_mesh` joins two nodes only when a
+                # mesh edge has *both* endpoints binned, so a discarded band
+                # leaves no edge across it however continuous the surface is.
+                # At a narrow neck the sub-components are small for several
+                # consecutive shells, which is exactly where the band forms.
+                pending_frags.append(comp_idx)
+                continue
             if split_elongated_shells and len(comp) < 1500:  # hard-coded, might be soma
                 for part in _split_comp_if_elongated(
                     comp_idx,
@@ -1579,7 +1603,7 @@ def _skeletonize_preproc(
         _global_start = time.perf_counter()
         soma_tag = "with soma" if has_soma else "no soma"
         print(
-            f"[skeliner] preprocessing track "
+            f"[skeliner] skeletonize from preprocessed mesh components "
             f"({len(mesh.vertices):,} vertices, "
             f"{len(mesh.faces):,} faces, "
             f"{len(components.neurites)} neurites, "
@@ -1741,7 +1765,7 @@ def _skeletonize_preproc(
     # SWC has no field for a name.  The labels go in `meta`, which both the
     # npz and the SWC header carry, and the per-node owner goes in `extra`,
     # which is what lets a name be resolved back to nodes.
-    skel_meta = _skel_meta("preproc", unit, id, _params)
+    skel_meta = _skel_meta("preproc", unit, id, _params, mesh)
     skel_extra: dict[str, Any] = (
         {
             "cl_dist_vids": np.asarray(cl_vids, dtype=np.int64),
@@ -1851,8 +1875,12 @@ def _skeletonize_direct(
     # ------------------------------------------------------------------
     if verbose:
         _global_start = time.perf_counter()
+        # Named for what it consumes, and matching how the other track names
+        # itself: which of the two ran decides which parameters were
+        # consulted, so a header saying only "starting" cannot answer it.
         print(
-            f"[skeliner] starting skeletonisation ({len(mesh.vertices):,} vertices, "
+            f"[skeliner] skeletonize from raw mesh "
+            f"({len(mesh.vertices):,} vertices, "
             f"{len(mesh.faces):,} faces)"
         )
         soma_ms = 0.0  # soma detection time
@@ -2072,7 +2100,7 @@ def _skeletonize_direct(
         soma=soma,
         node2verts=node2verts,
         vert2node=vert2node,
-        meta=_skel_meta("direct", unit, id, _params),
+        meta=_skel_meta("direct", unit, id, _params, mesh),
     )
 
 
@@ -2125,30 +2153,37 @@ def skeletonize(
 ) -> Skeleton:
     """Compute a center-line skeleton with radii from a neuronal mesh.
 
-    Two tracks are available, selected by the *components* parameter:
+    Two tracks are available, named for what they read and selected by
+    the *components* parameter:
 
-    **Direct track** (``components=None``, the default):
+    **From a raw mesh** (``components=None``, the default):
       Full pipeline — geodesic binning, post-skel soma detection,
       gap bridging, MST, neurite pruning.  Works on any raw mesh.
 
-    **Preprocessing track** (``components=MeshComponents(...)``):
+    **From preprocessed mesh components**
+    (``components=MeshComponents(...)``):
       Per-neurite skeletonization using the soma and neurite
       partition from :func:`~skeliner.pre.preprocess` or
       :func:`~skeliner.pre.break_up_mesh`.  Skips soma detection,
       gap bridging, and pruning (all handled upstream).  Supports
       meshes with or without a soma.
 
+    Which one ran is the first line of the verbose log, because it
+    decides which of the parameters below were consulted at all.
+
     Parameters
     ----------
     mesh : trimesh.Trimesh
         Surface mesh of the neuron.
     components : MeshComponents or None
-        If provided, selects the preprocessing track.  The soma
-        and neurite partition are taken from *components*; most
-        other parameters (bridging, pruning, soma detection) are
-        ignored.
+        If provided, skeletonize from preprocessed mesh components.
+        The soma and neurite partition are taken from *components*;
+        most other parameters (bridging, pruning, soma detection)
+        are accepted and then ignored, so setting one against the
+        wrong track is silent rather than refused.
     soma_init_guess : str or None
-        Soma-seed heuristic for the direct track.  ``"nucleus"``
+        Soma-seed heuristic when skeletonizing from a raw mesh.
+        ``"nucleus"``
         runs :func:`~skeliner.pre.find_nucleus_center` to locate
         the soma before binning.  ``"<axis>-<mode>"`` (e.g.
         ``"z-min"``) selects an extreme vertex.  ``None`` falls
@@ -2160,8 +2195,8 @@ def skeletonize(
         build a rough skeleton, then every degree-2 chain is re-binned
         by projecting its vertices onto that path, and a ``centerline``
         radius is recorded.  Roughly halves median bin tilt.
-        **Preprocessing track only** — ignored when ``components`` is
-        not given.
+        **Read only when skeletonizing from preprocessed mesh
+        components** — ignored when ``components`` is not given.
 
     Returns
     -------

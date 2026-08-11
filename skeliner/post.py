@@ -316,7 +316,7 @@ def reassign_verts(skel, verts: ArrayLike, to: int, *, mesh, verbose: bool = Fal
     if to == 0:
         raise ValueError(
             "node 0 is the soma, not a bin — its vertices are Soma.verts and "
-            "belong to the components. Reassign them in the mesh editor."
+            "belong to the components. Reassign them on the mesh components."
         )
 
     moving = np.unique(np.asarray(verts, dtype=np.int64).ravel())
@@ -335,7 +335,8 @@ def reassign_verts(skel, verts: ArrayLike, to: int, *, mesh, verbose: bool = Fal
     if unowned.size:
         raise ValueError(
             f"{unowned.size:,} of {moving.size:,} vertices belong to no bin "
-            "(soma, organelle or discarded surface). Edit Mesh owns those."
+            "(soma, organelle or discarded surface) — the mesh components "
+            "own those, not the skeleton."
         )
 
     donors = sorted({int(n) for n in np.unique(owner[moving])} - {to})
@@ -484,7 +485,7 @@ def split_node(skel, node: int, verts: ArrayLike, *, mesh, verbose: bool = False
     if node == 0:
         raise ValueError(
             "node 0 is the soma, not a bin — its vertices are Soma.verts and "
-            "belong to the components. Edit them in the mesh editor."
+            "belong to the components. Edit them on the mesh components."
         )
 
     owned = np.asarray(skel.node2verts[node], dtype=np.int64)

@@ -388,40 +388,43 @@
         </div>
 
         <div id="detect-panel">
-            <!-- Which stage of the workflow the rows below belong to, and
-                 nothing else.  A verb parked on this row reads as part of
-                 the mode selector; the ones that work in every mode live in
-                 the footer at the bottom of the panel instead. -->
+            <!-- Which object the rows below edit, and nothing else.  The
+                 three are the derivation chain — the mesh, the components
+                 broken out of it, the skeleton built from those — so naming
+                 them after the object states both what a row may change and
+                 what it leaves alone.  A verb parked on this row reads as a
+                 fourth mode; the ones that work on every object live in the
+                 footer at the bottom of the panel instead. -->
             <div style="white-space: nowrap">
-                <span style="color: #888">Mode:</span>
+                <span style="color: #888">Edit:</span>
                 <button
-                    id="modePreprocessBtn"
+                    id="modeMeshBtn"
                     class="mode-btn"
                     style="margin-left: 4px"
                     data-active="1"
-                    title="Run the automatic pipeline"
+                    title="Change the mesh itself — its faces and vertices. Detect and remove defects one at a time, or run the whole pipeline at once."
                 >
-                    Preprocess
+                    Mesh
                 </button>
                 <button
-                    id="modeEditBtn"
+                    id="modeCompBtn"
                     class="mode-btn"
                     style="margin-left: 4px"
-                    title="Hand faces between components — needs Break first"
+                    title="Change which component owns a face — soma, organelle, neurite or discarded. The geometry is left alone. Needs Break first."
                 >
-                    Edit Mesh
+                    Mesh Comp.
                 </button>
                 <button
                     id="modeSkelBtn"
                     class="mode-btn"
                     style="margin-left: 4px"
-                    title="Edit the bins the neurites are partitioned into, and the edges between them — needs Skeletonize first"
+                    title="Change the bins the neurites are partitioned into, and the edges between them — needs Skeletonize first"
                 >
-                    Edit Skeleton
+                    Skeleton
                 </button>
             </div>
 
-            <div id="preprocess-rows">
+            <div id="mesh-rows">
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span style="color: #888">Detect:</span>
                     <button id="detectParallelBtn" style="margin-left:4px">Parallel</button>
@@ -460,7 +463,7 @@
                 </div>
             </div>
 
-            <div id="editmesh-rows" style="display: none">
+            <div id="components-rows" style="display: none">
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span style="color: #888" title="Only faces of a lit component can be picked">Scope:</span>
                     <span id="scopeChips"></span>
@@ -517,7 +520,7 @@
                 </div>
             </div>
 
-            <div id="editskel-rows" style="display: none">
+            <div id="skeleton-rows" style="display: none">
                 <div style="white-space: nowrap; margin-top: 4px">
                     <span style="color: #888" title="Which loaded skeleton the bin and edge edits below act on">Editing:</span>
                     <select id="binSkelSel" style="font-size: 11px; margin-left: 4px"></select>
@@ -569,6 +572,34 @@
                         <button id="skelApplyBtn">Apply</button>
                         <button id="skelCancelBtn" style="margin-left: 4px">Cancel</button>
                     </span>
+                </div>
+                <!-- Diagnostics list candidates and never edit.  Every
+                     threshold here is a heuristic with nothing validating it,
+                     so the cut is exposed rather than baked in: change it,
+                     re-run, and watch which nodes come and go.  Results land
+                     as markers, so the existing list gives focus, colour,
+                     visibility and remove for free — and focusing one selects
+                     its bin, which is what arms the verbs above. -->
+                <div style="white-space: nowrap; margin-top: 4px">
+                    <span style="color: #888" title="List candidates as markers to look at. Nothing here changes the skeleton.">Find:</span>
+                    <select id="dxKindSel" style="font-size: 11px; margin-left: 4px">
+                        <!-- Named after the dx function each one runs, and
+                             ordered as dx.__skeleton__ orders them: the one
+                             invariant check first, then plain enumerations,
+                             then the heuristics.  So the list reads from
+                             "this is broken" to "this might repay a look",
+                             and the panel neither renames nor resequences
+                             what the library already settled. -->
+                        <option value="orphans">isolated nodes</option>
+                        <option value="cycles">cycles</option>
+                        <option value="degree">nodes of degree</option>
+                        <option value="twigs">short twigs</option>
+                        <option value="tips">suspicious tips</option>
+                        <option value="junctions">suspicious junctions</option>
+                    </select>
+                    <span id="dxParams" style="margin-left: 6px"></span>
+                    <button id="dxRunBtn" style="margin-left: 6px">List</button>
+                    <span id="dxStatus" style="margin-left: 8px; color: #888"></span>
                 </div>
                 <div
                     id="binReadout"
@@ -624,6 +655,11 @@
                         Skeletonize
                     </button>
                     <button id="skelParamsBtn" style="margin-left: 4px">Set Params</button>
+                    <span
+                        id="skelTrackBadge"
+                        style="margin-left: 6px; color: #7fb3d5; font-size: 11px"
+                        title="What Skeletonize will read. Preprocessed mesh components are used whenever components exist; that route ignores the soma-detection, bridging and pruning parameters, which are only read when skeletonizing from the raw mesh."
+                    ></span>
                     <span id="skelStaleHint" style="margin-left: 8px; color: #e08a3c"></span>
                     <span
                         style="color: #888; margin-left: 12px"
@@ -1056,14 +1092,14 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("reassignApplyBtn").addEventListener("click", applyReassign);
                 document.getElementById("reassignCancelBtn").addEventListener("click", cancelReassign);
                 document
-                    .getElementById("modePreprocessBtn")
-                    .addEventListener("click", () => setMode("preprocess"));
+                    .getElementById("modeMeshBtn")
+                    .addEventListener("click", () => setMode("mesh"));
                 document
-                    .getElementById("modeEditBtn")
-                    .addEventListener("click", () => setMode("editmesh"));
+                    .getElementById("modeCompBtn")
+                    .addEventListener("click", () => setMode("components"));
                 document
                     .getElementById("modeSkelBtn")
-                    .addEventListener("click", () => setMode("editskel"));
+                    .addEventListener("click", () => setMode("skeleton"));
                 document.getElementById("binSkelSel").addEventListener("change", () => {
                     clearBinSelection();
                     fetchEdgeSupport();
@@ -1074,6 +1110,12 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("binMergeBtn").addEventListener("click", runBinMerge);
                 document.getElementById("binSplitBtn").addEventListener("click", runBinSplit);
                 document.getElementById("edgeEditBtn").addEventListener("click", runEdgeEdit);
+                document.getElementById("dxKindSel").addEventListener("change", () => {
+                    renderDxParams();
+                    document.getElementById("dxStatus").textContent = "";
+                });
+                document.getElementById("dxRunBtn").addEventListener("click", runDiagnostic);
+                renderDxParams();
                 document.getElementById("skelApplyBtn").addEventListener("click", runSkelApply);
                 document.getElementById("skelCancelBtn").addEventListener("click", runSkelCancel);
                 document.getElementById("scopeAllBtn").addEventListener("click", () => setScopeAll(true));
@@ -1198,6 +1240,7 @@ let meshCentroid = [0, 0, 0];
                 try {
                     const resp = await fetch("/loaded");
                     const data = await resp.json();
+                    setTrack(data.track);
                     const meshEl = document.getElementById("loadedMesh");
                     const skelEl = document.getElementById("loadedSkel");
                     if (data.mesh) {
@@ -1313,20 +1356,27 @@ let meshCentroid = [0, 0, 0];
                     dragCounter = 0;
                     overlay.style.display = "none";
 
-                    for (const file of e.dataTransfer.files) {
-                        const formData = new FormData();
-                        formData.append("file", file);
-                        try {
-                            const resp = await fetch("/upload", { method: "POST", body: formData });
-                            const data = await resp.json();
-                            if (data.ok) {
-                                console.log(`[skeliner] Loaded ${data.type}: ${data.name}`);
-                            } else {
-                                console.error(`[skeliner] Upload failed: ${data.error}`);
+                    // One drop is one gesture: the files go up together so the
+                    // server can order them by type and clear the previous
+                    // session once, instead of a mesh arriving second and
+                    // wiping the components that came with it.
+                    const files = [...e.dataTransfer.files];
+                    if (!files.length) return;
+                    const formData = new FormData();
+                    for (const file of files) formData.append("files", file);
+                    try {
+                        const resp = await fetch("/upload_batch", { method: "POST", body: formData });
+                        const data = await resp.json();
+                        if (data.ok) {
+                            for (const r of data.results) {
+                                if (r.ok) console.log(`[skeliner] Loaded ${r.type}: ${r.name}`);
+                                else console.error(`[skeliner] Failed ${r.name}: ${r.error}`);
                             }
-                        } catch (err) {
-                            console.error("[skeliner] Upload error:", err);
+                        } else {
+                            console.error(`[skeliner] Upload failed: ${data.error}`);
                         }
+                    } catch (err) {
+                        console.error("[skeliner] Upload error:", err);
                     }
                 });
             }
@@ -1597,7 +1647,7 @@ let meshCentroid = [0, 0, 0];
                 // so this is the one place that has to notice.  Which pairs
                 // the tree already has is a function of this layer's edges, so
                 // it is re-asked when *this* layer is the one being looked at.
-                if (panelMode === "editskel") {
+                if (panelMode === "skeleton") {
                     refreshBinSkelSel();
                     if (document.getElementById("binSkelSel").value === name)
                         fetchEdgeSupport();
@@ -1800,9 +1850,9 @@ let meshCentroid = [0, 0, 0];
                     const radius = skelNodeRadii ? skelNodeRadii[nodeIndex] : null;
                     const key = `${bestSkelName}:${nodeIndex}`;
 
-                    // In Edit Skeleton a node is shown as the surface it
+                    // In the Skeleton panel a node is shown as the surface it
                     // owns, not as a ball: the bin is what a node actually is.
-                    if (panelMode === "editskel") {
+                    if (panelMode === "skeleton") {
                         const sel = document.getElementById("binSkelSel");
                         // Node ids mean different things in different layers,
                         // so a click that switches layer starts a new
@@ -1871,7 +1921,7 @@ let meshCentroid = [0, 0, 0];
                 // shift-click adjusts the face selection here as it does
                 // everywhere else.  Letting it pick a bin as well gave one
                 // modifier two meanings in the mode where both are live.
-                if (panelMode === "editskel" && !event.shiftKey) {
+                if (panelMode === "skeleton" && !event.shiftKey) {
                     selectBin(faceIndex, true);
                     return;
                 }
@@ -2266,54 +2316,54 @@ let meshCentroid = [0, 0, 0];
                 );
             }
 
-            // ── Edit Mesh mode ───────────────────────────────────────────
-            // The two panels are different activities — run the automatic
+            // ── Mode selector ────────────────────────────────────────────
+            // Three modes, one per object in the derivation chain: the mesh,
+            // the components broken out of it, then the skeleton built from
+            // those.  They are also different activities — run the automatic
             // steps in order, versus select/assign/commit — and separating
             // them is what keeps a lasso from meaning two things.
-            // Three modes, because they are the workflow stages: run the
-            // automatic steps, then correct the components, then correct the
-            // partition.  `editMode` stays a boolean for Edit Mesh so the
-            // scope block below reads exactly one thing.
-            let panelMode = "preprocess"; // preprocess | editmesh | editskel
-            let editMode = false;
+            // `componentMode` stays a boolean because the scope block below
+            // reads exactly one of the three.
+            let panelMode = "mesh"; // mesh | components | skeleton
+            let componentMode = false;
 
             const MODE_ROWS = {
-                preprocess: "preprocess-rows",
-                editmesh: "editmesh-rows",
-                editskel: "editskel-rows",
+                mesh: "mesh-rows",
+                components: "components-rows",
+                skeleton: "skeleton-rows",
             };
             const MODE_BTNS = {
-                preprocess: "modePreprocessBtn",
-                editmesh: "modeEditBtn",
-                editskel: "modeSkelBtn",
+                mesh: "modeMeshBtn",
+                components: "modeCompBtn",
+                skeleton: "modeSkelBtn",
             };
 
             function setMode(mode) {
-                // Preprocess and Edit Mesh both read a selection as faces to
-                // operate on; Edit Skeleton reads it as surface to move
-                // between bins.  Carrying one across that line would hand the
-                // new mode a selection made under the other's scope.
-                if ((panelMode === "editskel") !== (mode === "editskel")) {
+                // Mesh and Mesh Comp. both read a selection as faces to
+                // operate on; Skeleton reads it as surface to move between
+                // bins.  Carrying one across that line would hand the new
+                // mode a selection made under the other's scope.
+                if ((panelMode === "skeleton") !== (mode === "skeleton")) {
                     manualHighlightFaces.clear();
                     rebuildManualHighlight();
                     syncManualHighlight();
                 }
                 panelMode = mode;
-                editMode = mode === "editmesh";
+                componentMode = mode === "components";
                 for (const [m, id] of Object.entries(MODE_ROWS))
                     document.getElementById(id).style.display =
                         m === mode ? "block" : "none";
                 for (const [m, id] of Object.entries(MODE_BTNS))
                     document.getElementById(id).dataset.active = m === mode ? "1" : "0";
 
-                // Scoping is an Edit Mesh notion; leaving a mask applied on the
+                // Scoping is a Mesh Comp. notion; leaving a mask applied on the
                 // way out would silently narrow selection in a panel with no
-                // scope UI to explain it.  rebuildScopeMask reads editMode.
+                // scope UI to explain it.  rebuildScopeMask reads componentMode.
                 rebuildScopeMask();
-                if (editMode) renderScopeChips();
+                if (componentMode) renderScopeChips();
                 else cancelReassign();
 
-                if (mode === "editskel") {
+                if (mode === "skeleton") {
                     refreshBinSkelSel();
                     // The edge verb cannot be named without knowing which
                     // pairs the surface supports, so this is not optional.
@@ -2332,7 +2382,7 @@ let meshCentroid = [0, 0, 0];
             //
             // scopeOn is an allow-list of indices into
             // currentAnnotations.highlights.  `null` means "not chosen yet",
-            // which shows every chip lit and behaves like Preprocess does; an
+            // which shows every chip lit and behaves like Mesh does; an
             // *empty* set is a deliberate choice that nothing is pickable.
             // Keeping those two apart is what lets "All" and "None" be
             // different buttons rather than two ways to say the same thing.
@@ -2341,7 +2391,7 @@ let meshCentroid = [0, 0, 0];
             // the lookup is the lasso's inner loop, over every face.
             let scopeMask = null; // null → unscoped, everything pickable
             let scopeOn = null;
-            // Edit Skeleton's scope, filled in by rebuildBinScopeMask.  Here
+            // Skeleton's scope, filled in by rebuildBinScopeMask.  Here
             // rather than with the bin code because inScope is the one pick
             // path both modes go through, and a scope it cannot see is a scope
             // that silently does not apply.  Note `null` means the opposite of
@@ -2361,7 +2411,7 @@ let meshCentroid = [0, 0, 0];
             }
 
             function rebuildScopeMask() {
-                if (!editMode || scopeOn === null || !meshGeometry) {
+                if (!componentMode || scopeOn === null || !meshGeometry) {
                     scopeMask = null;
                     return;
                 }
@@ -2373,12 +2423,12 @@ let meshCentroid = [0, 0, 0];
                 }
             }
 
-            // Two modes, two scopes, one pick path.  Edit Mesh bounds the
-            // lasso by component; Edit Skeleton bounds it by the destination
+            // Two modes, two scopes, one pick path.  Mesh Comp. bounds the
+            // lasso by component; Skeleton bounds it by the destination
             // bin's graph neighbours, which is a correctness constraint and
             // not only a convenience — see binScopeMask.
             function inScope(faceIndex) {
-                if (panelMode === "editskel") {
+                if (panelMode === "skeleton") {
                     return binScopeMask !== null && binScopeMask[faceIndex] === 1;
                 }
                 return scopeMask === null || scopeMask[faceIndex] === 1;
@@ -2520,7 +2570,7 @@ let meshCentroid = [0, 0, 0];
                 // different components than the user lit.
                 scopeOn = null;
                 rebuildScopeMask();
-                if (editMode) renderScopeChips();
+                if (componentMode) renderScopeChips();
             }
 
             // ── Rescue discarded fragments ───────────────────────────────
@@ -2700,7 +2750,7 @@ let meshCentroid = [0, 0, 0];
                 document.getElementById("reassignSummary").style.display = "none";
             }
 
-            // ── Bin selection (Edit Skeleton) ───────────────────────────
+            // ── Bin selection (Edit ▸ Skeleton) ─────────────────────────
             // A node *is* the set of mesh vertices it owns: its position is
             // their centroid and every radius is an aggregate over them.  So
             // in this mode a selected node renders as the surface it owns
@@ -3023,9 +3073,110 @@ let meshCentroid = [0, 0, 0];
              * told from a restore to a graft, and those are different claims.
              * ~15 ms on a 583-node cell, ~110 ms on an 11k-node one.
              */
+            // ── Diagnostics ──────────────────────────────────────────────────
+            // Each entry declares the cuts it exposes.  They are inputs rather
+            // than constants because no value here is settled: the corpus can
+            // rank candidates but cannot say which are real, so the honest
+            // interface is one you can turn and watch.
+            // Keys are in the dropdown's order, which is dx.__skeleton__'s.
+            const DX_PARAMS = {
+                orphans: [],
+                cycles: [],
+                degree: [
+                    { id: "minDegree", label: "deg≥", value: 4, size: 2, unit: "edges",
+                      title: "List every node at or above this degree." },
+                ],
+                twigs: [
+                    { id: "maxRatio", label: "≤", value: 3, size: 3, unit: "× host radius",
+                      title: "Twig cable as a multiple of the radius of the branch node it hangs off. Small means the twig is shorter than its host is thick." },
+                    { id: "maxNodes", label: "nodes≤", value: 3, size: 2, unit: "nodes",
+                      title: "Longest twig, in nodes, to list." },
+                ],
+                tips: [
+                    { id: "nearFactor", label: "near", value: 1.2, size: 3, unit: "× soma axis",
+                      title: "Multiple of the largest soma semi-axis inside which a tip counts as close." },
+                    { id: "pathRatio", label: "path≥", value: 2.0, size: 3, unit: "× straight line",
+                      title: "Minimum path-length / straight-line ratio." },
+                ],
+                junctions: [
+                    { id: "minDegree", label: "deg≥", value: 4, size: 2, unit: "edges",
+                      title: "Minimum graph degree to consider at all." },
+                    { id: "minCable", label: "arm≥", value: 5, size: 4, unit: "µm",
+                      title: "How much cable a distal arm must carry to count as substantial, in um. Two arms must clear it independently." },
+                    { id: "minComponents", label: "arms", value: 2, size: 2, unit: "of them",
+                      title: "How many distal arms must clear the bar." },
+                ],
+            };
+
+            function renderDxParams() {
+                const kind = document.getElementById("dxKindSel").value;
+                const host = document.getElementById("dxParams");
+                host.innerHTML = "";
+                for (const p of DX_PARAMS[kind] || []) {
+                    const lab = document.createElement("span");
+                    lab.style.color = "#888";
+                    lab.style.marginLeft = "6px";
+                    lab.textContent = p.label;
+                    lab.title = p.title;
+                    const inp = document.createElement("input");
+                    inp.type = "text";
+                    inp.id = "dxp_" + p.id;
+                    inp.value = p.value;
+                    inp.size = p.size;
+                    inp.title = p.title;
+                    inp.style.marginLeft = "3px";
+                    inp.style.fontSize = "11px";
+                    host.appendChild(lab);
+                    host.appendChild(inp);
+                    // The unit belongs beside the box, not in a tooltip you
+                    // have to go looking for.  An unlabelled number field
+                    // holding a physical length is how 250 um becomes 250 nm.
+                    if (p.unit) {
+                        const u = document.createElement("span");
+                        u.style.color = "#888";
+                        u.style.marginLeft = "2px";
+                        u.textContent = p.unit;
+                        u.title = p.title;
+                        host.appendChild(u);
+                    }
+                }
+            }
+
+            async function runDiagnostic() {
+                const kind = document.getElementById("dxKindSel").value;
+                const sname = document.getElementById("binSkelSel").value;
+                const status = document.getElementById("dxStatus");
+                const btn = document.getElementById("dxRunBtn");
+                if (!sname) {
+                    status.textContent = "no skeleton";
+                    return;
+                }
+                const params = {};
+                for (const p of DX_PARAMS[kind] || []) {
+                    const el = document.getElementById("dxp_" + p.id);
+                    if (el) params[p.id] = parseFloat(el.value);
+                }
+                btn.disabled = true;
+                status.textContent = "…";
+                try {
+                    const r = await fetch("/diagnose", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: sname, kind, params }),
+                    });
+                    const data = await r.json();
+                    status.textContent = data.ok
+                        ? `${data.n} found — open Annotations to step through`
+                        : data.error || "error";
+                } catch (e) {
+                    status.textContent = "error: " + e.message;
+                }
+                btn.disabled = false;
+            }
+
             async function fetchEdgeSupport() {
                 const sname = document.getElementById("binSkelSel").value;
-                if (panelMode !== "editskel" || !sname) {
+                if (panelMode !== "skeleton" || !sname) {
                     clearEdgeSupport();
                     return;
                 }
@@ -3636,45 +3787,95 @@ let meshCentroid = [0, 0, 0];
             }
 
             // ── Skeletonize ───────────────────────────────────────────────────
+            //
+            // `tracks` is which tracks actually consult a parameter.
+            // `skeletonize()` accepts every one of these on either track and
+            // simply does not forward the inapplicable ones, so a setting made
+            // against the wrong track is not refused — it is ignored in
+            // silence.  Only three of these apply to both.
+            const BOTH = ["direct", "preprocessing"];
             const SKEL_DEFAULTS = {
-                second_pass: { value: true, type: "bool", label: "Perpendicular re-bin (2nd pass)" },
-                geodesic_shell_count: { value: 1000, type: "int", label: "Shell count" },
-                min_shell_vertices: { value: 6, type: "int", label: "Min shell vertices" },
-                max_shell_width_factor: { value: 50, type: "int", label: "Max shell width factor" },
-                detect_soma: { value: true, type: "bool", label: "Detect soma" },
+                second_pass: { value: true, type: "bool", label: "Perpendicular re-bin (2nd pass)", tracks: ["preprocessing"] },
+                geodesic_shell_count: { value: 1000, type: "int", label: "Shell count", tracks: BOTH },
+                min_shell_vertices: { value: 6, type: "int", label: "Min shell vertices", tracks: BOTH },
+                max_shell_width_factor: { value: 50, type: "int", label: "Max shell width factor", tracks: BOTH },
+                detect_soma: { value: true, type: "bool", label: "Detect soma", tracks: ["direct"] },
                 soma_radius_percentile_threshold: {
                     value: 99.9,
                     type: "float",
                     label: "Soma radius percentile",
+                    tracks: ["direct"],
                 },
-                soma_radius_distance_factor: { value: 4, type: "float", label: "Soma radius dist factor" },
-                soma_min_nodes: { value: 3, type: "int", label: "Soma min nodes" },
-                bridge_gaps: { value: true, type: "bool", label: "Bridge gaps" },
-                collapse_soma: { value: true, type: "bool", label: "Collapse soma" },
-                collapse_soma_dist_factor: { value: 1.2, type: "float", label: "Collapse soma dist factor" },
+                soma_radius_distance_factor: { value: 4, type: "float", label: "Soma radius dist factor", tracks: ["direct"] },
+                soma_min_nodes: { value: 3, type: "int", label: "Soma min nodes", tracks: ["direct"] },
+                bridge_gaps: { value: true, type: "bool", label: "Bridge gaps", tracks: ["direct"] },
+                collapse_soma: { value: true, type: "bool", label: "Collapse soma", tracks: ["direct"] },
+                collapse_soma_dist_factor: { value: 1.2, type: "float", label: "Collapse soma dist factor", tracks: ["direct"] },
                 collapse_soma_radius_factor: {
                     value: 0.2,
                     type: "float",
                     label: "Collapse soma radius factor",
+                    tracks: ["direct"],
                 },
-                prune_tiny_neurites: { value: true, type: "bool", label: "Prune tiny neurites" },
-                prune_tip_extent_factor: { value: 1.2, type: "float", label: "Prune tip extent factor" },
-                prune_stem_extent_factor: { value: 3.0, type: "float", label: "Prune stem extent factor" },
+                prune_tiny_neurites: { value: true, type: "bool", label: "Prune tiny neurites", tracks: ["direct"] },
+                prune_tip_extent_factor: { value: 1.2, type: "float", label: "Prune tip extent factor", tracks: ["direct"] },
+                prune_stem_extent_factor: { value: 3.0, type: "float", label: "Prune stem extent factor", tracks: ["direct"] },
                 merge_nodes_overlap_fraction: {
                     value: 0.8,
                     type: "float",
                     label: "Merge nodes overlap frac",
+                    tracks: ["direct"],
                 },
-                split_elongated_shells: { value: false, type: "bool", label: "Split elongated shells" },
-                split_aspect_thr: { value: 3.0, type: "float", label: "Split aspect threshold" },
-                postprocess: { value: true, type: "bool", label: "Postprocess" },
+                split_elongated_shells: { value: false, type: "bool", label: "Split elongated shells", tracks: ["direct"] },
+                split_aspect_thr: { value: 3.0, type: "float", label: "Split aspect threshold", tracks: ["direct"] },
+                postprocess: { value: true, type: "bool", label: "Postprocess", tracks: ["direct"] },
             };
+
+            // The wire keeps the short ids; what a user reads names what the
+            // track consumes, since "direct" and "preprocessing" say nothing
+            // about which mesh a run is reading.
+            const TRACK_LABEL = {
+                direct: "skeletonize from raw mesh",
+                preprocessing: "skeletonize from preprocessed mesh components",
+            };
+            const trackLabel = (t) => TRACK_LABEL[t] || t;
+
+            // Which track /skeletonize would take now.  Ships on every
+            // broadcast, so this is only ever as stale as the last message.
+            let currentTrack = "direct";
+            let trackShown = false;
+
+            function applies(def) {
+                return (def.tracks || BOTH).includes(currentTrack);
+            }
+
+            function refreshTrackCue() {
+                const badge = document.getElementById("skelTrackBadge");
+                if (badge) badge.textContent = trackLabel(currentTrack);
+                const dialog = document.getElementById("skel-params-dialog");
+                if (dialog && dialog.style.display !== "none") openSkelParams();
+            }
+
+            function setTrack(track) {
+                // The first call still paints, even when the track equals the
+                // default it was initialised to — otherwise a session that
+                // never leaves the direct track shows no badge at all.
+                if (!track || (track === currentTrack && trackShown)) return;
+                currentTrack = track;
+                trackShown = true;
+                refreshTrackCue();
+            }
             let skelParams = {};
             try { const s = JSON.parse(localStorage.getItem('skeliner_skelParams')); if (s) skelParams = s; } catch (e) {}
 
             function getSkelParams() {
                 const params = {};
                 for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
+                    // A value the current track never reads is left out
+                    // rather than sent and dropped, so what goes over the
+                    // wire is what the run can actually act on.  The setting
+                    // itself is kept, and returns when its track does.
+                    if (!applies(def)) continue;
                     if (key in skelParams && skelParams[key] !== def.value) {
                         params[key] = skelParams[key];
                     }
@@ -3685,11 +3886,62 @@ let meshCentroid = [0, 0, 0];
             function openSkelParams() {
                 const body = document.getElementById("skelParamsBody");
                 body.innerHTML = "";
-                for (const [key, def] of Object.entries(SKEL_DEFAULTS)) {
+
+                const note = document.createElement("div");
+                note.style.cssText =
+                    "grid-column:1/-1;color:#7fb3d5;font-size:11px;margin-bottom:6px;";
+                note.textContent =
+                    `${trackLabel(currentTrack)} — greyed parameters belong ` +
+                    `to the other track and are ignored on this one.`;
+                body.appendChild(note);
+
+                // Settings persist in localStorage across sessions, so this
+                // is the only place the page can say that what it shows is
+                // not what skeliner defaults to.
+                const nOver = Object.entries(SKEL_DEFAULTS).filter(
+                    ([k, d]) => k in skelParams && skelParams[k] !== d.value,
+                ).length;
+                if (nOver) {
+                    const warn = document.createElement("div");
+                    warn.style.cssText =
+                        "grid-column:1/-1;color:#e0b03c;font-size:11px;margin-bottom:6px;";
+                    warn.textContent =
+                        `${nOver} setting${nOver === 1 ? "" : "s"} (•) kept from an ` +
+                        `earlier session, not skeliner's default. Reset Defaults restores them.`;
+                    body.appendChild(warn);
+                }
+
+                // Applicable first: the dimmed ones are context, not the
+                // list you are meant to read past to reach the live settings.
+                const entries = Object.entries(SKEL_DEFAULTS).sort(
+                    (a, b) => applies(b[1]) - applies(a[1]),
+                );
+                for (const [key, def] of entries) {
+                    const live = applies(def);
                     const val = key in skelParams ? skelParams[key] : def.value;
+                    // A stored value renders exactly like a default, so a
+                    // setting changed in some earlier session reads as "this
+                    // is how skeliner ships" — which is how an unticked
+                    // second_pass got mistaken for a backend default.  Marked
+                    // instead, with the default it replaced.
+                    const overridden = key in skelParams && skelParams[key] !== def.value;
                     const label = document.createElement("label");
-                    label.textContent = def.label;
-                    label.style.color = "#ccc";
+                    label.textContent = def.label + (overridden ? " •" : "");
+                    label.style.color = !live ? "#666" : overridden ? "#e0b03c" : "#ccc";
+                    const why = [];
+                    if (!live) {
+                        why.push(
+                            "Only read when you " +
+                            def.tracks.map(trackLabel).join(" / ") + ".",
+                        );
+                    }
+                    if (overridden) {
+                        why.push(
+                            `Changed from the default (${def.value}) in an ` +
+                            `earlier session — Reset Defaults restores it.`,
+                        );
+                    }
+                    if (why.length) label.title = why.join(" ");
                     body.appendChild(label);
 
                     if (def.type === "bool") {
@@ -3697,6 +3949,7 @@ let meshCentroid = [0, 0, 0];
                         cb.type = "checkbox";
                         cb.checked = val;
                         cb.dataset.key = key;
+                        cb.disabled = !live;
                         cb.addEventListener("change", () => {
                             skelParams[key] = cb.checked;
                             localStorage.setItem('skeliner_skelParams', JSON.stringify(skelParams));
@@ -3707,8 +3960,11 @@ let meshCentroid = [0, 0, 0];
                         inp.type = "text";
                         inp.value = val;
                         inp.dataset.key = key;
+                        inp.disabled = !live;
                         inp.style.cssText =
-                            "width:80px;font-size:11px;font-family:monospace;background:#222;color:#ccc;border:1px solid #555;padding:2px 4px;";
+                            "width:80px;font-size:11px;font-family:monospace;background:#222;color:" +
+                            (live ? "#ccc" : "#666") +
+                            ";border:1px solid #555;padding:2px 4px;";
                         inp.addEventListener("change", () => {
                             skelParams[key] =
                                 def.type === "int" ? parseInt(inp.value) : parseFloat(inp.value);
@@ -4334,11 +4590,23 @@ let meshCentroid = [0, 0, 0];
                     mouse.y = -(upEvent.clientY / window.innerHeight) * 2 + 1;
                     raycaster.setFromCamera(mouse, camera);
                     const targets = [];
-                    if (meshObj) targets.push(meshObj);
+                    if (meshObj && meshObj.visible) targets.push(meshObj);
                     for (const em of Object.values(extraMeshObjs)) {
                         if (em && em.mesh) targets.push(em.mesh);
                     }
+                    // Skeleton nodes are recentre targets in their own right.
+                    // Without them, hiding the mesh to see a junction — the
+                    // reason anyone hides it — also takes away the only way to
+                    // navigate to one, and a skeleton loaded on its own has no
+                    // recentre at all.  The mesh is skipped while hidden for
+                    // the same reason: it would otherwise keep winning the
+                    // depth test against the nodes it is drawn over.
+                    for (const sg of Object.values(skelGroups)) {
+                        if (sg && sg.nodePoints && sg.group.visible) targets.push(sg.nodePoints);
+                    }
                     if (targets.length === 0) return;
+                    raycaster.params.Points.threshold =
+                        camera.position.distanceTo(controls.target) * 0.02;
                     let best = null;
                     for (const t of targets) {
                         const h = raycaster.intersectObject(t);
@@ -4578,11 +4846,19 @@ let meshCentroid = [0, 0, 0];
                         }
                         const geo = new THREE.BufferGeometry();
                         geo.setAttribute("position", new THREE.BufferAttribute(pts, 3));
+                        // A group flagged `overlay` traces edges the skeleton
+                        // already draws, so at equal depth it z-fights with
+                        // them and the highlight is only visible once the
+                        // skeleton is hidden — which takes away the context
+                        // it exists to be seen against.  Draw it on top.
                         const mat = new THREE.LineBasicMaterial({
                             color: new THREE.Color(color[0], color[1], color[2]),
                             linewidth: 2,
+                            depthTest: !group.overlay,
+                            transparent: !!group.overlay,
                         });
                         const line = new THREE.LineSegments(geo, mat);
+                        if (group.overlay) line.renderOrder = 10;
                         scene.add(line);
                         edgeGroupMeshes.push(line);
                     }
@@ -4697,6 +4973,49 @@ let meshCentroid = [0, 0, 0];
                 camera.position.copy(center).addScaledVector(offset, Math.max(radius * 3, 500));
                 controls.update();
                 scheduleStateUpdate();
+            }
+
+            // A marker is a point, so unlike the other two channels there is
+            // no extent to frame — the distance comes from the marker's own
+            // radius, with a floor so a small one does not put the camera
+            // inside it.
+            //
+            // A marker carrying `node` is a *skeleton node*, which is what a
+            // diagnostic emits: flying there and leaving the node unselected
+            // would make every row a two-step gesture, and the second step is
+            // finding a bin you are already looking at.  So focusing one also
+            // selects its bin, which is what arms the edit verbs.  Cleared
+            // first rather than toggled, so focusing the same row twice is
+            // idempotent instead of deselecting.
+            function focusOnMarker(idx) {
+                const sphere = markerMeshes[idx];
+                if (!sphere) return;
+                const mk = (currentAnnotations.markers || [])[idx] || {};
+                const center = sphere.position.clone();
+
+                const offset = camera.position.clone().sub(controls.target).normalize();
+                controls.target.copy(center);
+                // Framed well back from the marker, because the marker is
+                // the size of the node it sits on and the question is never
+                // about the node alone — it is whether the arms around it
+                // are real.  Sitting a marker-radius away shows the bead and
+                // nothing to judge it against.
+                camera.position
+                    .copy(center)
+                    .addScaledVector(offset, Math.max((mk.radius || 50) * 25, 2000));
+                controls.update();
+                scheduleStateUpdate();
+
+                if (mk.node == null || panelMode !== "skeleton") return;
+                const sel = document.getElementById("binSkelSel");
+                if (mk.skelName && sel.value !== mk.skelName && skelGroups[mk.skelName]) {
+                    sel.value = mk.skelName;
+                    clearBinSelection();
+                    fetchEdgeSupport();
+                } else {
+                    clearBinSelection();
+                }
+                selectBin(mk.node);
             }
 
             function removeEdgeGroup(idx) {
@@ -4851,7 +5170,33 @@ let meshCentroid = [0, 0, 0];
                         const div = document.createElement("div");
                         div.className = "hl-item";
                         const rgb = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
-                        div.innerHTML = `<span><span class="hl-swatch" style="background:${rgb}; border-radius:50%"></span>${label}</span>`;
+                        const left = document.createElement("span");
+                        const swatch = document.createElement("span");
+                        swatch.className = "hl-swatch";
+                        swatch.style.cssText = `background:${rgb}; border-radius:50%`;
+                        left.appendChild(swatch);
+                        // A marker naming a node says so, since the id is what
+                        // a diagnostic reports and what the reader has to
+                        // match against a list elsewhere.
+                        const nameSpan = document.createElement("span");
+                        nameSpan.textContent =
+                            label + (mk.node != null ? ` · node ${mk.node}` : "");
+                        nameSpan.title =
+                            mk.node != null
+                                ? "Double-click to centre on this node and select its bin"
+                                : "Double-click to centre on this marker";
+                        nameSpan.style.cssText =
+                            "cursor:pointer;border-bottom:1px dashed #555;";
+                        nameSpan.addEventListener("dblclick", () => focusOnMarker(idx));
+                        left.appendChild(nameSpan);
+                        div.appendChild(left);
+
+                        const focusBtn = document.createElement("button");
+                        focusBtn.className = "icon-btn";
+                        focusBtn.textContent = "⌖";
+                        focusBtn.title = "Center camera on this marker";
+                        focusBtn.addEventListener("click", () => focusOnMarker(idx));
+                        div.appendChild(focusBtn);
 
                         const toggleBtn = document.createElement("button");
                         toggleBtn.className = "toggle-vis icon-btn";
@@ -5104,6 +5449,10 @@ let meshCentroid = [0, 0, 0];
                 ws.onopen = () => console.log("[skeliner] WebSocket connected");
                 ws.onmessage = (event) => {
                     const msg = JSON.parse(event.data);
+                    // Every broadcast carries the track, so the badge and the
+                    // dialog follow whatever last changed the components
+                    // without needing a message of their own.
+                    setTrack(msg.track);
                     if (msg.type === "annotations") applyAnnotations(msg.payload);
                     else if (msg.type === "annotations_updated") {
                         fetch("/annotations").then(r => r.json()).then(ann => {

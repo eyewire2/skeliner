@@ -11,7 +11,9 @@ __skeleton__ = [
     "connectivity",
     "check_acyclicity",
     "acyclicity",
+    "cycles",
     "check_bins",
+    "check_mesh_pairing",
     "edge_support",
     "face_owner",
     "bin_faces",
@@ -21,6 +23,7 @@ __skeleton__ = [
     "branches_of_length",
     "twigs_of_length",
     "suspicious_tips",
+    "suspicious_junctions",
     "distance",
     "node_summary",
     "extract_neurites",
@@ -77,16 +80,104 @@ def connectivity(skel, *, return_isolated: bool = False):
 def check_acyclicity(skel, *, return_cycles: bool = False):
     """Check that the skeleton is a *forest* (|E| = |V| − components).
 
-    If a cycle exists and ``return_cycle`` is *True*, a representative list of
-    (u, v) edges forming the cycle is returned.
+    If a cycle exists and ``return_cycles`` is *True*, a representative list
+    of (u, v) edges forming the cycle is returned.
     """
     g = _graph(skel)
     n_comp = len(g.components())
     acyclic = g.ecount() == g.vcount() - n_comp
     if acyclic or not return_cycles:
         return acyclic
-    cyc = g.cycle_basis()[0]  # list of vertex ids
-    return [(cyc[i], cyc[(i + 1) % len(cyc)]) for i in range(len(cyc))]
+    return _cycle_edges(g, g.minimum_cycle_basis()[0])
+
+
+def _cycle_edges(g: ig.Graph, eids) -> List[Tuple[int, int]]:
+    """Edge ids from a cycle basis → ``(u, v)`` pairs, walked in loop order.
+
+    ``minimum_cycle_basis`` and ``fundamental_cycles`` return **edge** ids,
+    where the removed ``cycle_basis`` returned **vertex** ids.  Reading the
+    new output as the old — indexing it as a vertex ring — silently yields a
+    plausible list of pairs that are not the cycle, which is why this
+    conversion is one named function rather than repeated at each call site.
+    """
+    pairs = [tuple(sorted(g.es[int(e)].tuple)) for e in eids]
+    nbr: Dict[int, List[int]] = {}
+    for a, b in pairs:
+        nbr.setdefault(a, []).append(b)
+        nbr.setdefault(b, []).append(a)
+
+    start = min(nbr)
+    ring, prev, cur = [start], None, start
+    while True:
+        nxt = next((w for w in nbr[cur] if w != prev), None)
+        if nxt is None or nxt == start:
+            break
+        ring.append(nxt)
+        prev, cur = cur, nxt
+    return [(ring[i], ring[(i + 1) % len(ring)]) for i in range(len(ring))]
+
+
+def cycles(skel, mesh=None) -> List[Dict[str, Any]]:
+    """Every independent loop, and where the tree most likely closed it wrongly.
+
+    A skeleton off the pipeline has no loops — the MST guarantees a tree — so
+    a loop only exists because somebody *asserted* a connection
+    (:func:`skeliner.post.graft` allows one by default, and restoring a
+    surface-supported pair is the usual way).  That assertion is the useful
+    part: the loop it opens is a statement that **two of these edges cannot
+    both be right**, and one of them is a join the MST made that it should
+    not have.
+
+    Which one is not guessed.  With a *mesh*, :func:`edge_support` says which
+    tree edges have no surface behind them at all (``T∖G``), and such an edge
+    lying **on the loop** is the tree claiming a connection the surface does
+    not support while an alternative path exists.  That is the break point,
+    on evidence rather than on a threshold.
+
+    Without a mesh the loop is still reported, with no break point named —
+    which is the honest answer, not a fallback ranking.
+
+    Returns
+    -------
+    list of dict
+        One entry per independent cycle::
+
+            {"nodes": [...],        # in loop order
+             "edges": [(u, v), ...],
+             "breaks": [(u, v), ...],   # unsupported by the surface
+             "length": float}       # loop cable, skeleton units
+
+        Longest loop first — a two-node loop is a duplicated edge, while a
+        long one spans the structure the tree got wrong.
+    """
+    g = _graph(skel)
+    basis = g.minimum_cycle_basis()
+    if not basis:
+        return []
+
+    unsupported: Set[Tuple[int, int]] = set()
+    if mesh is not None:
+        rep = edge_support(skel, mesh)
+        unsupported = {(int(u), int(v)) for u, v in rep["unsupported"]}
+
+    nodes = np.asarray(skel.nodes, dtype=np.float64)
+    out: List[Dict[str, Any]] = []
+    for eids in basis:
+        edges = _cycle_edges(g, eids)
+        ring = [a for a, _ in edges]
+        length = float(sum(np.linalg.norm(nodes[a] - nodes[b]) for a, b in edges))
+        out.append(
+            {
+                "nodes": ring,
+                "edges": edges,
+                "breaks": [
+                    (a, b) for a, b in edges if (min(a, b), max(a, b)) in unsupported
+                ],
+                "length": length,
+            }
+        )
+    out.sort(key=lambda c: -c["length"])
+    return out
 
 
 def acyclicity(skel, *, return_cycles: bool = False):
@@ -205,6 +296,105 @@ def check_bins(skel, *, mesh=None, return_report: bool = False):
     return report
 
 
+def check_mesh_pairing(skel, mesh, *, return_report: bool = False):
+    """Is *mesh* the surface ``skel`` was built from?
+
+    A skeleton's bins name vertex *ids* and nothing else, so the ids alone
+    cannot say which mesh they belong to.  Paired with a **larger** unrelated
+    mesh every id stays in range, bins resolve to real faces, and every answer
+    downstream — the surface a node owns, which pairs the surface joins, what
+    a repartition would do — is computed against the wrong cell and returned
+    without complaint.  A *smaller* one merely raises ``IndexError``, which is
+    the safer failure of the two.
+
+    Two independent things are asked, and they answer differently:
+
+    ``in range``
+        Every id ``node2verts`` names exists in the mesh.  A **necessary**
+        condition, checkable on any skeleton ever written, and the one that
+        rules out the smaller-mesh crash.
+    ``counts``
+        ``meta["mesh"]`` against the loaded mesh, when the skeleton carries
+        it.  Exact, and it survives the ``.obj`` / ``.ply`` round trip that
+        moves coordinates in the ninth decimal — which is why this is counts
+        and not a hash of the vertex array.
+
+    Skeletons written before ``meta["mesh"]`` existed carry no counts, so
+    ``ok`` is the most that can be said of them and ``verified`` stays
+    *False*.  The two are kept apart deliberately: *nothing contradicts this*
+    is a weaker claim than *this is the right mesh*, and collapsing them would
+    present a legacy skeleton as confirmed.
+
+    Parameters
+    ----------
+    skel
+        A :class:`skeliner.Skeleton` instance.
+    mesh
+        The mesh to test it against.
+    return_report
+        Return a dict of details instead of a boolean.
+
+    Returns
+    -------
+    bool or dict
+        ``ok`` is *False* only when something is positively contradicted.
+        The dict also carries ``verified`` and a human-readable ``reason``.
+    """
+    n_verts = int(len(mesh.vertices))
+    n_faces = int(len(mesh.faces))
+    recorded = (skel.meta or {}).get("mesh") or {}
+
+    def _out(ok, verified, reason, **extra):
+        if not return_report:
+            return bool(ok)
+        return {
+            "ok": bool(ok),
+            "verified": bool(verified),
+            "reason": reason,
+            "meshVertices": n_verts,
+            "meshFaces": n_faces,
+            **extra,
+        }
+
+    n2v = skel.node2verts
+    if n2v is None:
+        return _out(False, False, "skeleton carries no mesh data")
+
+    highest = -1
+    for b in n2v:
+        b = np.asarray(b, dtype=np.int64).ravel()
+        if b.size:
+            highest = max(highest, int(b.max()))
+    if highest >= n_verts:
+        return _out(
+            False,
+            False,
+            f"the skeleton names vertex {highest:,}, but the mesh has only "
+            f"{n_verts:,} vertices — it was not built from this mesh",
+            highestVertex=highest,
+        )
+
+    want_v, want_f = recorded.get("n_vertices"), recorded.get("n_faces")
+    if want_v is None:
+        return _out(
+            True,
+            False,
+            "the skeleton records no mesh counts, so the pairing cannot be "
+            "confirmed — only that nothing contradicts it",
+            highestVertex=highest,
+        )
+    if int(want_v) != n_verts or (want_f is not None and int(want_f) != n_faces):
+        return _out(
+            False,
+            False,
+            f"the skeleton was built from a mesh of {int(want_v):,} vertices / "
+            f"{int(want_f):,} faces; this one has {n_verts:,} / {n_faces:,}",
+            expectedVertices=int(want_v),
+            expectedFaces=int(want_f) if want_f is not None else None,
+        )
+    return _out(True, True, "counts match the mesh this was built from")
+
+
 def edge_support(skel, mesh) -> Dict[str, Any]:
     """Which node pairs the mesh surface joins, against which ones the tree has.
 
@@ -310,6 +500,16 @@ def face_owner(skel, mesh) -> np.ndarray:
     lut = np.full(len(mesh.vertices), -1, dtype=np.int64)
     keys = np.fromiter(skel.vert2node.keys(), np.int64, len(skel.vert2node))
     vals = np.fromiter(skel.vert2node.values(), np.int64, len(skel.vert2node))
+    # An id past the end means this is not the mesh the bins were built over.
+    # Left to numpy it is an IndexError naming an array nobody passed in; a
+    # mesh one vertex *larger* than the original would not raise at all, which
+    # is what :func:`check_mesh_pairing` is for.
+    if keys.size and int(keys.max()) >= len(mesh.vertices):
+        raise ValueError(
+            f"skeleton names vertex {int(keys.max()):,} but the mesh has "
+            f"{len(mesh.vertices):,} vertices — it was not built from this "
+            "mesh (see dx.check_mesh_pairing)"
+        )
     lut[keys] = vals
 
     per_face = np.sort(lut[np.asarray(mesh.faces)], axis=1)
@@ -974,6 +1174,260 @@ def suspicious_tips(
 
     suspicious_sorted = sorted(suspicious, key=lambda nid: -stats[int(nid)]["ratio"])
     return suspicious_sorted, stats
+
+
+def _arm_cables(skel, min_degree: int) -> Dict[int, Dict[str, Any]]:
+    """Decompose every junction into the cable each of its arms carries.
+
+    Deleting node *i* splits the tree into one component per neighbour.  The
+    component reached through the parent is *proximal* (it holds the soma);
+    the rest are *distal*.  This is the measurement
+    :func:`suspicious_junctions` thresholds, kept separate because which
+    thresholds are right is an open question and the raw numbers are what
+    answers it.
+
+    Linear in the number of nodes.  The naive form — delete a node, flood
+    each arm, repeat — is O(N²) and visits billions of nodes on a 50k-node
+    skeleton.  Rooting the tree at the soma makes the same decomposition a
+    single post-order accumulation:
+
+    ``sub[v]``
+        cable strictly inside the subtree rooted at *v*.
+    distal arm through child *c*
+        ``sub[c] + len(i, c)``
+    proximal arm
+        ``total − sub[i]``
+
+    which sums back to ``total`` exactly, so the arms partition the cable
+    rather than merely sampling it.
+
+    A disconnected skeleton is handled by rooting **each** component at its
+    lowest node id; for the component holding the soma that is node 0, so the
+    usual case is unchanged and the orphan components still get measured
+    instead of raising.
+
+    Recursion is avoided throughout — a long neurite is a deep tree, and the
+    recursive form overflows the stack on real cells.
+    """
+    n = len(skel.nodes)
+    edges = np.asarray(skel.edges, dtype=np.int64).reshape(-1, 2)
+    if n == 0 or edges.size == 0:
+        return {}
+
+    nodes = np.asarray(skel.nodes, dtype=np.float64)
+    lengths = np.linalg.norm(nodes[edges[:, 0]] - nodes[edges[:, 1]], axis=1)
+
+    # CSR-style adjacency: neighbour ids and the length of the edge used.
+    deg = np.bincount(edges.reshape(-1), minlength=n)
+    start = np.zeros(n + 1, dtype=np.int64)
+    np.cumsum(deg, out=start[1:])
+    fill = start[:-1].copy()
+    adj = np.empty(2 * len(edges), dtype=np.int64)
+    adj_len = np.empty(2 * len(edges), dtype=np.float64)
+    for (a, b), ln in zip(edges, lengths, strict=True):
+        adj[fill[a]] = b
+        adj_len[fill[a]] = ln
+        fill[a] += 1
+        adj[fill[b]] = a
+        adj_len[fill[b]] = ln
+        fill[b] += 1
+
+    parent = np.full(n, -1, dtype=np.int64)
+    parent_len = np.zeros(n, dtype=np.float64)
+    order = np.empty(n, dtype=np.int64)  # BFS order, roots first
+    seen = np.zeros(n, dtype=bool)
+    k = 0
+    for root in range(n):  # node 0 first, so the soma roots its own component
+        if seen[root]:
+            continue
+        seen[root] = True
+        order[k] = root
+        k += 1
+        head = k - 1
+        while head < k:
+            v = order[head]
+            head += 1
+            for j in range(start[v], start[v + 1]):
+                w = adj[j]
+                if not seen[w]:
+                    seen[w] = True
+                    parent[w] = v
+                    parent_len[w] = adj_len[j]
+                    order[k] = w
+                    k += 1
+
+    # Post-order accumulation: walk the BFS order backwards, so every child is
+    # finished before its parent is read.
+    sub = np.zeros(n, dtype=np.float64)
+    for idx in range(n - 1, -1, -1):
+        v = order[idx]
+        p = parent[v]
+        if p >= 0:
+            sub[p] += sub[v] + parent_len[v]
+
+    # Total cable of the component each node belongs to — the proximal arm is
+    # measured against its own component, not the whole file.
+    comp_total = np.zeros(n, dtype=np.float64)
+    comp_of = np.zeros(n, dtype=np.int64)
+    for idx in range(n):
+        v = order[idx]
+        comp_of[v] = v if parent[v] < 0 else comp_of[parent[v]]
+    for v in range(n):
+        comp_total[v] = sub[comp_of[v]]
+
+    out: Dict[int, Dict[str, Any]] = {}
+    for v in range(n):
+        if deg[v] < min_degree or parent[v] < 0:
+            # A component root has no proximal arm, so "one arm holds the
+            # soma and the others do not" is undefined there.  The soma is
+            # legitimately high-degree anyway.
+            continue
+        distal = [
+            float(sub[adj[j]] + adj_len[j])
+            for j in range(start[v], start[v + 1])
+            if adj[j] != parent[v]
+        ]
+        distal.sort(reverse=True)
+        out[int(v)] = {
+            "degree": int(deg[v]),
+            "proximal_cable": float(comp_total[v] - sub[v]),
+            "distal_cables": distal,
+        }
+    return out
+
+
+def suspicious_junctions(
+    skel,
+    *,
+    min_degree: int = 4,
+    min_distal_cable: float = 250.0,
+    cable_unit: str = "um",
+    min_components: int = 2,
+    group_regions: bool = True,
+    return_stats: bool = False,
+):
+    """Junctions where two or more substantial arbors meet — merge candidates.
+
+    A segmentation merge fuses two unrelated neurites in the *mesh*, so the
+    skeleton grows a junction welding two independent arbors together.  The
+    result is still a valid tree — one root, ``E = N − 1``, connected,
+    acyclic — so :func:`check_connectivity` and :func:`check_acyclicity`
+    cannot see it.  What gives it away is the shape: a genuine bifurcation
+    into two long arbors at a single high-degree point is rare, while a merge
+    produces exactly that.
+
+    A node is flagged when its degree is at least *min_degree* **and** at
+    least *min_components* of its distal arms each carry at least
+    *min_distal_cable* of cable.
+
+    This **reports candidates and never clips**.  The rule is a heuristic
+    with no validation behind it, and acting on it destroys real cable, so
+    the cut is a human decision made against the mesh — the same split
+    :mod:`skeliner.pre` draws between its ``find_*`` and ``remove_*``
+    functions.
+
+    Parameters
+    ----------
+    skel
+        A :class:`skeliner.Skeleton` instance.  Assumed acyclic — check with
+        :func:`check_acyclicity` first, since ``post.graft(...,
+        allow_cycle=True)`` can break that assumption.
+    min_degree
+        Minimum graph degree for a node to be considered at all.
+    min_distal_cable
+        How much cable a distal arm must carry to count as substantial,
+        expressed in *cable_unit*.
+    cable_unit
+        Unit *min_distal_cable* is given in, converted into the skeleton's
+        own unit via ``skel.meta["unit"]``.  Skeletons from
+        :func:`~skeliner.skeletonize` are in nanometres by default, so a
+        bare ``250`` in skeleton units would be 250 nm — smaller than a
+        single node radius, which flags every junction.  Naming the unit
+        makes that mistake unrepresentable.
+    min_components
+        How many distal arms must clear *min_distal_cable*.
+    group_regions
+        A merge flags a cluster of adjacent nodes rather than one.  When
+        *True* each connected cluster of flagged nodes collapses to a single
+        representative — the one whose second-largest distal arm is longest
+        — turning an N-item review queue into a handful.
+    return_stats
+        When *True* also return the per-node measurements.  Stats cover
+        **every node examined** (degree ≥ *min_degree*), flagged or not, so
+        a threshold can be re-chosen from them without recomputing.
+
+    Returns
+    -------
+    flagged
+        ``list[int]`` – node ids, most suspicious first (by the second-largest
+        distal arm, which is the arm that made it suspicious).
+    stats
+        *Optional* ``dict[int, dict]`` with ``{"degree", "proximal_cable",
+        "distal_cables"}``; cables are in the skeleton's own unit.
+    """
+    if min_components < 1:
+        raise ValueError("min_components must be at least 1")
+
+    # Resolved before any work: a skeleton that cannot say what its
+    # coordinates mean cannot have a cable threshold applied to it, and
+    # answering "nothing suspicious" for one would be the silent kind of
+    # wrong this whole function exists to avoid.
+    skel_unit = (getattr(skel, "meta", {}) or {}).get("unit")
+    if skel_unit is None:
+        raise ValueError(
+            "skeleton has no meta['unit'], so a cable threshold cannot be "
+            "converted — set one with skel.set_unit(...)"
+        )
+    thresh = min_distal_cable * skel._get_unit_conversion_factor(cable_unit, skel_unit)
+
+    stats = _arm_cables(skel, min_degree)
+    if not stats:
+        return ([], {}) if return_stats else []
+
+    def _rank(nid: int) -> float:
+        """Cable of the arm that made it suspicious."""
+        d = stats[nid]["distal_cables"]
+        return d[min_components - 1] if len(d) >= min_components else -1.0
+
+    flagged = [
+        nid
+        for nid, s in stats.items()
+        if sum(1 for c in s["distal_cables"] if c >= thresh) >= min_components
+    ]
+
+    if group_regions and flagged:
+        flagged = _collapse_adjacent(skel, flagged, key=_rank)
+
+    flagged.sort(key=lambda nid: -_rank(nid))
+    return (flagged, stats) if return_stats else flagged
+
+
+def _collapse_adjacent(skel, nodes: List[int], *, key) -> List[int]:
+    """Reduce each connected cluster of *nodes* to its highest-*key* member."""
+    want = set(int(n) for n in nodes)
+    edges = np.asarray(skel.edges, dtype=np.int64).reshape(-1, 2)
+
+    nbr: Dict[int, List[int]] = {n: [] for n in want}
+    for a, b in edges:
+        a, b = int(a), int(b)
+        if a in want and b in want:
+            nbr[a].append(b)
+            nbr[b].append(a)
+
+    reps: List[int] = []
+    unseen = set(want)
+    while unseen:
+        stack = [unseen.pop()]
+        cluster = [stack[0]]
+        while stack:
+            v = stack.pop()
+            for w in nbr[v]:
+                if w in unseen:
+                    unseen.discard(w)
+                    cluster.append(w)
+                    stack.append(w)
+        reps.append(max(cluster, key=key))
+    return reps
 
 
 def extract_neurites(
