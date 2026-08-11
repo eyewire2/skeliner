@@ -54,6 +54,83 @@ def test_check_acyclicity(skel):
     assert dx.check_acyclicity(skel, return_cycles=True) is True
 
 
+# ---------------------------------------------------------------------
+# cycles
+#
+# A pipeline skeleton has none — the MST returns a tree — so a loop exists
+# only because a connection was asserted.  That makes the loop a statement
+# that two of its edges cannot both be right, and `edge_support` says which.
+# ---------------------------------------------------------------------
+def test_a_tree_has_no_cycles(skel, mesh):
+    assert dx.check_acyclicity(skel) is True
+    assert dx.cycles(skel, mesh) == []
+
+
+def test_a_graft_opens_a_loop_that_names_its_own_break(skel, mesh):
+    """The grafted edge is the one the surface will not vouch for.
+
+    On a tube, two nodes several bins apart share no surface, so asserting
+    an edge between them is exactly the claim `edge_support` refuses — and
+    the loop that appears is where a real merge would be adjudicated.
+    """
+    looped = copy.deepcopy(skel)
+    u, v = 2, 6
+    post.graft(looped, u, v)
+
+    assert dx.check_acyclicity(looped) is False
+    found = dx.cycles(looped, mesh)
+    assert len(found) == 1
+
+    loop = found[0]
+    assert set(loop["nodes"]) == {2, 3, 4, 5, 6}
+    assert len(loop["edges"]) == len(loop["nodes"])
+    assert loop["length"] > 0
+    assert loop["breaks"] == [(v, u)] or loop["breaks"] == [(u, v)]
+
+
+def test_a_cycle_walks_in_loop_order(skel, mesh):
+    """Consecutive entries must be joined, or "trace round the loop" is a
+    lie and the drawn segments jump across the cell."""
+    looped = copy.deepcopy(skel)
+    post.graft(looped, 2, 6)
+    loop = dx.cycles(looped, mesh)[0]
+
+    present = {tuple(sorted(map(int, e))) for e in np.asarray(looped.edges)}
+    for a, b in loop["edges"]:
+        assert tuple(sorted((a, b))) in present, f"({a},{b}) is not an edge"
+
+
+def test_the_cycle_basis_is_read_as_edges_not_vertices(skel):
+    """igraph's `minimum_cycle_basis` returns **edge** ids; the removed
+    `cycle_basis` returned **vertex** ids.
+
+    Reading one as the other yields a list of pairs that looks entirely
+    reasonable and is not the cycle, so this pins the conversion against the
+    skeleton's own edge list rather than against a shape.
+    """
+    looped = copy.deepcopy(skel)
+    post.graft(looped, 2, 6)
+
+    reported = dx.check_acyclicity(looped, return_cycles=True)
+    assert reported is not True
+    present = {tuple(sorted(map(int, e))) for e in np.asarray(looped.edges)}
+    for a, b in reported:
+        assert tuple(sorted((a, b))) in present, (
+            f"({a},{b}) is not an edge — basis ids read in the wrong space"
+        )
+
+
+def test_cycles_without_a_mesh_report_the_loop_and_name_no_break(skel):
+    """Which edge is wrong is a question about the surface.  With no mesh
+    the honest answer is 'here is the loop', not a fallback ranking."""
+    looped = copy.deepcopy(skel)
+    post.graft(looped, 2, 6)
+
+    loop = dx.cycles(looped)[0]
+    assert set(loop["nodes"]) == {2, 3, 4, 5, 6}
+    assert loop["breaks"] == []
+
+
 def test_acyclicity_deprecated_alias_warns(skel):
     with pytest.warns(DeprecationWarning, match="check_acyclicity"):
         assert dx.acyclicity(skel, return_cycles=True) is True

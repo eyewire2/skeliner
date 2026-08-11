@@ -2331,7 +2331,7 @@ def test_the_pairing_verdict_rides_along_with_the_layer(mismatch_client):
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize(
     "kind",
-    ["junctions", "twigs", "degree", "tips", "orphans"],
+    ["junctions", "cycles", "twigs", "degree", "tips", "orphans"],
 )
 def test_every_offered_diagnostic_runs(bin_client, kind):
     """A panel entry that 500s is worse than no panel entry.
@@ -2418,6 +2418,7 @@ def test_the_diagnostics_are_listed_in_the_order_dx_lists_them():
     # and that shared order is dx's own
     backing = {
         "orphans": "check_connectivity",
+        "cycles": "cycles",
         "degree": "nodes_of_degree",
         "twigs": "twigs_of_length",
         "tips": "suspicious_tips",

@@ -591,6 +591,7 @@
                              and the panel neither renames nor resequences
                              what the library already settled. -->
                         <option value="orphans">isolated nodes</option>
+                        <option value="cycles">cycles</option>
                         <option value="degree">nodes of degree</option>
                         <option value="twigs">short twigs</option>
                         <option value="tips">suspicious tips</option>
@@ -3080,6 +3081,7 @@ let meshCentroid = [0, 0, 0];
             // Keys are in the dropdown's order, which is dx.__skeleton__'s.
             const DX_PARAMS = {
                 orphans: [],
+                cycles: [],
                 degree: [
                     { id: "minDegree", label: "deg≥", value: 4, size: 2,
                       title: "List every node at or above this degree." },
@@ -4833,11 +4835,19 @@ let meshCentroid = [0, 0, 0];
                         }
                         const geo = new THREE.BufferGeometry();
                         geo.setAttribute("position", new THREE.BufferAttribute(pts, 3));
+                        // A group flagged `overlay` traces edges the skeleton
+                        // already draws, so at equal depth it z-fights with
+                        // them and the highlight is only visible once the
+                        // skeleton is hidden — which takes away the context
+                        // it exists to be seen against.  Draw it on top.
                         const mat = new THREE.LineBasicMaterial({
                             color: new THREE.Color(color[0], color[1], color[2]),
                             linewidth: 2,
+                            depthTest: !group.overlay,
+                            transparent: !!group.overlay,
                         });
                         const line = new THREE.LineSegments(geo, mat);
+                        if (group.overlay) line.renderOrder = 10;
                         scene.add(line);
                         edgeGroupMeshes.push(line);
                     }

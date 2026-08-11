@@ -11,6 +11,7 @@ __skeleton__ = [
     "connectivity",
     "check_acyclicity",
     "acyclicity",
+    "cycles",
     "check_bins",
     "check_mesh_pairing",
     "edge_support",
@@ -79,16 +80,104 @@ def connectivity(skel, *, return_isolated: bool = False):
 def check_acyclicity(skel, *, return_cycles: bool = False):
     """Check that the skeleton is a *forest* (|E| = |V| − components).
 
-    If a cycle exists and ``return_cycle`` is *True*, a representative list of
-    (u, v) edges forming the cycle is returned.
+    If a cycle exists and ``return_cycles`` is *True*, a representative list
+    of (u, v) edges forming the cycle is returned.
     """
     g = _graph(skel)
     n_comp = len(g.components())
     acyclic = g.ecount() == g.vcount() - n_comp
     if acyclic or not return_cycles:
         return acyclic
-    cyc = g.cycle_basis()[0]  # list of vertex ids
-    return [(cyc[i], cyc[(i + 1) % len(cyc)]) for i in range(len(cyc))]
+    return _cycle_edges(g, g.minimum_cycle_basis()[0])
+
+
+def _cycle_edges(g: ig.Graph, eids) -> List[Tuple[int, int]]:
+    """Edge ids from a cycle basis → ``(u, v)`` pairs, walked in loop order.
+
+    ``minimum_cycle_basis`` and ``fundamental_cycles`` return **edge** ids,
+    where the removed ``cycle_basis`` returned **vertex** ids.  Reading the
+    new output as the old — indexing it as a vertex ring — silently yields a
+    plausible list of pairs that are not the cycle, which is why this
+    conversion is one named function rather than repeated at each call site.
+    """
+    pairs = [tuple(sorted(g.es[int(e)].tuple)) for e in eids]
+    nbr: Dict[int, List[int]] = {}
+    for a, b in pairs:
+        nbr.setdefault(a, []).append(b)
+        nbr.setdefault(b, []).append(a)
+
+    start = min(nbr)
+    ring, prev, cur = [start], None, start
+    while True:
+        nxt = next((w for w in nbr[cur] if w != prev), None)
+        if nxt is None or nxt == start:
+            break
+        ring.append(nxt)
+        prev, cur = cur, nxt
+    return [(ring[i], ring[(i + 1) % len(ring)]) for i in range(len(ring))]
+
+
+def cycles(skel, mesh=None) -> List[Dict[str, Any]]:
+    """Every independent loop, and where the tree most likely closed it wrongly.
+
+    A skeleton off the pipeline has no loops — the MST guarantees a tree — so
+    a loop only exists because somebody *asserted* a connection
+    (:func:`skeliner.post.graft` allows one by default, and restoring a
+    surface-supported pair is the usual way).  That assertion is the useful
+    part: the loop it opens is a statement that **two of these edges cannot
+    both be right**, and one of them is a join the MST made that it should
+    not have.
+
+    Which one is not guessed.  With a *mesh*, :func:`edge_support` says which
+    tree edges have no surface behind them at all (``T∖G``), and such an edge
+    lying **on the loop** is the tree claiming a connection the surface does
+    not support while an alternative path exists.  That is the break point,
+    on evidence rather than on a threshold.
+
+    Without a mesh the loop is still reported, with no break point named —
+    which is the honest answer, not a fallback ranking.
+
+    Returns
+    -------
+    list of dict
+        One entry per independent cycle::
+
+            {"nodes": [...],        # in loop order
+             "edges": [(u, v), ...],
+             "breaks": [(u, v), ...],   # unsupported by the surface
+             "length": float}       # loop cable, skeleton units
+
+        Longest loop first — a two-node loop is a duplicated edge, while a
+        long one spans the structure the tree got wrong.
+    """
+    g = _graph(skel)
+    basis = g.minimum_cycle_basis()
+    if not basis:
+        return []
+
+    unsupported: Set[Tuple[int, int]] = set()
+    if mesh is not None:
+        rep = edge_support(skel, mesh)
+        unsupported = {(int(u), int(v)) for u, v in rep["unsupported"]}
+
+    nodes = np.asarray(skel.nodes, dtype=np.float64)
+    out: List[Dict[str, Any]] = []
+    for eids in basis:
+        edges = _cycle_edges(g, eids)
+        ring = [a for a, _ in edges]
+        length = float(sum(np.linalg.norm(nodes[a] - nodes[b]) for a, b in edges))
+        out.append(
+            {
+                "nodes": ring,
+                "edges": edges,
+                "breaks": [
+                    (a, b) for a, b in edges if (min(a, b), max(a, b)) in unsupported
+                ],
+                "length": length,
+            }
+        )
+    out.sort(key=lambda c: -c["length"])
+    return out
 
 
 def acyclicity(skel, *, return_cycles: bool = False):

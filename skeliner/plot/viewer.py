@@ -4451,17 +4451,84 @@ def _create_app(
             {"node": int(nid), "detail": "tip near soma, long path"} for nid in tips
         ]
 
+    def _dx_cycles(skel, _p):
+        """Loops, and the edge on each that the surface will not vouch for.
+
+        The only diagnostic here whose candidate rests on evidence outside
+        the skeleton.  A loop cannot occur by accident — the MST returns a
+        tree — so one exists only because a connection was asserted, and the
+        loop then says *two of these edges cannot both be right*.
+        `edge_support` settles which: a tree edge with no surface joining its
+        bins, sitting on a loop that offers another route, is the join the
+        MST should not have made.
+        """
+        from skeliner import dx
+
+        out = []
+        for i, cyc in enumerate(dx.cycles(skel, mesh_state["mesh"])):
+            n_break = len(cyc["breaks"])
+            detail = (
+                f"loop of {len(cyc['nodes'])} nodes, "
+                f"{cyc['length'] / 1000:.1f} um · "
+                + (
+                    f"{n_break} edge(s) the surface does not support"
+                    if n_break
+                    else "every edge is surface-supported — the loop is real"
+                )
+            )
+            # Where to put the marker.  `nodes[0]` is merely the lowest id
+            # on the ring, which is usually node 0 — the soma, the least
+            # informative point on any loop and the one place a marker
+            # scaled by node radius swallows the structure.  Prefer an end
+            # of the break edge, since that is what the row is *for*;
+            # failing that, the point on the loop furthest from the soma.
+            if cyc["breaks"]:
+                at = int(cyc["breaks"][0][0])
+            else:
+                ring = [n for n in cyc["nodes"] if n != 0] or cyc["nodes"]
+                soma = skel.nodes[0]
+                at = max(
+                    ring, key=lambda n: float(np.linalg.norm(skel.nodes[n] - soma))
+                )
+            out.append(
+                {
+                    "node": at,
+                    "detail": detail,
+                    # The whole loop, so it can be followed round, and the
+                    # break candidates separately so they stand out on it.
+                    "keep": cyc["edges"],
+                    "cut": cyc["breaks"],
+                }
+            )
+        return out
+
     #: Named after the `dx` function each one runs, and ordered the way
     #: `dx.__skeleton__` orders them — the one invariant check, then the
     #: plain enumerations, then the heuristics.  Both so that what the panel
     #: calls a thing and what the library calls it cannot drift apart, and
     #: so the list reads from "this is broken" to "this might repay a look".
     DIAGNOSTICS = {
-        "orphans": ("isolated nodes", [0.9, 0.3, 0.9], _dx_orphans),
-        "degree": ("nodes of degree", [0.95, 0.75, 0.2], _dx_degree),
-        "twigs": ("short twigs", [0.35, 0.75, 0.95], _dx_short_twigs),
-        "tips": ("suspicious tips", [0.4, 0.9, 0.5], _dx_tips),
-        "junctions": ("suspicious junctions", [0.95, 0.35, 0.25], _dx_junctions),
+        "orphans": ("isolated nodes", [0.9, 0.3, 0.9], _dx_orphans, None),
+        "cycles": (
+            "cycles",
+            [1.0, 0.5, 0.0],
+            _dx_cycles,
+            ("no surface behind it", "the loop"),
+        ),
+        "degree": ("nodes of degree", [0.95, 0.75, 0.2], _dx_degree, None),
+        "twigs": (
+            "short twigs",
+            [0.35, 0.75, 0.95],
+            _dx_short_twigs,
+            ("the twig", None),
+        ),
+        "tips": ("suspicious tips", [0.4, 0.9, 0.5], _dx_tips, None),
+        "junctions": (
+            "suspicious junctions",
+            [0.95, 0.35, 0.25],
+            _dx_junctions,
+            None,
+        ),
     }
 
     async def diagnose(request):
@@ -4489,7 +4556,7 @@ def _create_app(
         if err is not None:
             return err
 
-        label, color, fn = DIAGNOSTICS[kind]
+        label, color, fn, edge_labels = DIAGNOSTICS[kind]
         try:
             found = fn(skel, body.get("params") or {})
         except Exception as exc:  # noqa: BLE001 - report, do not 500 the panel
@@ -4520,7 +4587,11 @@ def _create_app(
                 {
                     "position": [float(x) for x in (skel.nodes[nid] - centroid)],
                     "color": color,
-                    "radius": max(r * 2.5, 150.0),
+                    # A marker says "look here", so its size is about being
+                    # findable, not about the node.  Scaled by the node's own
+                    # radius it is a 20 um ball on the soma, which hides the
+                    # very structure it is pointing at.
+                    "radius": min(max(r * 2.5, 150.0), 1200.0),
                     "label": f"{label}: {row['detail']}",
                     "skelName": name,
                     "node": nid,
@@ -4530,26 +4601,30 @@ def _create_app(
             cut_segs.extend(_seg(u, v) for u, v in row.get("cut", ()))
             keep_segs.extend(_seg(u, v) for u, v in row.get("keep", ()))
 
-        # A proposal about which branches to sever is a statement about
-        # geometry, so it is drawn on the geometry.  Named only in the label,
-        # "cut 79+84" leaves the eye to resolve two node ids into two
-        # branches — the one job the viewer exists to do.
+        # Drawn on the geometry, because that is what the claim is about.
+        # `overlay` keeps them visible: these segments are *the same edges*
+        # the skeleton already draws, so without it they z-fight with it and
+        # the only way to see the highlight is to hide the skeleton — which
+        # removes the context the highlight exists to sit in.
+        cut_name, keep_name = edge_labels or ("proposed cut", "cable that continues")
         groups = []
-        if cut_segs:
+        if cut_segs and cut_name:
             groups.append(
                 {
                     "segments": cut_segs,
                     "color": [1.0, 0.25, 0.25],
-                    "label": f"{label}: proposed cut ({len(cut_segs)} edges)",
+                    "label": f"{label}: {cut_name} ({len(cut_segs)} edges)",
+                    "overlay": True,
                     "dx": kind,
                 }
             )
-        if keep_segs:
+        if keep_segs and keep_name:
             groups.append(
                 {
                     "segments": keep_segs,
                     "color": [0.3, 0.9, 0.4],
-                    "label": f"{label}: cable that continues ({len(keep_segs)} edges)",
+                    "label": f"{label}: {keep_name} ({len(keep_segs)} edges)",
+                    "overlay": True,
                     "dx": kind,
                 }
             )
