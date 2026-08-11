@@ -22,6 +22,7 @@ __skeleton__ = [
     "branches_of_length",
     "twigs_of_length",
     "suspicious_tips",
+    "suspicious_junctions",
     "distance",
     "node_summary",
     "extract_neurites",
@@ -1084,6 +1085,260 @@ def suspicious_tips(
 
     suspicious_sorted = sorted(suspicious, key=lambda nid: -stats[int(nid)]["ratio"])
     return suspicious_sorted, stats
+
+
+def _arm_cables(skel, min_degree: int) -> Dict[int, Dict[str, Any]]:
+    """Decompose every junction into the cable each of its arms carries.
+
+    Deleting node *i* splits the tree into one component per neighbour.  The
+    component reached through the parent is *proximal* (it holds the soma);
+    the rest are *distal*.  This is the measurement
+    :func:`suspicious_junctions` thresholds, kept separate because which
+    thresholds are right is an open question and the raw numbers are what
+    answers it.
+
+    Linear in the number of nodes.  The naive form — delete a node, flood
+    each arm, repeat — is O(N²) and visits billions of nodes on a 50k-node
+    skeleton.  Rooting the tree at the soma makes the same decomposition a
+    single post-order accumulation:
+
+    ``sub[v]``
+        cable strictly inside the subtree rooted at *v*.
+    distal arm through child *c*
+        ``sub[c] + len(i, c)``
+    proximal arm
+        ``total − sub[i]``
+
+    which sums back to ``total`` exactly, so the arms partition the cable
+    rather than merely sampling it.
+
+    A disconnected skeleton is handled by rooting **each** component at its
+    lowest node id; for the component holding the soma that is node 0, so the
+    usual case is unchanged and the orphan components still get measured
+    instead of raising.
+
+    Recursion is avoided throughout — a long neurite is a deep tree, and the
+    recursive form overflows the stack on real cells.
+    """
+    n = len(skel.nodes)
+    edges = np.asarray(skel.edges, dtype=np.int64).reshape(-1, 2)
+    if n == 0 or edges.size == 0:
+        return {}
+
+    nodes = np.asarray(skel.nodes, dtype=np.float64)
+    lengths = np.linalg.norm(nodes[edges[:, 0]] - nodes[edges[:, 1]], axis=1)
+
+    # CSR-style adjacency: neighbour ids and the length of the edge used.
+    deg = np.bincount(edges.reshape(-1), minlength=n)
+    start = np.zeros(n + 1, dtype=np.int64)
+    np.cumsum(deg, out=start[1:])
+    fill = start[:-1].copy()
+    adj = np.empty(2 * len(edges), dtype=np.int64)
+    adj_len = np.empty(2 * len(edges), dtype=np.float64)
+    for (a, b), ln in zip(edges, lengths, strict=True):
+        adj[fill[a]] = b
+        adj_len[fill[a]] = ln
+        fill[a] += 1
+        adj[fill[b]] = a
+        adj_len[fill[b]] = ln
+        fill[b] += 1
+
+    parent = np.full(n, -1, dtype=np.int64)
+    parent_len = np.zeros(n, dtype=np.float64)
+    order = np.empty(n, dtype=np.int64)  # BFS order, roots first
+    seen = np.zeros(n, dtype=bool)
+    k = 0
+    for root in range(n):  # node 0 first, so the soma roots its own component
+        if seen[root]:
+            continue
+        seen[root] = True
+        order[k] = root
+        k += 1
+        head = k - 1
+        while head < k:
+            v = order[head]
+            head += 1
+            for j in range(start[v], start[v + 1]):
+                w = adj[j]
+                if not seen[w]:
+                    seen[w] = True
+                    parent[w] = v
+                    parent_len[w] = adj_len[j]
+                    order[k] = w
+                    k += 1
+
+    # Post-order accumulation: walk the BFS order backwards, so every child is
+    # finished before its parent is read.
+    sub = np.zeros(n, dtype=np.float64)
+    for idx in range(n - 1, -1, -1):
+        v = order[idx]
+        p = parent[v]
+        if p >= 0:
+            sub[p] += sub[v] + parent_len[v]
+
+    # Total cable of the component each node belongs to — the proximal arm is
+    # measured against its own component, not the whole file.
+    comp_total = np.zeros(n, dtype=np.float64)
+    comp_of = np.zeros(n, dtype=np.int64)
+    for idx in range(n):
+        v = order[idx]
+        comp_of[v] = v if parent[v] < 0 else comp_of[parent[v]]
+    for v in range(n):
+        comp_total[v] = sub[comp_of[v]]
+
+    out: Dict[int, Dict[str, Any]] = {}
+    for v in range(n):
+        if deg[v] < min_degree or parent[v] < 0:
+            # A component root has no proximal arm, so "one arm holds the
+            # soma and the others do not" is undefined there.  The soma is
+            # legitimately high-degree anyway.
+            continue
+        distal = [
+            float(sub[adj[j]] + adj_len[j])
+            for j in range(start[v], start[v + 1])
+            if adj[j] != parent[v]
+        ]
+        distal.sort(reverse=True)
+        out[int(v)] = {
+            "degree": int(deg[v]),
+            "proximal_cable": float(comp_total[v] - sub[v]),
+            "distal_cables": distal,
+        }
+    return out
+
+
+def suspicious_junctions(
+    skel,
+    *,
+    min_degree: int = 4,
+    min_distal_cable: float = 250.0,
+    cable_unit: str = "um",
+    min_components: int = 2,
+    group_regions: bool = True,
+    return_stats: bool = False,
+):
+    """Junctions where two or more substantial arbors meet — merge candidates.
+
+    A segmentation merge fuses two unrelated neurites in the *mesh*, so the
+    skeleton grows a junction welding two independent arbors together.  The
+    result is still a valid tree — one root, ``E = N − 1``, connected,
+    acyclic — so :func:`check_connectivity` and :func:`check_acyclicity`
+    cannot see it.  What gives it away is the shape: a genuine bifurcation
+    into two long arbors at a single high-degree point is rare, while a merge
+    produces exactly that.
+
+    A node is flagged when its degree is at least *min_degree* **and** at
+    least *min_components* of its distal arms each carry at least
+    *min_distal_cable* of cable.
+
+    This **reports candidates and never clips**.  The rule is a heuristic
+    with no validation behind it, and acting on it destroys real cable, so
+    the cut is a human decision made against the mesh — the same split
+    :mod:`skeliner.pre` draws between its ``find_*`` and ``remove_*``
+    functions.
+
+    Parameters
+    ----------
+    skel
+        A :class:`skeliner.Skeleton` instance.  Assumed acyclic — check with
+        :func:`check_acyclicity` first, since ``post.graft(...,
+        allow_cycle=True)`` can break that assumption.
+    min_degree
+        Minimum graph degree for a node to be considered at all.
+    min_distal_cable
+        How much cable a distal arm must carry to count as substantial,
+        expressed in *cable_unit*.
+    cable_unit
+        Unit *min_distal_cable* is given in, converted into the skeleton's
+        own unit via ``skel.meta["unit"]``.  Skeletons from
+        :func:`~skeliner.skeletonize` are in nanometres by default, so a
+        bare ``250`` in skeleton units would be 250 nm — smaller than a
+        single node radius, which flags every junction.  Naming the unit
+        makes that mistake unrepresentable.
+    min_components
+        How many distal arms must clear *min_distal_cable*.
+    group_regions
+        A merge flags a cluster of adjacent nodes rather than one.  When
+        *True* each connected cluster of flagged nodes collapses to a single
+        representative — the one whose second-largest distal arm is longest
+        — turning an N-item review queue into a handful.
+    return_stats
+        When *True* also return the per-node measurements.  Stats cover
+        **every node examined** (degree ≥ *min_degree*), flagged or not, so
+        a threshold can be re-chosen from them without recomputing.
+
+    Returns
+    -------
+    flagged
+        ``list[int]`` – node ids, most suspicious first (by the second-largest
+        distal arm, which is the arm that made it suspicious).
+    stats
+        *Optional* ``dict[int, dict]`` with ``{"degree", "proximal_cable",
+        "distal_cables"}``; cables are in the skeleton's own unit.
+    """
+    if min_components < 1:
+        raise ValueError("min_components must be at least 1")
+
+    # Resolved before any work: a skeleton that cannot say what its
+    # coordinates mean cannot have a cable threshold applied to it, and
+    # answering "nothing suspicious" for one would be the silent kind of
+    # wrong this whole function exists to avoid.
+    skel_unit = (getattr(skel, "meta", {}) or {}).get("unit")
+    if skel_unit is None:
+        raise ValueError(
+            "skeleton has no meta['unit'], so a cable threshold cannot be "
+            "converted — set one with skel.set_unit(...)"
+        )
+    thresh = min_distal_cable * skel._get_unit_conversion_factor(cable_unit, skel_unit)
+
+    stats = _arm_cables(skel, min_degree)
+    if not stats:
+        return ([], {}) if return_stats else []
+
+    def _rank(nid: int) -> float:
+        """Cable of the arm that made it suspicious."""
+        d = stats[nid]["distal_cables"]
+        return d[min_components - 1] if len(d) >= min_components else -1.0
+
+    flagged = [
+        nid
+        for nid, s in stats.items()
+        if sum(1 for c in s["distal_cables"] if c >= thresh) >= min_components
+    ]
+
+    if group_regions and flagged:
+        flagged = _collapse_adjacent(skel, flagged, key=_rank)
+
+    flagged.sort(key=lambda nid: -_rank(nid))
+    return (flagged, stats) if return_stats else flagged
+
+
+def _collapse_adjacent(skel, nodes: List[int], *, key) -> List[int]:
+    """Reduce each connected cluster of *nodes* to its highest-*key* member."""
+    want = set(int(n) for n in nodes)
+    edges = np.asarray(skel.edges, dtype=np.int64).reshape(-1, 2)
+
+    nbr: Dict[int, List[int]] = {n: [] for n in want}
+    for a, b in edges:
+        a, b = int(a), int(b)
+        if a in want and b in want:
+            nbr[a].append(b)
+            nbr[b].append(a)
+
+    reps: List[int] = []
+    unseen = set(want)
+    while unseen:
+        stack = [unseen.pop()]
+        cluster = [stack[0]]
+        while stack:
+            v = stack.pop()
+            for w in nbr[v]:
+                if w in unseen:
+                    unseen.discard(w)
+                    cluster.append(w)
+                    stack.append(w)
+        reps.append(max(cluster, key=key))
+    return reps
 
 
 def extract_neurites(

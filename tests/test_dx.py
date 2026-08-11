@@ -339,6 +339,171 @@ def test_suspicious_tips_are_leaves(skel):
     assert all(deg[t] == 1 and t != 0 for t in tips)
 
 
+# ---------------------------------------------------------------------
+# suspicious_junctions — the arm decomposition, and the threshold's unit
+# ---------------------------------------------------------------------
+def _junction_skeleton(arm_lengths, *, unit="nm"):
+    """A soma, a stalk, and one junction carrying arms of exact length.
+
+    Node 1 is the junction: one proximal arm (the stalk back to the soma)
+    and ``len(arm_lengths)`` distal arms, each a straight chain of the given
+    total length laid along its own axis so no two arms overlap.
+    """
+    from skeliner.dataclass import Skeleton, Soma
+
+    nodes = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]  # soma, junction
+    edges = [[0, 1]]
+    for k, length in enumerate(arm_lengths):
+        angle = 2.0 * np.pi * k / len(arm_lengths)
+        step = np.asarray([0.0, np.cos(angle), np.sin(angle)]) * (length / 2.0)
+        prev = 1
+        for hop in (1, 2):  # two hops, so each arm has an interior node
+            nodes.append((np.asarray([1.0, 0.0, 0.0]) + step * hop).tolist())
+            edges.append([prev, len(nodes) - 1])
+            prev = len(nodes) - 1
+
+    nodes = np.asarray(nodes, dtype=np.float64)
+    edges = np.asarray([sorted(e) for e in edges], dtype=np.int64)
+    return Skeleton(
+        soma=Soma.from_sphere(center=np.zeros(3), radius=0.5, verts=None),
+        nodes=nodes,
+        radii={"median": np.full(len(nodes), 0.1)},
+        edges=edges,
+        ntype=None,
+        meta={"unit": unit},
+    )
+
+
+def test_the_arms_of_a_junction_partition_all_the_cable(skel):
+    """Every measurement is one arm's share of a total that stays whole.
+
+    An arm decomposition that double-counts a subtree, or drops the edge it
+    was reached through, still looks plausible per-arm — it only shows up
+    against the total.
+    """
+    stats = dx.suspicious_junctions(skel, min_degree=3, return_stats=True)[1]
+    assert stats, "fixture has no junction of degree >= 3 to decompose"
+
+    edges = np.asarray(skel.edges).reshape(-1, 2)
+    total = float(
+        np.linalg.norm(skel.nodes[edges[:, 0]] - skel.nodes[edges[:, 1]], axis=1).sum()
+    )
+    for nid, s in stats.items():
+        got = s["proximal_cable"] + sum(s["distal_cables"])
+        assert got == pytest.approx(total, rel=1e-9), f"node {nid} loses cable"
+        assert len(s["distal_cables"]) == s["degree"] - 1
+
+
+def test_the_linear_pass_agrees_with_deleting_the_node(skel):
+    """The O(N) subtree form against the O(N^2) form it replaces.
+
+    The naive version — delete the node, flood each remaining component —
+    is the definition; the subtree accumulation is an optimisation of it,
+    and only this pins them together.
+    """
+    import collections
+
+    stats = dx.suspicious_junctions(skel, min_degree=3, return_stats=True)[1]
+    assert stats, "fixture has no junction of degree >= 3 to decompose"
+
+    edges = np.asarray(skel.edges).reshape(-1, 2)
+    length = {
+        tuple(sorted((int(a), int(b)))): float(
+            np.linalg.norm(skel.nodes[a] - skel.nodes[b])
+        )
+        for a, b in edges
+    }
+    adj = collections.defaultdict(list)
+    for a, b in edges:
+        adj[int(a)].append(int(b))
+        adj[int(b)].append(int(a))
+
+    for nid, s in stats.items():
+        seen, arms = {nid}, []
+        for seed in adj[nid]:
+            if seed in seen:
+                continue
+            seen.add(seed)
+            stack, comp = [seed], {seed}
+            while stack:
+                v = stack.pop()
+                for w in adj[v]:
+                    if w not in seen:
+                        seen.add(w)
+                        comp.add(w)
+                        stack.append(w)
+            cable = sum(v for (a, b), v in length.items() if a in comp and b in comp)
+            cable += length[tuple(sorted((nid, seed)))]
+            arms.append((comp, cable))
+
+        proximal = [c for c in arms if 0 in c[0]]
+        distal = sorted((c[1] for c in arms if 0 not in c[0]), reverse=True)
+        assert proximal[0][1] == pytest.approx(s["proximal_cable"], rel=1e-9)
+        assert distal == pytest.approx(s["distal_cables"], rel=1e-9)
+
+
+def test_the_threshold_is_read_in_the_unit_it_declares():
+    """250 um on a nanometre skeleton is 250_000, not 250.
+
+    Skeletons from `skeletonize` are in nm by default, so a bare number
+    ported from a micrometre-based source is off by 1000x — and in the
+    direction that flags everything, which reads as a working detector.
+    """
+    # arms of 300 um, 200 um and 0.1 um, on a skeleton measured in nm
+    skel = _junction_skeleton([300_000.0, 200_000.0, 100.0], unit="nm")
+
+    # 250 um: only the 300 um arm clears, so one substantial arm, not two.
+    assert dx.suspicious_junctions(skel, min_distal_cable=250.0, cable_unit="um") == []
+    # 150 um: the 300 and 200 um arms both clear.
+    flagged = dx.suspicious_junctions(skel, min_distal_cable=150.0, cable_unit="um")
+    assert flagged == [1], "two arms clear 150 um; the junction should flag"
+
+    # The identical number read as nanometres is 1000x smaller, so the very
+    # same call that found nothing now flags — this is the porting mistake.
+    assert dx.suspicious_junctions(skel, min_distal_cable=250.0, cable_unit="nm") == [1]
+
+
+def test_a_skeleton_without_a_unit_refuses_rather_than_assuming_one():
+    skel = _junction_skeleton([300_000.0, 200_000.0], unit="nm")
+    skel.meta.pop("unit")
+    with pytest.raises(ValueError, match="unit"):
+        dx.suspicious_junctions(skel)
+
+
+def test_a_junction_needs_enough_substantial_arms():
+    """One long arm is a bend, not a merge."""
+    one_long = _junction_skeleton([300_000.0, 100.0, 100.0], unit="nm")
+    assert dx.suspicious_junctions(one_long, min_distal_cable=100.0) == []
+
+    two_long = _junction_skeleton([300_000.0, 300_000.0, 100.0], unit="nm")
+    assert dx.suspicious_junctions(two_long, min_distal_cable=100.0) == [1]
+
+
+def test_adjacent_flagged_nodes_collapse_to_one_row():
+    """A merge flags a cluster; a review queue should show it once."""
+    skel = _junction_skeleton([300_000.0, 300_000.0, 300_000.0], unit="nm")
+    # Split the junction in two: node 1 keeps two arms, a new neighbour
+    # takes the third, so both are degree-4 and adjacent.
+    grouped = dx.suspicious_junctions(
+        skel, min_degree=3, min_distal_cable=100.0, group_regions=True
+    )
+    ungrouped = dx.suspicious_junctions(
+        skel, min_degree=3, min_distal_cable=100.0, group_regions=False
+    )
+    assert set(grouped) <= set(ungrouped)
+    assert len(grouped) <= len(ungrouped)
+    assert grouped == [1]
+
+
+def test_detection_does_not_touch_the_skeleton(skel):
+    """It reports candidates and never clips."""
+    before_nodes = skel.nodes.copy()
+    before_edges = np.asarray(skel.edges).copy()
+    dx.suspicious_junctions(skel, min_degree=3, min_distal_cable=0.001)
+    assert np.array_equal(skel.nodes, before_nodes)
+    assert np.array_equal(np.asarray(skel.edges), before_edges)
+
+
 def test_distance_point_queries(skel):
     unit = skel.meta.get("unit", "nm")
     soma = skel.nodes[0]
