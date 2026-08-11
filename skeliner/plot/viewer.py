@@ -4343,7 +4343,7 @@ def _create_app(
             out.append(
                 {
                     "node": nid,
-                    "detail": f"deg {stats[nid]['degree']} · arms {arms} um",
+                    "detail": f"deg {stats[nid]['degree']} · arms {arms} µm",
                 }
             )
         return out
@@ -4409,13 +4409,17 @@ def _create_app(
                 {
                     "node": leaf,
                     "detail": (
-                        f"{len(chain)}-node twig · {cable / 1000:.2f} um "
-                        f"= {ratio:.1f}x host radius (node {u})"
+                        f"{len(chain)}-node twig · {cable / 1000:.2f} µm "
+                        f"= {ratio:.1f}× host radius (node {u})"
                     ),
                     "ratio": ratio,
-                    # The twig itself, so the candidate is a visible stretch
-                    # of cable rather than a dot you have to trace by eye.
-                    "cut": [(c, int(par[c])) for c in chain],
+                    # No edges drawn.  Ninety scattered twigs pooled into one
+                    # annotation cannot be focused (they are all over the
+                    # cell) and cannot be acted on together (most of them are
+                    # real branches), so the group is noise in the list.
+                    # Edges are worth drawing when they form one thing you
+                    # trace — a loop — not N unrelated fragments; a twig is
+                    # already at the marker you focused.
                 }
             )
         out.sort(key=lambda r: r["ratio"])
@@ -4469,7 +4473,7 @@ def _create_app(
             n_break = len(cyc["breaks"])
             detail = (
                 f"loop of {len(cyc['nodes'])} nodes, "
-                f"{cyc['length'] / 1000:.1f} um · "
+                f"{cyc['length'] / 1000:.1f} µm · "
                 + (
                     f"{n_break} edge(s) the surface does not support"
                     if n_break
@@ -4516,12 +4520,7 @@ def _create_app(
             ("no surface behind it", "the loop"),
         ),
         "degree": ("nodes of degree", [0.95, 0.75, 0.2], _dx_degree, None),
-        "twigs": (
-            "short twigs",
-            [0.35, 0.75, 0.95],
-            _dx_short_twigs,
-            ("the twig", None),
-        ),
+        "twigs": ("short twigs", [0.35, 0.75, 0.95], _dx_short_twigs, None),
         "tips": ("suspicious tips", [0.4, 0.9, 0.5], _dx_tips, None),
         "junctions": (
             "suspicious junctions",
@@ -4587,11 +4586,17 @@ def _create_app(
                 {
                     "position": [float(x) for x in (skel.nodes[nid] - centroid)],
                     "color": color,
-                    # A marker says "look here", so its size is about being
-                    # findable, not about the node.  Scaled by the node's own
-                    # radius it is a 20 um ball on the soma, which hides the
-                    # very structure it is pointing at.
-                    "radius": min(max(r * 2.5, 150.0), 1200.0),
+                    # The marker is the node's own size, near enough — a bead
+                    # on it, not a balloon around it.  A multiple of the
+                    # radius overshadows exactly the surface being judged,
+                    # and a flat floor inflates the thinnest nodes most,
+                    # which is where twigs live.  1.15x is just enough to
+                    # break the tube surface and be seen through it.
+                    # The ceiling is only for the soma, whose true radius
+                    # would swallow itself.  Candidates are found from the
+                    # list, not by being spotted across the cell, so there is
+                    # nothing to buy by drawing them larger than they are.
+                    "radius": min(max(r * 1.15, 50.0), 2000.0),
                     "label": f"{label}: {row['detail']}",
                     "skelName": name,
                     "node": nid,

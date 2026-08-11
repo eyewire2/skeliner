@@ -3083,27 +3083,27 @@ let meshCentroid = [0, 0, 0];
                 orphans: [],
                 cycles: [],
                 degree: [
-                    { id: "minDegree", label: "deg≥", value: 4, size: 2,
+                    { id: "minDegree", label: "deg≥", value: 4, size: 2, unit: "edges",
                       title: "List every node at or above this degree." },
                 ],
                 twigs: [
-                    { id: "maxRatio", label: "≤", value: 3, size: 3,
+                    { id: "maxRatio", label: "≤", value: 3, size: 3, unit: "× host radius",
                       title: "Twig cable as a multiple of the radius of the branch node it hangs off. Small means the twig is shorter than its host is thick." },
-                    { id: "maxNodes", label: "nodes≤", value: 3, size: 2,
+                    { id: "maxNodes", label: "nodes≤", value: 3, size: 2, unit: "nodes",
                       title: "Longest twig, in nodes, to list." },
                 ],
                 tips: [
-                    { id: "nearFactor", label: "near", value: 1.2, size: 3,
+                    { id: "nearFactor", label: "near", value: 1.2, size: 3, unit: "× soma axis",
                       title: "Multiple of the largest soma semi-axis inside which a tip counts as close." },
-                    { id: "pathRatio", label: "path≥", value: 2.0, size: 3,
+                    { id: "pathRatio", label: "path≥", value: 2.0, size: 3, unit: "× straight line",
                       title: "Minimum path-length / straight-line ratio." },
                 ],
                 junctions: [
-                    { id: "minDegree", label: "deg≥", value: 4, size: 2,
+                    { id: "minDegree", label: "deg≥", value: 4, size: 2, unit: "edges",
                       title: "Minimum graph degree to consider at all." },
-                    { id: "minCable", label: "arm≥", value: 5, size: 4,
+                    { id: "minCable", label: "arm≥", value: 5, size: 4, unit: "µm",
                       title: "How much cable a distal arm must carry to count as substantial, in um. Two arms must clear it independently." },
-                    { id: "minComponents", label: "arms", value: 2, size: 2,
+                    { id: "minComponents", label: "arms", value: 2, size: 2, unit: "of them",
                       title: "How many distal arms must clear the bar." },
                 ],
             };
@@ -3128,6 +3128,17 @@ let meshCentroid = [0, 0, 0];
                     inp.style.fontSize = "11px";
                     host.appendChild(lab);
                     host.appendChild(inp);
+                    // The unit belongs beside the box, not in a tooltip you
+                    // have to go looking for.  An unlabelled number field
+                    // holding a physical length is how 250 um becomes 250 nm.
+                    if (p.unit) {
+                        const u = document.createElement("span");
+                        u.style.color = "#888";
+                        u.style.marginLeft = "2px";
+                        u.textContent = p.unit;
+                        u.title = p.title;
+                        host.appendChild(u);
+                    }
                 }
             }
 
@@ -4984,9 +4995,14 @@ let meshCentroid = [0, 0, 0];
 
                 const offset = camera.position.clone().sub(controls.target).normalize();
                 controls.target.copy(center);
+                // Framed well back from the marker, because the marker is
+                // the size of the node it sits on and the question is never
+                // about the node alone — it is whether the arms around it
+                // are real.  Sitting a marker-radius away shows the bead and
+                // nothing to judge it against.
                 camera.position
                     .copy(center)
-                    .addScaledVector(offset, Math.max((mk.radius || 50) * 6, 500));
+                    .addScaledVector(offset, Math.max((mk.radius || 50) * 25, 2000));
                 controls.update();
                 scheduleStateUpdate();
 

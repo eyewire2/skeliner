@@ -2557,27 +2557,30 @@ def test_a_marker_lands_exactly_on_the_node_it_marks(tmp_path, monkeypatch):
             )
 
 
-def test_a_proposed_cut_is_drawn_and_not_only_named(tmp_path, monkeypatch):
-    """ "cut 79+84" asks the eye to resolve two node ids into two branches.
+def test_a_loop_is_drawn_so_it_can_be_traced(tmp_path, monkeypatch):
+    """A loop is the one candidate whose *edges* are the answer.
 
-    That is the one job the viewer exists to do, so a diagnostic with an
-    opinion about *which cable* has to put it on the geometry.  A proposal
-    living only in a label is not reviewable.
+    It is a single connected thing you follow round to find where the tree
+    closed it wrongly, so drawing it is the whole point — unlike ninety
+    scattered twigs, which pooled into one annotation can be neither focused
+    nor acted on together and were dropped for that reason.
 
-    Driven through `twigs`, the one diagnostic that still has an opinion
-    about which edges belong to a candidate.
+    Also guards the coordinate frame: segments are drawn centroid-relative,
+    and a missed subtraction puts the loop a whole centroid from the cell.
     """
     from pathlib import Path
 
     from starlette.testclient import TestClient
 
-    from skeliner import skeletonize
+    from skeliner import post, skeletonize
     from skeliner.io import load_mesh
     from skeliner.plot import viewer as viewer_mod
 
     monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
     mesh = load_mesh(Path(__file__).parent / "data" / "60427.obj")
     skel = skeletonize(mesh, verbose=False)
+    # Assert a connection the MST did not make — the only way a loop exists.
+    post.graft(skel, 2, 6)
 
     app = _create_app(preload_mesh=mesh, port=8919)
     with TestClient(app) as client:
@@ -2586,22 +2589,19 @@ def test_a_proposed_cut_is_drawn_and_not_only_named(tmp_path, monkeypatch):
         client.post("/upload", files={"file": ("skeleton.npz", path.read_bytes())})
         name = next(iter(client.get("/skeletons").json()))
 
-        r = client.post(
-            "/diagnose",
-            json={
-                "name": name,
-                "kind": "twigs",
-                "params": {"maxRatio": 1000.0, "maxNodes": 10},
-            },
-        )
+        r = client.post("/diagnose", json={"name": name, "kind": "cycles"})
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["n"] > 0, "fixture produced no candidates to draw"
-        assert body["nCut"] > 0, "candidates were found but nothing was drawn"
+        assert body["n"] == 1, "the graft should have opened exactly one loop"
 
         ann = client.get("/annotations").json()
-        groups = [g for g in ann.get("edge_groups", []) if g.get("dx") == "twigs"]
-        assert groups, "the diagnostic never reached the geometry"
+        groups = [g for g in ann.get("edge_groups", []) if g.get("dx") == "cycles"]
+        assert groups, "the loop never reached the geometry"
+        assert any("the loop" in g["label"] for g in groups)
+        assert all(g.get("overlay") for g in groups), (
+            "a highlight tracing edges the skeleton already draws must sit on "
+            "top of it, or it is only visible once the skeleton is hidden"
+        )
 
         drawn = np.asarray(client.get("/skeletons").json()[name]["nodes"]).reshape(
             -1, 3
