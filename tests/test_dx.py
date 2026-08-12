@@ -54,6 +54,83 @@ def test_check_acyclicity(skel):
     assert dx.check_acyclicity(skel, return_cycles=True) is True
 
 
+# ---------------------------------------------------------------------
+# cycles
+#
+# A pipeline skeleton has none — the MST returns a tree — so a loop exists
+# only because a connection was asserted.  That makes the loop a statement
+# that two of its edges cannot both be right, and `edge_support` says which.
+# ---------------------------------------------------------------------
+def test_a_tree_has_no_cycles(skel, mesh):
+    assert dx.check_acyclicity(skel) is True
+    assert dx.cycles(skel, mesh) == []
+
+
+def test_a_graft_opens_a_loop_that_names_its_own_break(skel, mesh):
+    """The grafted edge is the one the surface will not vouch for.
+
+    On a tube, two nodes several bins apart share no surface, so asserting
+    an edge between them is exactly the claim `edge_support` refuses — and
+    the loop that appears is where a real merge would be adjudicated.
+    """
+    looped = copy.deepcopy(skel)
+    u, v = 2, 6
+    post.graft(looped, u, v)
+
+    assert dx.check_acyclicity(looped) is False
+    found = dx.cycles(looped, mesh)
+    assert len(found) == 1
+
+    loop = found[0]
+    assert set(loop["nodes"]) == {2, 3, 4, 5, 6}
+    assert len(loop["edges"]) == len(loop["nodes"])
+    assert loop["length"] > 0
+    assert loop["breaks"] == [(v, u)] or loop["breaks"] == [(u, v)]
+
+
+def test_a_cycle_walks_in_loop_order(skel, mesh):
+    """Consecutive entries must be joined, or "trace round the loop" is a
+    lie and the drawn segments jump across the cell."""
+    looped = copy.deepcopy(skel)
+    post.graft(looped, 2, 6)
+    loop = dx.cycles(looped, mesh)[0]
+
+    present = {tuple(sorted(map(int, e))) for e in np.asarray(looped.edges)}
+    for a, b in loop["edges"]:
+        assert tuple(sorted((a, b))) in present, f"({a},{b}) is not an edge"
+
+
+def test_the_cycle_basis_is_read_as_edges_not_vertices(skel):
+    """igraph's `minimum_cycle_basis` returns **edge** ids; the removed
+    `cycle_basis` returned **vertex** ids.
+
+    Reading one as the other yields a list of pairs that looks entirely
+    reasonable and is not the cycle, so this pins the conversion against the
+    skeleton's own edge list rather than against a shape.
+    """
+    looped = copy.deepcopy(skel)
+    post.graft(looped, 2, 6)
+
+    reported = dx.check_acyclicity(looped, return_cycles=True)
+    assert reported is not True
+    present = {tuple(sorted(map(int, e))) for e in np.asarray(looped.edges)}
+    for a, b in reported:
+        assert tuple(sorted((a, b))) in present, (
+            f"({a},{b}) is not an edge — basis ids read in the wrong space"
+        )
+
+
+def test_cycles_without_a_mesh_report_the_loop_and_name_no_break(skel):
+    """Which edge is wrong is a question about the surface.  With no mesh
+    the honest answer is 'here is the loop', not a fallback ranking."""
+    looped = copy.deepcopy(skel)
+    post.graft(looped, 2, 6)
+
+    loop = dx.cycles(looped)[0]
+    assert set(loop["nodes"]) == {2, 3, 4, 5, 6}
+    assert loop["breaks"] == []
+
+
 def test_acyclicity_deprecated_alias_warns(skel):
     with pytest.warns(DeprecationWarning, match="check_acyclicity"):
         assert dx.acyclicity(skel, return_cycles=True) is True
@@ -339,6 +416,171 @@ def test_suspicious_tips_are_leaves(skel):
     assert all(deg[t] == 1 and t != 0 for t in tips)
 
 
+# ---------------------------------------------------------------------
+# suspicious_junctions — the arm decomposition, and the threshold's unit
+# ---------------------------------------------------------------------
+def _junction_skeleton(arm_lengths, *, unit="nm"):
+    """A soma, a stalk, and one junction carrying arms of exact length.
+
+    Node 1 is the junction: one proximal arm (the stalk back to the soma)
+    and ``len(arm_lengths)`` distal arms, each a straight chain of the given
+    total length laid along its own axis so no two arms overlap.
+    """
+    from skeliner.dataclass import Skeleton, Soma
+
+    nodes = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]  # soma, junction
+    edges = [[0, 1]]
+    for k, length in enumerate(arm_lengths):
+        angle = 2.0 * np.pi * k / len(arm_lengths)
+        step = np.asarray([0.0, np.cos(angle), np.sin(angle)]) * (length / 2.0)
+        prev = 1
+        for hop in (1, 2):  # two hops, so each arm has an interior node
+            nodes.append((np.asarray([1.0, 0.0, 0.0]) + step * hop).tolist())
+            edges.append([prev, len(nodes) - 1])
+            prev = len(nodes) - 1
+
+    nodes = np.asarray(nodes, dtype=np.float64)
+    edges = np.asarray([sorted(e) for e in edges], dtype=np.int64)
+    return Skeleton(
+        soma=Soma.from_sphere(center=np.zeros(3), radius=0.5, verts=None),
+        nodes=nodes,
+        radii={"median": np.full(len(nodes), 0.1)},
+        edges=edges,
+        ntype=None,
+        meta={"unit": unit},
+    )
+
+
+def test_the_arms_of_a_junction_partition_all_the_cable(skel):
+    """Every measurement is one arm's share of a total that stays whole.
+
+    An arm decomposition that double-counts a subtree, or drops the edge it
+    was reached through, still looks plausible per-arm — it only shows up
+    against the total.
+    """
+    stats = dx.suspicious_junctions(skel, min_degree=3, return_stats=True)[1]
+    assert stats, "fixture has no junction of degree >= 3 to decompose"
+
+    edges = np.asarray(skel.edges).reshape(-1, 2)
+    total = float(
+        np.linalg.norm(skel.nodes[edges[:, 0]] - skel.nodes[edges[:, 1]], axis=1).sum()
+    )
+    for nid, s in stats.items():
+        got = s["proximal_cable"] + sum(s["distal_cables"])
+        assert got == pytest.approx(total, rel=1e-9), f"node {nid} loses cable"
+        assert len(s["distal_cables"]) == s["degree"] - 1
+
+
+def test_the_linear_pass_agrees_with_deleting_the_node(skel):
+    """The O(N) subtree form against the O(N^2) form it replaces.
+
+    The naive version — delete the node, flood each remaining component —
+    is the definition; the subtree accumulation is an optimisation of it,
+    and only this pins them together.
+    """
+    import collections
+
+    stats = dx.suspicious_junctions(skel, min_degree=3, return_stats=True)[1]
+    assert stats, "fixture has no junction of degree >= 3 to decompose"
+
+    edges = np.asarray(skel.edges).reshape(-1, 2)
+    length = {
+        tuple(sorted((int(a), int(b)))): float(
+            np.linalg.norm(skel.nodes[a] - skel.nodes[b])
+        )
+        for a, b in edges
+    }
+    adj = collections.defaultdict(list)
+    for a, b in edges:
+        adj[int(a)].append(int(b))
+        adj[int(b)].append(int(a))
+
+    for nid, s in stats.items():
+        seen, arms = {nid}, []
+        for seed in adj[nid]:
+            if seed in seen:
+                continue
+            seen.add(seed)
+            stack, comp = [seed], {seed}
+            while stack:
+                v = stack.pop()
+                for w in adj[v]:
+                    if w not in seen:
+                        seen.add(w)
+                        comp.add(w)
+                        stack.append(w)
+            cable = sum(v for (a, b), v in length.items() if a in comp and b in comp)
+            cable += length[tuple(sorted((nid, seed)))]
+            arms.append((comp, cable))
+
+        proximal = [c for c in arms if 0 in c[0]]
+        distal = sorted((c[1] for c in arms if 0 not in c[0]), reverse=True)
+        assert proximal[0][1] == pytest.approx(s["proximal_cable"], rel=1e-9)
+        assert distal == pytest.approx(s["distal_cables"], rel=1e-9)
+
+
+def test_the_threshold_is_read_in_the_unit_it_declares():
+    """250 um on a nanometre skeleton is 250_000, not 250.
+
+    Skeletons from `skeletonize` are in nm by default, so a bare number
+    ported from a micrometre-based source is off by 1000x — and in the
+    direction that flags everything, which reads as a working detector.
+    """
+    # arms of 300 um, 200 um and 0.1 um, on a skeleton measured in nm
+    skel = _junction_skeleton([300_000.0, 200_000.0, 100.0], unit="nm")
+
+    # 250 um: only the 300 um arm clears, so one substantial arm, not two.
+    assert dx.suspicious_junctions(skel, min_distal_cable=250.0, cable_unit="um") == []
+    # 150 um: the 300 and 200 um arms both clear.
+    flagged = dx.suspicious_junctions(skel, min_distal_cable=150.0, cable_unit="um")
+    assert flagged == [1], "two arms clear 150 um; the junction should flag"
+
+    # The identical number read as nanometres is 1000x smaller, so the very
+    # same call that found nothing now flags — this is the porting mistake.
+    assert dx.suspicious_junctions(skel, min_distal_cable=250.0, cable_unit="nm") == [1]
+
+
+def test_a_skeleton_without_a_unit_refuses_rather_than_assuming_one():
+    skel = _junction_skeleton([300_000.0, 200_000.0], unit="nm")
+    skel.meta.pop("unit")
+    with pytest.raises(ValueError, match="unit"):
+        dx.suspicious_junctions(skel)
+
+
+def test_a_junction_needs_enough_substantial_arms():
+    """One long arm is a bend, not a merge."""
+    one_long = _junction_skeleton([300_000.0, 100.0, 100.0], unit="nm")
+    assert dx.suspicious_junctions(one_long, min_distal_cable=100.0) == []
+
+    two_long = _junction_skeleton([300_000.0, 300_000.0, 100.0], unit="nm")
+    assert dx.suspicious_junctions(two_long, min_distal_cable=100.0) == [1]
+
+
+def test_adjacent_flagged_nodes_collapse_to_one_row():
+    """A merge flags a cluster; a review queue should show it once."""
+    skel = _junction_skeleton([300_000.0, 300_000.0, 300_000.0], unit="nm")
+    # Split the junction in two: node 1 keeps two arms, a new neighbour
+    # takes the third, so both are degree-4 and adjacent.
+    grouped = dx.suspicious_junctions(
+        skel, min_degree=3, min_distal_cable=100.0, group_regions=True
+    )
+    ungrouped = dx.suspicious_junctions(
+        skel, min_degree=3, min_distal_cable=100.0, group_regions=False
+    )
+    assert set(grouped) <= set(ungrouped)
+    assert len(grouped) <= len(ungrouped)
+    assert grouped == [1]
+
+
+def test_detection_does_not_touch_the_skeleton(skel):
+    """It reports candidates and never clips."""
+    before_nodes = skel.nodes.copy()
+    before_edges = np.asarray(skel.edges).copy()
+    dx.suspicious_junctions(skel, min_degree=3, min_distal_cable=0.001)
+    assert np.array_equal(skel.nodes, before_nodes)
+    assert np.array_equal(np.asarray(skel.edges), before_edges)
+
+
 def test_distance_point_queries(skel):
     unit = skel.meta.get("unit", "nm")
     soma = skel.nodes[0]
@@ -428,3 +670,91 @@ def test_distance_point_queries(skel):
     assert distances_center.shape == (2,)
     assert distances_center[0] == pytest.approx(expected_center_nm, rel=1e-6)
     assert distances_center[1] == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------
+# check_mesh_pairing — is this the mesh the bins were built over?
+# ---------------------------------------------------------------------
+# A skeleton's bins name vertex *ids*, which say nothing about which mesh
+# they index.  Paired with a larger unrelated mesh every id stays in range,
+# so bins resolve to real faces and every answer downstream is confidently
+# wrong.  Nothing else in `dx` notices: `check_bins` compares node2verts
+# against vert2node, and both are internally consistent with each other no
+# matter which mesh is standing next to them.
+
+
+@pytest.fixture(scope="session")
+def bigger_mesh(mesh):
+    """An unrelated mesh with strictly more vertices than the reference."""
+    import trimesh
+
+    other = trimesh.creation.icosphere(subdivisions=5, radius=1000.0)
+    assert len(other.vertices) > len(mesh.vertices)
+    return other
+
+
+@pytest.fixture(scope="session")
+def smaller_mesh():
+    import trimesh
+
+    return trimesh.creation.icosphere(subdivisions=1, radius=1000.0)
+
+
+def test_skeletonize_records_the_mesh_it_measured(skel, mesh):
+    """Written at skeletonize time or not at all — a skeleton cannot be told
+    afterwards which mesh it came from."""
+    assert skel.meta["mesh"] == {
+        "n_vertices": len(mesh.vertices),
+        "n_faces": len(mesh.faces),
+    }
+
+
+def test_the_right_mesh_is_verified(skel, mesh):
+    rep = dx.check_mesh_pairing(skel, mesh, return_report=True)
+    assert rep["ok"] and rep["verified"]
+
+
+def test_a_larger_unrelated_mesh_is_refused(skel, bigger_mesh):
+    """The dangerous direction: every vertex id is in range, so nothing
+    raises and every bin resolves to real faces of the wrong cell."""
+    assert dx.check_mesh_pairing(skel, bigger_mesh) is False
+    rep = dx.check_mesh_pairing(skel, bigger_mesh, return_report=True)
+    assert str(len(bigger_mesh.vertices)) in rep["reason"].replace(",", "")
+
+
+def test_a_smaller_unrelated_mesh_is_refused_without_the_counts(skel, smaller_mesh):
+    """The bounds half stands alone, which is what covers skeletons written
+    before the counts existed."""
+    legacy = copy.deepcopy(skel)
+    legacy.meta.pop("mesh")
+    assert dx.check_mesh_pairing(legacy, smaller_mesh) is False
+
+
+def test_a_legacy_skeleton_is_not_contradicted_but_not_confirmed(
+    skel, mesh, bigger_mesh
+):
+    """`ok` and `verified` say different things, and collapsing them would
+    present every pre-existing npz as confirmed."""
+    legacy = copy.deepcopy(skel)
+    legacy.meta.pop("mesh")
+
+    right = dx.check_mesh_pairing(legacy, mesh, return_report=True)
+    assert right["ok"] and not right["verified"]
+
+    # Bounds alone cannot see this one; saying so is the point.
+    wrong = dx.check_mesh_pairing(legacy, bigger_mesh, return_report=True)
+    assert wrong["ok"] and not wrong["verified"]
+
+
+def test_face_owner_names_the_mismatch_instead_of_indexerror(skel, smaller_mesh):
+    """Left to numpy this is an IndexError naming an array the caller never
+    passed in."""
+    with pytest.raises(ValueError, match="not built from this mesh"):
+        dx.face_owner(skel, smaller_mesh)
+
+
+def test_check_bins_cannot_see_a_wrong_mesh(skel, bigger_mesh):
+    """Why this check has to exist separately: node2verts and vert2node are
+    consistent with each other whatever mesh is loaded."""
+    assert dx.check_bins(skel) is True
+    assert dx.check_bins(skel, mesh=bigger_mesh) is True

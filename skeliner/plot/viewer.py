@@ -182,6 +182,43 @@ def _is_l2_graph(path: Path) -> bool:
         return "graph_nodes" in data and "graph_edges" in data
 
 
+#: Order in which the files of one drop are applied.  A mesh has to land
+#: before anything that indexes it — components and annotations name its
+#: faces, and a skeleton binds to whichever mesh is loaded when it arrives
+#: (see ``_skel_is_stale``).  The browser hands over a multi-file drop in the
+#: OS's order, usually alphabetical, so without this a ``components.npz`` that
+#: sorts ahead of ``mesh.obj`` was applied first and then wiped by the very
+#: mesh it belongs to.
+_TIER_MESH = 0
+_TIER_MESH_DERIVED = 1
+_TIER_SKELETON = 2
+_TIER_ANNOTATION = 3
+
+
+def _upload_tier(path: Path) -> int:
+    """Which tier *path* belongs to; lower tiers are applied first."""
+    suffix = path.suffix.lower()
+    if suffix in (".obj", ".ply", ".stl"):
+        return _TIER_MESH
+    if suffix == ".swc":
+        return _TIER_SKELETON
+    if suffix == ".json":
+        return _TIER_ANNOTATION
+    if suffix == ".npz":
+        # Sniffed in the same order as _apply_upload dispatches, so a file
+        # lands in the tier belonging to the branch that will handle it.
+        if (
+            _is_organelle_data(path)
+            or _is_mesh_stats_data(path)
+            or _is_soma_data(path)
+            or _is_components_data(path)
+            or _is_neurites_data(path)
+        ):
+            return _TIER_MESH_DERIVED
+        return _TIER_SKELETON  # L2 graph or skeleton npz
+    return _TIER_ANNOTATION
+
+
 def _l2_graph_to_buffers(path: Path, centroid: np.ndarray) -> dict[str, Any]:
     """Load an L2 supervoxel graph and convert to skeleton-like buffers."""
     with np.load(path, allow_pickle=False) as data:
@@ -451,8 +488,21 @@ def _create_app(
     _UNDO_LIMIT = 10
 
     # ── Broadcast helper ──────────────────────────────────────────────
+    def _current_track() -> str:
+        """Which track ``/skeletonize`` would take if pressed right now.
+
+        Asked in one place so that the label the user reads and the branch
+        that actually runs cannot disagree — ``run_skeletonize`` reads this
+        too rather than repeating the test.
+        """
+        return "preprocessing" if mesh_state.get("neurites") is not None else "direct"
+
     async def broadcast(msg: dict):
-        data = json.dumps(msg)
+        # Stamped on the way out rather than announced by whoever changed the
+        # components: six places publish them and three drop them, and the
+        # track is derived from state anyway.  A message that carries it
+        # cannot be the one site that forgot to send it.
+        data = json.dumps({**msg, "track": _current_track()})
         for ws in connected_clients:
             try:
                 await ws.send_text(data)
@@ -555,7 +605,9 @@ def _create_app(
 
     async def get_loaded(_request):
         """Return what's currently loaded."""
-        result = {"mesh": None, "skeletons": {}}
+        # The page asks once on load; after that the track rides on every
+        # broadcast, so this is the starting value rather than the channel.
+        result = {"mesh": None, "skeletons": {}, "track": _current_track()}
         if mesh_state["path"]:
             result["mesh"] = {
                 "path": mesh_state["path"],
@@ -571,23 +623,45 @@ def _create_app(
             }
         return JSONResponse(result)
 
-    async def upload_file(request):
-        """Handle file upload (mesh or skeleton)."""
-        try:
-            form = await request.form()
-        except Exception:
-            # Client disconnected during upload (e.g. drag-drop retry)
-            return JSONResponse(
-                {"ok": False, "error": "Upload interrupted"}, status_code=499
-            )
-        upload = form["file"]
-        filename = upload.filename
-        content = await upload.read()
-        suffix = Path(filename).suffix.lower()
+    async def _reset_for_new_mesh(*, keep: set[Path]) -> None:
+        """Clear every piece of state keyed to the mesh being replaced.
 
-        # Save to temp
-        tmp_path = port_dir / filename
-        tmp_path.write_bytes(content)
+        A different mesh invalidates anything naming its faces or vertices,
+        so the session is cleared rather than left describing a mesh that is
+        gone.  ``keep`` names the files that arrived in the *same gesture* as
+        the new mesh; without it the sweep below deletes the very companions
+        the user dropped alongside it — see :func:`upload_batch`.
+        """
+        for old_file in port_dir.iterdir():
+            if old_file in keep:
+                continue
+            if old_file.suffix in (".obj", ".ply", ".stl", ".npz", ".swc"):
+                old_file.unlink(missing_ok=True)
+        skeleton_states.clear()
+        mesh_state["soma"] = None
+        mesh_state["organelles"] = None
+        mesh_state["mesh_stats"] = None
+        # Set by _publish_components and read by /skeletonize to choose the
+        # track.  Left behind, components belonging to the mesh being
+        # replaced silently send the next skeletonization down the
+        # preprocessing path naming faces that no longer exist.
+        mesh_state["neurites"] = None
+        mesh_state["discarded"] = None
+        mesh_state["rescued"] = np.empty(0, dtype=np.int64)
+        mesh_state["released"] = np.empty(0, dtype=np.int64)
+        annotations_path.write_text("{}", encoding="utf-8")
+        await broadcast({"type": "all_skeletons_removed"})
+
+    async def _apply_upload(tmp_path: Path, *, reset: bool = True):
+        """Apply one upload that has already been written to ``port_dir``.
+
+        Shared by ``/upload`` and ``/upload_batch``.  ``reset`` is False for
+        a batch member: a batch clears the session once, up front, so that a
+        mesh landing partway through does not wipe the files that arrived
+        with it.
+        """
+        filename = tmp_path.name
+        suffix = tmp_path.suffix.lower()
 
         try:
             if suffix in (".obj", ".ply", ".stl"):
@@ -596,22 +670,8 @@ def _create_app(
                     f"Uploaded mesh: {len(mesh.vertices):,} verts, {len(mesh.faces):,} faces"
                 )
 
-                # ── Clear previous session data ──────────────────────
-                # Remove old mesh/skeleton files (keep the new upload)
-                for old_file in port_dir.iterdir():
-                    if old_file == tmp_path:
-                        continue
-                    if old_file.suffix in (".obj", ".ply", ".stl", ".npz", ".swc"):
-                        old_file.unlink(missing_ok=True)
-                # Reset skeletons and annotations
-                skeleton_states.clear()
-                mesh_state["soma"] = None
-                mesh_state["organelles"] = None
-                mesh_state["mesh_stats"] = None
-                mesh_state["rescued"] = np.empty(0, dtype=np.int64)
-                mesh_state["released"] = np.empty(0, dtype=np.int64)
-                annotations_path.write_text("{}", encoding="utf-8")
-                await broadcast({"type": "all_skeletons_removed"})
+                if reset:
+                    await _reset_for_new_mesh(keep={tmp_path})
 
                 buffers = _mesh_to_buffers(mesh)
 
@@ -896,6 +956,15 @@ def _create_app(
                 print(
                     f"Uploaded skeleton: {len(skel.nodes):,} nodes, {len(skel.edges):,} edges"
                 )
+                # SWC carries no vertex map, so `node2verts` is None and every
+                # edit is refused by _skel_edit_target with an error naming a
+                # cause but not a cure.  Say it here, where the fix — export
+                # npz instead — still applies.
+                if skel.node2verts is None:
+                    print(
+                        f"  {filename} has no mesh data; it can be viewed but "
+                        "not edited. Save as .npz to keep the vertex maps."
+                    )
 
                 color = SKEL_COLORS[len(skeleton_states) % len(SKEL_COLORS)]
                 buffers = _skeleton_to_buffers(skel, mesh_state["centroid"])
@@ -908,9 +977,29 @@ def _create_app(
                     "color": color,
                     # An uploaded skeleton was built from some mesh offline;
                     # loading it alongside this one is the claim that they go
-                    # together, so bind it to whatever is loaded now.
+                    # together, so bind it to whatever is loaded now — then
+                    # test the claim, because binding does not establish it.
                     "mesh": mesh_state["mesh"],
                 }
+
+                # Said now rather than on the first click.  Every edit and
+                # every diagnostic reads the mesh through this pairing, so a
+                # wrong one is not a failed operation but a whole session's
+                # worth of confident wrong answers.
+                pairing = _skel_pairing(skeleton_states[filename])
+                buffers["pairing"] = pairing
+                if not pairing["ok"]:
+                    print(
+                        f"  {filename} does NOT match the loaded mesh: {pairing['reason']}."
+                    )
+                    print(
+                        "  Editing and bin queries are refused until the right mesh is loaded."
+                    )
+                elif not pairing["verified"] and skel.node2verts is not None:
+                    print(
+                        f"  {filename} carries no mesh counts (written before "
+                        "skeliner recorded them), so the pairing cannot be confirmed."
+                    )
 
                 await broadcast(
                     {
@@ -922,7 +1011,7 @@ def _create_app(
 
             elif suffix == ".json":
                 # Annotation JSON — merge with deduplication
-                incoming = json.loads(content.decode("utf-8"))
+                incoming = json.loads(tmp_path.read_text(encoding="utf-8"))
                 current = {}
                 if annotations_path.exists():
                     current = json.loads(annotations_path.read_text(encoding="utf-8"))
@@ -972,6 +1061,89 @@ def _create_app(
 
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    async def upload_file(request):
+        """Handle a single file upload."""
+        try:
+            form = await request.form()
+        except Exception:
+            # Client disconnected during upload (e.g. drag-drop retry)
+            return JSONResponse(
+                {"ok": False, "error": "Upload interrupted"}, status_code=499
+            )
+        upload = form["file"]
+        tmp_path = port_dir / upload.filename
+        tmp_path.write_bytes(await upload.read())
+        return await _apply_upload(tmp_path)
+
+    async def upload_batch(request):
+        """Apply a whole drag-drop as one gesture.
+
+        The files of one drop are related — a mesh with its components, its
+        skeleton, its annotations — but arrive in whatever order the OS
+        listed them.  Applied independently, a mesh landing after its
+        companions clears them as though they belonged to a previous
+        session.  So the batch is ordered here, by type rather than by
+        arrival, and the session is cleared once before any of it lands.
+
+        Ordering on the server rather than in the drop handler is deliberate:
+        it is a property of what the files *are*, and a second caller that
+        forgot to sort would silently get the old behaviour back.
+        """
+        try:
+            form = await request.form()
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "error": "Upload interrupted"}, status_code=499
+            )
+
+        uploads = form.getlist("files")
+        if not uploads:
+            return JSONResponse(
+                {"ok": False, "error": "No files in batch"}, status_code=400
+            )
+
+        # Written before anything is applied because the tier of an .npz is
+        # decided by sniffing its contents, which needs it on disk.
+        paths: list[Path] = []
+        for upload in uploads:
+            tmp_path = port_dir / upload.filename
+            tmp_path.write_bytes(await upload.read())
+            paths.append(tmp_path)
+
+        meshes = [p for p in paths if _upload_tier(p) == _TIER_MESH]
+        if len(meshes) > 1:
+            names = ", ".join(p.name for p in meshes)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"Drop names more than one mesh ({names}). Which "
+                    "one the companions belong to is ambiguous — drop one "
+                    "mesh with its files.",
+                },
+                status_code=400,
+            )
+
+        # Once, up front, and told to spare this batch's own files.  Doing it
+        # here rather than in the mesh branch is what makes the drop one
+        # gesture: nothing a batch carries can be cleared by a sibling.
+        if meshes:
+            await _reset_for_new_mesh(keep=set(paths))
+
+        paths.sort(key=lambda p: (_upload_tier(p), p.name))
+
+        results = []
+        for tmp_path in paths:
+            resp = await _apply_upload(tmp_path, reset=False)
+            results.append(
+                {
+                    "name": tmp_path.name,
+                    "ok": 200 <= resp.status_code < 300,
+                    **json.loads(bytes(resp.body).decode("utf-8")),
+                }
+            )
+
+        return JSONResponse({"ok": True, "results": results})
 
     async def remove_item(request):
         """Remove mesh or skeleton."""
@@ -2047,9 +2219,50 @@ def _create_app(
         the right direction to be wrong in — a spurious stale costs one
         re-skeletonize, a spurious current costs radii measured against
         surface that is no longer there, with nothing downstream able to tell.
+
+        A skeleton uploaded while no mesh was loaded binds to ``None``, which
+        is not "current" but "never checked against anything", so it reads as
+        stale the moment a mesh exists.  Nothing reaches that state today —
+        every path back to a loaded mesh goes through the upload branch,
+        whose reset clears ``skeleton_states`` first — but the two are
+        independent mechanisms, and only this one is about whether the vertex
+        maps mean anything.  A drop applies its own mesh before its skeletons
+        (see :func:`upload_batch`), so a skeleton arriving in one gesture
+        still binds to the mesh it came with.
+
+        What identity cannot see is a skeleton that *never* belonged to the
+        mesh it bound to.  Binding happens on arrival and asks nothing about
+        the pair, so dropping a cell's skeleton beside another cell's mesh
+        produces a "current" layer whose bins name the wrong surface.  That is
+        :func:`_skel_pairing` — a different question, asked separately.
         """
         origin = sstate.get("mesh")
-        return origin is not None and origin is not mesh_state["mesh"]
+        if origin is None:
+            return mesh_state["mesh"] is not None
+        return origin is not mesh_state["mesh"]
+
+    def _skel_pairing(sstate) -> dict:
+        """Does this skeleton belong to the loaded mesh at all?
+
+        Distinct from :func:`_skel_is_stale`, which asks whether the mesh has
+        *changed since* the skeleton was built.  Both can be false while the
+        pair is nonsense: a skeleton binds to whatever mesh is loaded when it
+        arrives, and nothing on arrival checks that the two go together.
+
+        Cached against the pair it was computed for, as the face-owner map is,
+        so a click does not re-walk every bin.
+        """
+        from skeliner import dx
+
+        mesh, skel = mesh_state["mesh"], sstate.get("skeleton")
+        if mesh is None or skel is None or skel.node2verts is None:
+            return {"ok": True, "verified": False, "reason": "nothing to check"}
+        cached = sstate.get("_pairing")
+        if cached is not None and cached[0] is mesh and cached[1] is skel:
+            return cached[2]
+        rep = dx.check_mesh_pairing(skel, mesh, return_report=True)
+        sstate["_pairing"] = (mesh, skel, rep)
+        return rep
 
     async def _rebroadcast_skeletons():
         """Re-send every skeleton layer, e.g. after the centroid moved."""
@@ -2065,6 +2278,14 @@ def _create_app(
             sstate["buffers"]["color"] = sstate["color"]
             stale = _skel_is_stale(sstate)
             sstate["buffers"]["stale"] = stale
+            pairing = _skel_pairing(sstate)
+            sstate["buffers"]["pairing"] = pairing
+            if not pairing["ok"] and not sstate.get("_pairing_announced"):
+                sstate["_pairing_announced"] = True
+                await _log(
+                    f"[skeliner] '{sname}' does not belong to the loaded mesh: "
+                    f"{pairing['reason']}."
+                )
             if stale and not sstate.get("_stale_announced"):
                 sstate["_stale_announced"] = True
                 await _log(
@@ -2079,8 +2300,13 @@ def _create_app(
                 }
             )
 
-    async def _apply_new_mesh(new_mesh):
-        """Replace the current mesh with a modified one and broadcast."""
+    async def _apply_new_mesh(new_mesh, *, rederived: bool = False):
+        """Replace the current mesh with a modified one and broadcast.
+
+        ``rederived`` says the caller publishes fresh components straight
+        after — it only silences the note below, since the drop itself is
+        unconditional and a republish overwrites it either way.
+        """
         # Save current mesh for undo
         old = mesh_state["mesh"]
         if old is not None:
@@ -2094,6 +2320,20 @@ def _create_app(
         mesh_state["fusion_clusters"] = None
         mesh_state["disconnected"] = None
         mesh_state["hole_loops"] = None
+        # break_up_mesh runs once the mesh is settled, so a components split
+        # and a mesh edit should not coexist: the split describes the surface
+        # as it was, and /skeletonize reads it to choose the preprocessing
+        # track.  Dropped rather than remapped — re-deriving is the honest
+        # response, and it is what the one caller that continues past here
+        # does anyway.
+        had_components = mesh_state.get("neurites") is not None
+        mesh_state["neurites"] = None
+        mesh_state["discarded"] = None
+        if had_components and not rederived:
+            await _log(
+                "[skeliner] Mesh changed — components dropped. Press Break "
+                "again once the mesh is settled."
+            )
         # A preview names faces of the mesh it was computed against.  Face
         # ids do not survive a mesh change, so applying it afterwards would
         # reassign whatever now sits at those indices.
@@ -2743,7 +2983,10 @@ def _create_app(
             verbose=True,
         )
 
-        await _apply_new_mesh(new_mesh)
+        # rederived: the run ends in break_up_mesh, so the components dropped
+        # below are replaced a few lines down rather than left for the user
+        # to rebuild.
+        await _apply_new_mesh(new_mesh, rederived=True)
         # _apply_new_mesh drops the caches keyed to the mesh it replaced;
         # these two are keyed to it as well, and the run has already consumed
         # and removed what they name.
@@ -3415,8 +3658,10 @@ def _create_app(
         params = body.get("params", {})
         mesh = mesh_state["mesh"]
 
-        # If break_up_mesh has run, use the preprocessing track
-        if mesh_state.get("neurites") is not None:
+        # If break_up_mesh has run, use the preprocessing track.  Asked of
+        # _current_track so the panel cannot label one track and run the other.
+        track = _current_track()
+        if track == "preprocessing":
             from skeliner.dataclass import (
                 Discarded,
                 MeshComponents,
@@ -3469,6 +3714,10 @@ def _create_app(
                 "ok": True,
                 "nNodes": len(skel.nodes),
                 "nEdges": len(skel.edges),
+                # Which track produced this one.  Reported rather than
+                # inferred by the client, so a run and its label agree even
+                # if the components changed while it was working.
+                "ranTrack": track,
             }
         )
 
@@ -3559,6 +3808,21 @@ def _create_app(
                     status_code=409,
                 ),
             )
+        pairing = _skel_pairing(sstate)
+        if not pairing["ok"]:
+            return (
+                None,
+                None,
+                None,
+                JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"'{name}' does not belong to the loaded mesh: "
+                        f"{pairing['reason']}.",
+                    },
+                    status_code=409,
+                ),
+            )
         return name, sstate, skel, None
 
     async def bin_reassign_preview(request):
@@ -3626,7 +3890,7 @@ def _create_app(
                 {
                     "ok": False,
                     "error": "node 0 is the soma, not a bin — its vertices "
-                    "belong to the components. Edit Mesh owns those.",
+                    "belong to the components. Edit ▸ Mesh Comp. owns those.",
                 },
                 status_code=400,
             )
@@ -3696,7 +3960,9 @@ def _create_app(
                     "only take surface from its neighbours"
                 )
             elif n_unowned:
-                why = "soma, organelle or discarded surface, which Edit Mesh owns"
+                why = (
+                    "soma, organelle or discarded surface, which Edit ▸ Mesh Comp. owns"
+                )
             return JSONResponse(
                 {"ok": False, "error": f"Nothing to move: the selection is {why}"},
                 status_code=400,
@@ -3929,6 +4195,19 @@ def _create_app(
                 },
                 status_code=409,
             )
+        pairing = _skel_pairing(skeleton_states[name])
+        if not pairing["ok"]:
+            # Same consequence as staleness, different cause: this skeleton was
+            # never this mesh's.  Against a *larger* wrong mesh every id is in
+            # range, so the patch returned would look like an answer.
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"'{name}' does not belong to the loaded mesh: "
+                    f"{pairing['reason']}.",
+                },
+                status_code=409,
+            )
 
         owner = _face_owner_for(name)
 
@@ -3977,7 +4256,8 @@ def _create_app(
                 "neighbors": nbrs.tolist(),
                 "scopeFaces": scope.tolist(),
                 # node 0's "bin" is soma.verts, not a bin: it is assigned
-                # wholesale by the soma stitch and is Edit Mesh's to change.
+                # wholesale by the soma stitch and is Edit ▸ Mesh Comp.'s to
+                # change.
                 "editable": node != 0,
             }
         )
@@ -4030,6 +4310,349 @@ def _create_app(
                 "nTree": rep["n_tree"],
                 "dropped": [[int(u), int(v)] for u, v in rep["dropped"]],
                 "unsupported": [[int(u), int(v)] for u, v in rep["unsupported"]],
+            }
+        )
+
+    #: Diagnostics offered in the skeleton panel.  Each returns a list of
+    #: ``{"node", "detail"}``, optionally with ``"cut"`` / ``"keep"`` edge
+    #: lists which the route draws.  They are *candidate listers* — none of
+    #: them edits, and none of them ranks by a threshold the corpus has not
+    #: justified, so every cut is a parameter the user sets and can see the
+    #: effect of.
+    def _dx_junctions(skel, p):
+        from skeliner import dx
+
+        flagged, stats = dx.suspicious_junctions(
+            skel,
+            min_degree=int(p.get("minDegree", 4)),
+            min_distal_cable=float(p.get("minCable", 5.0)),
+            cable_unit=p.get("cableUnit", "um"),
+            min_components=int(p.get("minComponents", 2)),
+            return_stats=True,
+        )
+        # Lists junctions and what each arm carries.  It proposes no cut:
+        # `arm_pairing` used to ride along here and was removed, because its
+        # score is purely directional and cannot tell a 0.8 um binning stub
+        # from a 261 um dendrite — so it paired stubs with major arms and
+        # ranked its most destructive proposals highest.  See
+        # `.claude/labbook/2026-08-11-arm-pairing-retracted.md`.
+        out = []
+        for nid in flagged:
+            d = sorted(stats[nid]["distal_cables"], reverse=True)
+            arms = ", ".join(f"{c / 1000:.1f}" for c in d[:4])
+            out.append(
+                {
+                    "node": nid,
+                    "detail": f"deg {stats[nid]['degree']} · arms {arms} µm",
+                }
+            )
+        return out
+
+    def _dx_short_twigs(skel, p):
+        """Terminal twigs, measured against the branch node they hang off.
+
+        Deliberately *not* called phantom-anything.  Whether a short twig is
+        a binning artefact or a real branch is exactly what cannot be decided
+        from the numbers — it is why ``postprocess=False`` leaves pruning off
+        — so this lists them for a human and names the ratio it sorted by.
+        """
+        import numpy as _np
+
+        edges = _np.asarray(skel.edges, dtype=_np.int64).reshape(-1, 2)
+        n = len(skel.nodes)
+        if not len(edges):
+            return []
+        adj = [[] for _ in range(n)]
+        for a, b in edges:
+            adj[int(a)].append(int(b))
+            adj[int(b)].append(int(a))
+        deg = _np.zeros(n, dtype=_np.int64)
+        for a, b in edges:
+            deg[a] += 1
+            deg[b] += 1
+        par = _np.full(n, -1, dtype=_np.int64)
+        seen = _np.zeros(n, dtype=bool)
+        seen[0] = True
+        order = [0]
+        for v in order:
+            for w in adj[v]:
+                if not seen[w]:
+                    seen[w] = True
+                    par[w] = v
+                    order.append(w)
+
+        def _len(u, w):
+            return float(_np.linalg.norm(skel.nodes[u] - skel.nodes[w]))
+
+        radii = skel.r
+        max_ratio = float(p.get("maxRatio", 3.0))
+        max_nodes = int(p.get("maxNodes", 3))
+        out = []
+        for leaf in range(1, n):
+            if deg[leaf] != 1:
+                continue
+            chain = [leaf]
+            u = int(par[leaf])
+            while u > 0 and deg[u] == 2:
+                chain.append(u)
+                u = int(par[u])
+            if u < 0 or deg[u] < 3 or len(chain) > max_nodes:
+                continue
+            host_r = float(radii[u])
+            if host_r <= 0:
+                continue
+            cable = sum(_len(c, int(par[c])) for c in chain)
+            ratio = cable / host_r
+            if ratio > max_ratio:
+                continue
+            out.append(
+                {
+                    "node": leaf,
+                    "detail": (
+                        f"{len(chain)}-node twig · {cable / 1000:.2f} µm "
+                        f"= {ratio:.1f}× host radius (node {u})"
+                    ),
+                    "ratio": ratio,
+                    # No edges drawn.  Ninety scattered twigs pooled into one
+                    # annotation cannot be focused (they are all over the
+                    # cell) and cannot be acted on together (most of them are
+                    # real branches), so the group is noise in the list.
+                    # Edges are worth drawing when they form one thing you
+                    # trace — a loop — not N unrelated fragments; a twig is
+                    # already at the marker you focused.
+                }
+            )
+        out.sort(key=lambda r: r["ratio"])
+        return out
+
+    def _dx_degree(skel, p):
+        from skeliner import dx
+
+        k = int(p.get("minDegree", 4))
+        out = []
+        for d in range(k, 12):
+            for nid in dx.nodes_of_degree(skel, d):
+                out.append({"node": int(nid), "detail": f"degree {d}"})
+        return out
+
+    def _dx_orphans(skel, _p):
+        from skeliner import dx
+
+        iso = dx.check_connectivity(skel, return_isolated=True)
+        if iso is True:
+            return []
+        return [{"node": int(nid), "detail": "unreachable from soma"} for nid in iso]
+
+    def _dx_tips(skel, p):
+        from skeliner import dx
+
+        tips = dx.suspicious_tips(
+            skel,
+            near_factor=float(p.get("nearFactor", 1.2)),
+            path_ratio_thresh=float(p.get("pathRatio", 2.0)),
+        )
+        return [
+            {"node": int(nid), "detail": "tip near soma, long path"} for nid in tips
+        ]
+
+    def _dx_cycles(skel, _p):
+        """Loops, and the edge on each that the surface will not vouch for.
+
+        The only diagnostic here whose candidate rests on evidence outside
+        the skeleton.  A loop cannot occur by accident — the MST returns a
+        tree — so one exists only because a connection was asserted, and the
+        loop then says *two of these edges cannot both be right*.
+        `edge_support` settles which: a tree edge with no surface joining its
+        bins, sitting on a loop that offers another route, is the join the
+        MST should not have made.
+        """
+        from skeliner import dx
+
+        out = []
+        for i, cyc in enumerate(dx.cycles(skel, mesh_state["mesh"])):
+            n_break = len(cyc["breaks"])
+            detail = (
+                f"loop of {len(cyc['nodes'])} nodes, "
+                f"{cyc['length'] / 1000:.1f} µm · "
+                + (
+                    f"{n_break} edge(s) the surface does not support"
+                    if n_break
+                    else "every edge is surface-supported — the loop is real"
+                )
+            )
+            # Where to put the marker.  `nodes[0]` is merely the lowest id
+            # on the ring, which is usually node 0 — the soma, the least
+            # informative point on any loop and the one place a marker
+            # scaled by node radius swallows the structure.  Prefer an end
+            # of the break edge, since that is what the row is *for*;
+            # failing that, the point on the loop furthest from the soma.
+            if cyc["breaks"]:
+                at = int(cyc["breaks"][0][0])
+            else:
+                ring = [n for n in cyc["nodes"] if n != 0] or cyc["nodes"]
+                soma = skel.nodes[0]
+                at = max(
+                    ring, key=lambda n: float(np.linalg.norm(skel.nodes[n] - soma))
+                )
+            out.append(
+                {
+                    "node": at,
+                    "detail": detail,
+                    # The whole loop, so it can be followed round, and the
+                    # break candidates separately so they stand out on it.
+                    "keep": cyc["edges"],
+                    "cut": cyc["breaks"],
+                }
+            )
+        return out
+
+    #: Named after the `dx` function each one runs, and ordered the way
+    #: `dx.__skeleton__` orders them — the one invariant check, then the
+    #: plain enumerations, then the heuristics.  Both so that what the panel
+    #: calls a thing and what the library calls it cannot drift apart, and
+    #: so the list reads from "this is broken" to "this might repay a look".
+    DIAGNOSTICS = {
+        "orphans": ("isolated nodes", [0.9, 0.3, 0.9], _dx_orphans, None),
+        "cycles": (
+            "cycles",
+            [1.0, 0.5, 0.0],
+            _dx_cycles,
+            ("no surface behind it", "the loop"),
+        ),
+        "degree": ("nodes of degree", [0.95, 0.75, 0.2], _dx_degree, None),
+        "twigs": ("short twigs", [0.35, 0.75, 0.95], _dx_short_twigs, None),
+        "tips": ("suspicious tips", [0.4, 0.9, 0.5], _dx_tips, None),
+        "junctions": (
+            "suspicious junctions",
+            [0.95, 0.35, 0.25],
+            _dx_junctions,
+            None,
+        ),
+    }
+
+    async def diagnose(request):
+        """List candidate defects as markers so they can be looked at.
+
+        The whole point is the looking.  Every threshold below is a heuristic
+        with no validation behind it, and the corpus can rank candidates but
+        cannot say which are real — that needs the mesh beside the skeleton,
+        which is why this refuses to run without a paired one.  Nothing here
+        edits; the verbs stay where they already are.
+
+        Markers replace the previous run of the *same* diagnostic rather than
+        accumulating, so re-running with a different cut answers "what does
+        this threshold do" instead of piling three answers on top of
+        each other.
+        """
+        body = await request.json()
+        kind = body.get("kind")
+        if kind not in DIAGNOSTICS:
+            return JSONResponse(
+                {"ok": False, "error": f"Unknown diagnostic {kind!r}"},
+                status_code=400,
+            )
+        name, sstate, skel, err = _skel_edit_target(body)
+        if err is not None:
+            return err
+
+        label, color, fn, edge_labels = DIAGNOSTICS[kind]
+        try:
+            found = fn(skel, body.get("params") or {})
+        except Exception as exc:  # noqa: BLE001 - report, do not 500 the panel
+            return JSONResponse(
+                {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+                status_code=400,
+            )
+
+        # The client renders everything centroid-relative — `_mesh_to_buffers`
+        # subtracts it from the vertices and `_skeleton_to_buffers` subtracts
+        # the same one from the nodes, so the two overlay.  A marker built
+        # from raw node coordinates lands a whole centroid away, which on CAVE
+        # cells is hundreds of microns off screen.
+        centroid = np.asarray(mesh_state["centroid"], dtype=np.float64)
+
+        def _seg(u, v):
+            return [
+                [float(x) for x in (skel.nodes[int(u)] - centroid)],
+                [float(x) for x in (skel.nodes[int(v)] - centroid)],
+            ]
+
+        radii = skel.r
+        markers, cut_segs, keep_segs = [], [], []
+        for row in found:
+            nid = int(row["node"])
+            r = float(radii[nid]) if nid < len(radii) else 0.0
+            markers.append(
+                {
+                    "position": [float(x) for x in (skel.nodes[nid] - centroid)],
+                    "color": color,
+                    # The marker is the node's own size, near enough — a bead
+                    # on it, not a balloon around it.  A multiple of the
+                    # radius overshadows exactly the surface being judged,
+                    # and a flat floor inflates the thinnest nodes most,
+                    # which is where twigs live.  1.15x is just enough to
+                    # break the tube surface and be seen through it.
+                    # The ceiling is only for the soma, whose true radius
+                    # would swallow itself.  Candidates are found from the
+                    # list, not by being spotted across the cell, so there is
+                    # nothing to buy by drawing them larger than they are.
+                    "radius": min(max(r * 1.15, 50.0), 2000.0),
+                    "label": f"{label}: {row['detail']}",
+                    "skelName": name,
+                    "node": nid,
+                    "dx": kind,
+                }
+            )
+            cut_segs.extend(_seg(u, v) for u, v in row.get("cut", ()))
+            keep_segs.extend(_seg(u, v) for u, v in row.get("keep", ()))
+
+        # Drawn on the geometry, because that is what the claim is about.
+        # `overlay` keeps them visible: these segments are *the same edges*
+        # the skeleton already draws, so without it they z-fight with it and
+        # the only way to see the highlight is to hide the skeleton — which
+        # removes the context the highlight exists to sit in.
+        cut_name, keep_name = edge_labels or ("proposed cut", "cable that continues")
+        groups = []
+        if cut_segs and cut_name:
+            groups.append(
+                {
+                    "segments": cut_segs,
+                    "color": [1.0, 0.25, 0.25],
+                    "label": f"{label}: {cut_name} ({len(cut_segs)} edges)",
+                    "overlay": True,
+                    "dx": kind,
+                }
+            )
+        if keep_segs and keep_name:
+            groups.append(
+                {
+                    "segments": keep_segs,
+                    "color": [0.3, 0.9, 0.4],
+                    "label": f"{label}: {keep_name} ({len(keep_segs)} edges)",
+                    "overlay": True,
+                    "dx": kind,
+                }
+            )
+
+        ann = {}
+        if annotations_path.exists():
+            ann = json.loads(annotations_path.read_text(encoding="utf-8"))
+        ann["markers"] = [
+            m for m in ann.get("markers", []) if m.get("dx") != kind
+        ] + markers
+        ann["edge_groups"] = [
+            g for g in ann.get("edge_groups", []) if g.get("dx") != kind
+        ] + groups
+        annotations_path.write_text(json.dumps(ann), encoding="utf-8")
+        await broadcast({"type": "annotations_updated"})
+
+        await _log(f"[skeliner.dx] {label}: {len(markers)} candidate(s) on '{name}'")
+        return JSONResponse(
+            {
+                "ok": True,
+                "kind": kind,
+                "n": len(markers),
+                "nCut": len(cut_segs),
             }
         )
 
@@ -4515,6 +5138,7 @@ def _create_app(
             Route("/annotations", get_annotations, methods=["GET"]),
             Route("/update_annotations", update_annotations, methods=["POST"]),
             Route("/upload", upload_file, methods=["POST"]),
+            Route("/upload_batch", upload_batch, methods=["POST"]),
             Route("/remove", remove_item, methods=["POST"]),
             Route("/update_state", post_state, methods=["POST"]),
             Route("/update_selection", post_selection, methods=["POST"]),
@@ -4573,6 +5197,7 @@ def _create_app(
             Route("/bin_split_preview", bin_split_preview, methods=["POST"]),
             Route("/bin_reassign_cancel", bin_reassign_cancel, methods=["POST"]),
             Route("/edge_support", edge_support, methods=["POST"]),
+            Route("/diagnose", diagnose, methods=["POST"]),
             Route("/edge_edit_preview", edge_edit_preview, methods=["POST"]),
             Route("/edge_edit_apply", edge_edit_apply, methods=["POST"]),
             Route("/edge_edit_cancel", edge_edit_cancel, methods=["POST"]),

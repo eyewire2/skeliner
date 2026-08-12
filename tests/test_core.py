@@ -139,6 +139,94 @@ def test_preproc_track_with_soma(reference_mesh):
     assert np.linalg.norm(skel.soma.center - mesh_center) < 1e3
 
 
+def _barbell_surface():
+    """Two wide tubes joined by a neck too thin to make a legal shell.
+
+    Built as a surface graph rather than a mesh because the failure needs a
+    neck whose geodesic bands hold fewer than ``min_shell_vertices``
+    vertices, and the reference mesh is too coarse to have one — raising the
+    threshold on it collapses the whole skeleton to a node or two instead of
+    severing it.
+
+    Returns ``(graph, vertices, neck_ids)``.
+    """
+    pts: list[list[float]] = []
+    edges: list[tuple[int, int]] = []
+
+    def ring(x, n, r):
+        base = len(pts)
+        for k in range(n):
+            a = 2 * np.pi * k / n
+            pts.append([x, r * np.cos(a), r * np.sin(a)])
+        for k in range(n):
+            edges.append((base + k, base + (k + 1) % n))
+        return base, n
+
+    prev = None
+    for i in range(6):  # wide tube A
+        cur = ring(i * 1.0, 12, 3.0)
+        if prev:
+            for k in range(12):
+                edges.append((prev[0] + k, cur[0] + k))
+        prev = cur
+
+    neck_start = len(pts)
+    for i in range(3):  # the neck: 3 vertices per ring, below the cut
+        cur = ring(6.0 + i * 1.0, 3, 0.4)
+        for k in range(3):
+            edges.append((prev[0] + (k * 4 if prev[1] == 12 else k), cur[0] + k))
+        prev = cur
+    neck = list(range(neck_start, len(pts)))
+
+    for i in range(6):  # wide tube B
+        cur = ring(9.0 + i * 1.0, 12, 3.0)
+        for k in range(3):
+            edges.append((prev[0] + k, cur[0] + k))
+        prev = cur
+
+    verts = np.asarray(pts, dtype=np.float64)
+    elist = sorted(set(tuple(sorted(e)) for e in edges))
+    g = ig.Graph(n=len(verts), edges=elist, directed=False)
+    g.es["weight"] = [float(np.linalg.norm(verts[a] - verts[b])) for a, b in elist]
+    return g, verts, neck
+
+
+def test_a_shell_too_small_to_bin_still_keeps_its_vertices():
+    """A dropped band severs the skeleton, however continuous the surface.
+
+    `_edges_from_mesh` joins two nodes only when a mesh edge has **both**
+    endpoints binned.  So a shell sub-component discarded for being smaller
+    than ``min_shell_vertices`` does not merely cost a node — it leaves no
+    edge across the gap, and at a narrow neck the sub-components are small
+    for several consecutive shells, which cuts the arbor in two.  Being too
+    thin to be its own bin is not the same as belonging nowhere.
+    """
+    from skeliner.skeletonize import _bin_one_component
+
+    g, verts, neck = _barbell_surface()
+    assert len(g.components()) == 1, "the fixture must be one connected surface"
+
+    shells = _bin_one_component(
+        g,
+        np.arange(len(verts), dtype=np.int64),
+        0,
+        mesh_vertices=verts,
+        mean_edge_len=1.0,
+        min_shell_vertices=6,
+    )
+
+    binned: set[int] = set()
+    for band in shells:
+        for comp in band:
+            binned.update(int(x) for x in comp)
+
+    missing_neck = sorted(v for v in neck if v not in binned)
+    assert not missing_neck, f"neck vertices dropped: {missing_neck}"
+    assert binned == set(range(len(verts))), (
+        f"{len(verts) - len(binned)} vertices left unbinned"
+    )
+
+
 # ----- centreline distances survive so `centerline` can be recomputed ------
 #
 # Every other radius is an aggregate over the vertices a node owns, so it

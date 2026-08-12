@@ -322,7 +322,7 @@ def test_organelle_target_writes_the_manual_mask(reassign_client):
 
 # ── /bin ──────────────────────────────────────────────────────────────
 #
-# A node *is* the set of mesh vertices it owns, so Edit Partition renders a
+# A node *is* the set of mesh vertices it owns, so Edit ▸ Skeleton renders a
 # selected node as that surface.  A bin is small enough to fetch per click,
 # which is why the partition is never shipped in bulk.
 
@@ -392,7 +392,7 @@ def test_bins_do_not_overlap(bin_client):
 
 def test_node_0_is_reported_as_not_editable(bin_client):
     """Node 0's "bin" is ``soma.verts``, assigned wholesale by the soma
-    stitch.  It belongs to Edit Mesh, not Edit Partition."""
+    stitch.  It belongs to Edit ▸ Mesh Comp., not Edit ▸ Skeleton."""
     client, name, _, _ = bin_client
     assert (
         client.post("/bin", json={"name": name, "node": 0}).json()["editable"] is False
@@ -1835,3 +1835,846 @@ def test_a_dropped_neurites_file_shows_the_names_it_carries(named_client, tmp_pa
     ann = client.get("/annotations").json()
     named = {h["neurite"]: h["label"] for h in ann["highlights"] if "neurite" in h}
     assert named[0].startswith("axon (")
+
+
+# ── uploading a drop as one gesture ───────────────────────────────────
+#
+# A drag-drop is one gesture, but the browser hands the files over in the
+# OS's order.  Applied independently, a mesh arriving after its companions
+# clears them as though they had belonged to a previous session — and the
+# sweep unlinks them from the port directory too, so nothing is recoverable.
+
+
+@pytest.fixture
+def drop_files(tmp_path):
+    """A mesh, the components naming its faces, and a skeleton of it."""
+    from skeliner import io as skio
+    from skeliner.dataclass import MeshComponents
+    from skeliner.skeletonize import skeletonize
+
+    mesh, soma, org, neurites = _tube_with_components()
+    comp = MeshComponents(
+        soma=soma, organelles=org, neurites=neurites, discarded=Discarded([])
+    )
+
+    mesh_path = tmp_path / "mesh_cleaned.obj"
+    comp_path = tmp_path / "components.npz"
+    skel_path = tmp_path / "skeleton.npz"
+    mesh.export(mesh_path)
+    skio.save_components_npz(comp, comp_path)
+    skeletonize(mesh, verbose=False).to_npz(skel_path)
+
+    # The order a Finder selection arrives in, and the one that used to lose
+    # the components: "components.npz" sorts ahead of "mesh_cleaned.obj".
+    assert sorted(p.name for p in (mesh_path, comp_path)) == [
+        "components.npz",
+        "mesh_cleaned.obj",
+    ]
+    return mesh_path, comp_path, skel_path
+
+
+@pytest.fixture
+def drop_client(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path / "state", raising=False)
+    with TestClient(_create_app(port=8913)) as client:
+        yield client
+
+
+def _as_batch(*paths):
+    return [
+        ("files", (p.name, p.read_bytes(), "application/octet-stream")) for p in paths
+    ]
+
+
+def _neurite_labels(client):
+    ann = client.get("/annotations").json()
+    return [h.get("label", "") for h in ann.get("highlights", []) if "neurite" in h]
+
+
+def test_a_drop_applies_the_mesh_before_the_files_that_index_it(
+    drop_client, drop_files
+):
+    """Ordered by what the files are, not by when they arrived.  Sorting on
+    the client would fix the drag-drop path and leave every other caller
+    with the old behaviour."""
+    mesh_path, comp_path, _ = drop_files
+    r = drop_client.post("/upload_batch", files=_as_batch(comp_path, mesh_path))
+
+    assert r.status_code == 200, r.text
+    assert [x["name"] for x in r.json()["results"]] == [
+        "mesh_cleaned.obj",
+        "components.npz",
+    ]
+
+
+def test_components_survive_a_mesh_that_arrived_after_them(drop_client, drop_files):
+    mesh_path, comp_path, _ = drop_files
+    drop_client.post("/upload_batch", files=_as_batch(comp_path, mesh_path))
+
+    assert drop_client.get("/loaded").json()["mesh"] is not None
+    assert _neurite_labels(drop_client), "the mesh cleared the components it came with"
+
+
+def test_a_drop_still_clears_what_belonged_to_the_previous_mesh(
+    drop_client, drop_files
+):
+    """Batching spares the gesture's own files, not the session before it."""
+    mesh_path, comp_path, _ = drop_files
+    drop_client.post("/upload_batch", files=_as_batch(comp_path, mesh_path))
+    assert _neurite_labels(drop_client)
+
+    drop_client.post("/upload_batch", files=_as_batch(mesh_path))
+    assert not _neurite_labels(drop_client)
+
+
+def test_a_skeleton_in_a_drop_binds_to_the_mesh_it_came_with(drop_client, drop_files):
+    """It is applied after the mesh, so ``_skel_is_stale`` sees the object
+    the drop carried rather than whatever happened to be loaded."""
+    mesh_path, _, skel_path = drop_files
+    drop_client.post("/upload_batch", files=_as_batch(skel_path, mesh_path))
+
+    r = drop_client.post(
+        "/edge_edit_preview", json={"name": "skeleton.npz", "u": 1, "v": 2}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"], r.json()
+
+
+def test_a_drop_naming_two_meshes_is_refused(drop_client, drop_files, tmp_path):
+    """Which mesh the companions belong to is unanswerable, and guessing
+    silently discards one set."""
+    mesh_path, comp_path, _ = drop_files
+    other = tmp_path / "other.obj"
+    trimesh.creation.box(extents=(4, 4, 4)).export(other)
+
+    r = drop_client.post("/upload_batch", files=_as_batch(mesh_path, other, comp_path))
+    assert r.status_code == 400
+    assert "more than one mesh" in r.json()["error"]
+
+
+def test_a_new_mesh_clears_the_components_that_chose_the_track(drop_client, drop_files):
+    """``/skeletonize`` reads ``neurites`` to pick the preprocessing track.
+    Left behind, a components file from the mesh being replaced sends the
+    next run down that track naming faces that no longer exist."""
+    mesh_path, comp_path, _ = drop_files
+    drop_client.post("/upload_batch", files=_as_batch(comp_path, mesh_path))
+    assert _neurite_labels(drop_client)
+
+    drop_client.post(
+        "/upload",
+        files={"file": (mesh_path.name, mesh_path.read_bytes(), "application/octet")},
+    )
+    assert not _neurite_labels(drop_client)
+
+
+# ── a mesh edit invalidates the components ────────────────────────────
+#
+# `break_up_mesh` runs once the mesh is settled, so a components split and a
+# mesh edit should not coexist.  The split names faces of the surface as it
+# was, and `/skeletonize` reads it to choose the preprocessing track — left
+# behind, it sends the next run down that track naming faces of a mesh that
+# has moved on.
+
+
+def test_a_mesh_edit_drops_the_components(reassign_client):
+    """The routes a user actually clicks, which is where a missed site
+    shows — the same reason the skeleton rule is tested through one."""
+    client, state, neurites = reassign_client
+    assert state["neurites"] is not None
+
+    r = client.post(
+        "/remove_selected", json={"faces": [int(f) for f in neurites[0][:5]]}
+    )
+    assert r.status_code == 200, r.text
+
+    assert state["neurites"] is None
+    assert state["discarded"] is None
+
+
+def test_dropping_the_components_is_announced(reassign_client, capsys):
+    """An invalidation that happens quietly is read as a bug.  Checked on
+    stdout because ``_log`` prints and broadcasts the same line."""
+    client, _, neurites = reassign_client
+
+    client.post("/remove_selected", json={"faces": [int(f) for f in neurites[0][:5]]})
+
+    said = capsys.readouterr().out
+    assert "components dropped" in said, said
+
+
+def test_preprocess_does_not_announce_a_drop_it_repairs(reassign_client, capsys):
+    """It ends in break_up_mesh, so the components come straight back; a
+    note telling the user to rebuild them would be wrong."""
+    client, state, _ = reassign_client
+
+    r = client.post("/preprocess", json={})
+    assert r.status_code == 200, r.text
+
+    said = capsys.readouterr().out
+    assert "components dropped" not in said, said
+    assert state["neurites"] is not None, "preprocess must republish"
+
+
+# ── which track a run takes, and which parameters it reads ────────────
+#
+# `skeletonize` accepts every parameter on either track and forwards only
+# the applicable ones, so a setting made against the track that is not
+# running is ignored in silence.  The viewer picks the track from state the
+# user cannot see, so it has to say which one it picked and which of the
+# parameters that one reads.
+
+TRACK_HEADERS = {
+    "direct": "skeletonize from raw mesh",
+    "preprocessing": "skeletonize from preprocessed mesh components",
+}
+
+
+def _skel_defaults_tracks():
+    """Parse the dialog's per-parameter track tags out of viewer.html."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    block = html.split("const SKEL_DEFAULTS = {")[1].split("\n            };")[0]
+
+    tags = {}
+    for m in re.finditer(r"(\w+):\s*\{", block):
+        depth, j = 1, m.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(block[j], 0)
+            j += 1
+        body = block[m.end() : j - 1]
+        raw = re.search(r"tracks:\s*(BOTH|\[[^\]]*\])", body)
+        assert raw, f"{m.group(1)} carries no tracks tag"
+        tags[m.group(1)] = (
+            ["direct", "preprocessing"]
+            if raw.group(1) == "BOTH"
+            else re.findall(r'"(\w+)"', raw.group(1))
+        )
+    return tags
+
+
+def test_the_dialog_greys_exactly_what_the_track_ignores():
+    """The tags decide which fields are disabled.  Wrong ones would either
+    grey out a live parameter or leave a dead one editable, and both read as
+    the dialog working."""
+    import inspect
+    import re
+    import sys
+    from pathlib import Path
+
+    src = Path(sys.modules["skeliner.skeletonize"].__file__).read_text()
+    forwarded = src.split("return _skeletonize_preproc(")[1].split("\n        )")[0]
+    prepro = set(re.findall(r"(\w+)=", forwarded))
+    direct = set(
+        inspect.signature(
+            sys.modules["skeliner.skeletonize"]._skeletonize_direct
+        ).parameters
+    )
+
+    tags = _skel_defaults_tracks()
+    assert len(tags) > 10, "parser found almost nothing — it has drifted"
+
+    for key, declared in tags.items():
+        actual = sorted(
+            (["direct"] if key in direct else [])
+            + (["preprocessing"] if key in prepro else [])
+        )
+        assert sorted(declared) == actual, (
+            f"{key}: dialog says {sorted(declared)}, tracks forward {actual}"
+        )
+
+
+@pytest.mark.parametrize("track", ["direct", "preprocessing"])
+def test_the_run_reports_and_logs_the_track_it_took(reassign_client, capsys, track):
+    """Reported by the server rather than inferred by the page, so the label
+    and the branch cannot disagree."""
+    client, state, _ = reassign_client
+    if track == "direct":
+        state["neurites"] = None
+
+    assert client.get("/loaded").json()["track"] == track
+
+    r = client.post("/skeletonize", json={"params": {}})
+    assert r.status_code == 200, r.text
+    assert r.json()["ranTrack"] == track
+    assert TRACK_HEADERS[track] in capsys.readouterr().out
+
+
+def _skel_defaults_values():
+    """Parse the dialog's declared default for each parameter."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    block = html.split("const SKEL_DEFAULTS = {")[1].split("\n            };")[0]
+
+    literals = {"true": True, "false": False}
+    out = {}
+    for m in re.finditer(r"(\w+):\s*\{", block):
+        depth, j = 1, m.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(block[j], 0)
+            j += 1
+        raw = re.search(r"value:\s*([^,]+),", block[m.end() : j - 1]).group(1).strip()
+        out[m.group(1)] = (
+            literals[raw]
+            if raw in literals
+            else (float(raw) if "." in raw else int(raw))
+        )
+    return out
+
+
+def test_the_dialog_agrees_with_skeletonize_about_the_defaults():
+    """The dialog decides what counts as "unchanged", and `getSkelParams`
+    sends only what differs.  A dialog default drifting from the signature
+    would either send a value the user never chose, or withhold one they
+    did — and the panel would look right either way."""
+    import inspect
+    import sys
+
+    sig = inspect.signature(sys.modules["skeliner.skeletonize"].skeletonize).parameters
+    declared = _skel_defaults_values()
+    assert len(declared) > 10, "parser found almost nothing — it has drifted"
+
+    for key, val in declared.items():
+        assert key in sig, f"{key} is offered by the dialog but is not a parameter"
+        assert sig[key].default == val, (
+            f"{key}: dialog offers {val!r}, skeletonize defaults to "
+            f"{sig[key].default!r}"
+        )
+
+
+# ── the mode selector ─────────────────────────────────────────────────
+#
+# Three modes, named after the three objects in the derivation chain: the
+# mesh, the components broken out of it, the skeleton built from those.
+# Each is wired through three parallel tables — the buttons, the row
+# containers they reveal, and the click handlers — so renaming one means
+# editing all three.  A site missed leaves a button that lights up over an
+# empty panel, which reads as the mode simply having nothing in it.
+
+
+def _mode_wiring():
+    """Parse the mode keys, their element ids and the click wiring."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+
+    def table(name):
+        block = html.split(f"const {name} = {{")[1].split("};")[0]
+        return dict(re.findall(r'(\w+):\s*"([^"]+)"', block))
+
+    wired = dict(
+        re.findall(
+            r'getElementById\("(\w+)"\)\s*\.addEventListener\('
+            r'"click",\s*\(\)\s*=>\s*setMode\("(\w+)"\)',
+            html,
+        )
+    )
+    default = re.search(r'let panelMode = "(\w+)"', html).group(1)
+    return html, table("MODE_ROWS"), table("MODE_BTNS"), wired, default
+
+
+def test_every_mode_has_a_button_a_panel_and_a_handler():
+    """`setMode` shows one row container and lights one button, both looked
+    up by id.  An id that names nothing throws inside the loop, leaving the
+    panel on whichever mode it was already displaying."""
+    html, rows, btns, wired, default = _mode_wiring()
+
+    assert set(rows) == set(btns), (
+        f"MODE_ROWS has {sorted(rows)}, MODE_BTNS has {sorted(btns)}"
+    )
+    assert len(rows) == 3, f"expected three modes, parsed {sorted(rows)}"
+    assert default in rows, f"panelMode starts at {default!r}, not a mode"
+
+    for mode, row_id in rows.items():
+        assert f'id="{row_id}"' in html, f"{mode}: no element id={row_id!r}"
+    for mode, btn_id in btns.items():
+        assert f'id="{btn_id}"' in html, f"{mode}: no element id={btn_id!r}"
+        assert wired.get(btn_id) == mode, (
+            f"{btn_id} calls setMode({wired.get(btn_id)!r}), expected {mode!r}"
+        )
+
+
+def test_the_mode_buttons_are_exactly_the_ones_styled_as_modes():
+    """The active-mode highlight is CSS on `button.mode-btn[data-active]`.
+    A mode button without the class switches the panel while still looking
+    inactive; anything else carrying it looks like a fourth mode."""
+    import re
+
+    html, _, btns, _, _ = _mode_wiring()
+
+    styled = set(re.findall(r'<button\s+id="(\w+)"\s+class="mode-btn"', html))
+    assert styled == set(btns.values()), (
+        f"styled as modes: {sorted(styled)}, declared: {sorted(btns.values())}"
+    )
+
+
+# ── a skeleton must belong to the mesh it is loaded beside ────────────
+#
+# Binding is not checking.  A skeleton binds to whatever mesh is loaded when
+# it arrives, which is the *claim* that the two go together; nothing tested
+# the claim.  `_skel_is_stale` cannot: it compares mesh identity, so it sees
+# a mesh swapped mid-session and is blind to a pair that never matched.
+#
+# The failure was asymmetric and the quiet half was the dangerous one — a
+# smaller wrong mesh raised IndexError inside dx.face_owner (a 500), while a
+# larger one kept every vertex id in range and returned bins, surface support
+# and edit previews computed against the wrong cell, all with 200.
+
+
+@pytest.fixture
+def mismatch_client(tmp_path, monkeypatch):
+    """A skeleton of a tube, and two unrelated meshes to mispair it with."""
+    from starlette.testclient import TestClient
+
+    from skeliner import skeletonize
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+    own = trimesh.creation.cylinder(radius=40.0, height=1200.0, sections=24)
+    own = own.subdivide().subdivide()
+    skel = skeletonize(own, verbose=False)
+    (tmp_path / "skeleton.npz").write_bytes(b"")
+    skel.to_npz(tmp_path / "skeleton.npz")
+
+    bigger = trimesh.creation.icosphere(subdivisions=4, radius=300.0)
+    smaller = trimesh.creation.icosphere(subdivisions=1, radius=300.0)
+    assert len(bigger.vertices) > len(own.vertices) > len(smaller.vertices)
+    for m, n in ((own, "own.obj"), (bigger, "bigger.obj"), (smaller, "smaller.obj")):
+        m.export(tmp_path / n)
+
+    def load(mesh_file):
+        client = TestClient(viewer_mod._create_app(port=8914))
+        client.__enter__()
+        client.post(
+            "/upload_batch",
+            files=[
+                ("files", (mesh_file, (tmp_path / mesh_file).read_bytes())),
+                ("files", ("skeleton.npz", (tmp_path / "skeleton.npz").read_bytes())),
+            ],
+        )
+        name = next(iter(client.get("/skeletons").json()))
+        return client, name
+
+    yield load
+
+
+@pytest.mark.parametrize("mesh_file", ["bigger.obj", "smaller.obj"])
+def test_a_mispaired_skeleton_is_refused_by_every_route_that_reads_the_mesh(
+    mismatch_client, mesh_file
+):
+    client, name = mismatch_client(mesh_file)
+    for url, payload in (
+        ("/bin", {"name": name, "node": 2}),
+        ("/edge_support", {"name": name}),
+        ("/bin_reassign_preview", {"name": name, "to": 2, "faces": [0, 1, 2]}),
+        ("/bin_split_preview", {"name": name, "node": 2, "faces": [0, 1]}),
+        ("/edge_edit_preview", {"name": name, "u": 1, "v": 2}),
+    ):
+        r = client.post(url, json=payload)
+        assert r.status_code == 409, f"{url} returned {r.status_code}"
+        assert "does not belong to the loaded mesh" in r.json()["error"], url
+
+
+def test_the_matching_mesh_is_still_allowed(mismatch_client):
+    """The guard has to let the real pair through, or it has just disabled
+    the feature it protects."""
+    client, name = mismatch_client("own.obj")
+    assert client.post("/bin", json={"name": name, "node": 2}).status_code == 200
+    assert client.post("/edge_support", json={"name": name}).status_code == 200
+
+
+def test_export_survives_a_mispairing(mismatch_client):
+    """The skeleton is not damaged by a wrong mesh standing next to it, and
+    edits are already refused, so there is nothing left to protect against."""
+    client, name = mismatch_client("bigger.obj")
+    assert client.get(f"/export_skeleton?name={name}").status_code == 200
+
+
+def test_the_pairing_verdict_rides_along_with_the_layer(mismatch_client):
+    """The client cannot ask a question it does not know to ask, so the
+    verdict travels with the skeleton rather than waiting for a click."""
+    client, name = mismatch_client("bigger.obj")
+    layer = client.get("/skeletons").json()[name]
+    assert layer["pairing"]["ok"] is False
+    assert layer["pairing"]["verified"] is False
+
+    good, gname = mismatch_client("own.obj")
+    assert good.get("/skeletons").json()[gname]["pairing"] == {
+        "ok": True,
+        "verified": True,
+        "reason": "counts match the mesh this was built from",
+        "meshVertices": 770,
+        "meshFaces": 1536,
+    }
+
+
+# ---------------------------------------------------------------------
+# diagnostics — listing candidates to look at
+#
+# The panel's whole purpose is that a threshold here is unvalidated, so a
+# candidate has to be reachable by eye.  These check the route produces
+# something the marker channel can carry, and that it stays a *lister*.
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "kind",
+    ["junctions", "cycles", "twigs", "degree", "tips", "orphans"],
+)
+def test_every_offered_diagnostic_runs(bin_client, kind):
+    """A panel entry that 500s is worse than no panel entry.
+
+    The dropdown is built from `DIAGNOSTICS`, so each key has to survive a
+    real skeleton — several of these reach for `soma`, `radii` or a rooted
+    traversal, and a fixture without one would take the route down.
+    """
+    client, name, _mesh, _skel = bin_client
+    r = client.post("/diagnose", json={"name": name, "kind": kind})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["kind"] == kind
+    assert body["n"] >= 0
+
+
+def test_the_dropdown_offers_exactly_the_diagnostics_that_exist(bin_client):
+    """A named option with no implementation is a dead menu entry, and an
+    implementation with no option is unreachable."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    client, name, _mesh, _skel = bin_client
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    sel = re.search(r'id="dxKindSel".*?</select>', html, re.S | re.I)
+    assert sel, "diagnostics dropdown not found"
+    offered = set(re.findall(r'<option value="([a-z_]+)"', sel.group(0)))
+
+    for kind in offered:
+        assert (
+            client.post("/diagnose", json={"name": name, "kind": kind}).status_code
+            == 200
+        ), f"dropdown offers {kind!r} but the route refuses it"
+
+    declared = set(
+        re.findall(
+            r"^\s*(\w+):\s*\[",
+            re.search(r"const DX_PARAMS = \{(.*?)\n            \};", html, re.S).group(
+                1
+            ),
+            re.M,
+        )
+    )
+    assert declared == offered, (
+        f"DX_PARAMS and the dropdown disagree: {declared ^ offered}"
+    )
+
+
+def test_the_diagnostics_are_listed_in_the_order_dx_lists_them():
+    """Three places name this list, and a menu with no rule gets appended to.
+
+    `dx.__skeleton__` already runs invariant checks, then enumerations, then
+    heuristics, so the panel follows it rather than inventing an order —
+    which also makes the dropdown read from "this is broken" down to "this
+    might repay a look".
+    """
+    import re
+    from pathlib import Path
+
+    from skeliner import dx
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    sel = re.search(r'id="dxKindSel".*?</select>', html, re.S | re.I)
+    dropdown = re.findall(r'<option value="([a-z_]+)"', sel.group(0))
+    params = re.findall(
+        r"^\s*(\w+):\s*\[",
+        re.search(r"const DX_PARAMS = \{(.*?)\n            \};", html, re.S).group(1),
+        re.M,
+    )
+    source = Path(viewer_mod.__file__).read_text()
+    registry = re.findall(
+        r'^\s*"([a-z_]+)": \(',
+        re.search(r"DIAGNOSTICS = \{(.*?)\n    \}", source, re.S).group(1),
+        re.M,
+    )
+
+    assert dropdown == params, f"dropdown {dropdown} vs DX_PARAMS {params}"
+    assert dropdown == registry, f"dropdown {dropdown} vs DIAGNOSTICS {registry}"
+
+    # and that shared order is dx's own
+    backing = {
+        "orphans": "check_connectivity",
+        "cycles": "cycles",
+        "degree": "nodes_of_degree",
+        "twigs": "twigs_of_length",
+        "tips": "suspicious_tips",
+        "junctions": "suspicious_junctions",
+    }
+    assert set(backing) == set(dropdown), "a diagnostic has no declared dx backing"
+    ranks = [dx.__skeleton__.index(backing[k]) for k in dropdown]
+    assert ranks == sorted(ranks), (
+        f"panel order {dropdown} does not follow dx.__skeleton__ (ranks {ranks})"
+    )
+
+
+def test_a_diagnostic_marks_nodes_without_touching_the_skeleton(bin_client):
+    """It reports candidates and never edits — the same split `pre` draws
+    between its `find_*` and `remove_*` functions."""
+    client, name, _mesh, skel = bin_client
+    before_nodes = skel.nodes.copy()
+    before_edges = np.asarray(skel.edges).copy()
+
+    # The fixture is a tube, so its skeleton is a chain with no node above
+    # degree 2 — asking for degree>=3 here would pass on an empty list and
+    # assert nothing.  Degree 1 is what this fixture actually has.
+    r = client.post(
+        "/diagnose",
+        json={"name": name, "kind": "degree", "params": {"minDegree": 1}},
+    )
+    assert r.status_code == 200
+    assert r.json()["n"] > 0, "fixture produced no candidates to check with"
+
+    after = client.get("/skeletons").json()[name]
+    assert after["nNodes"] == len(before_nodes)
+    assert np.array_equal(np.asarray(skel.edges), before_edges)
+
+    markers = client.get("/annotations").json().get("markers", [])
+    assert markers, "a diagnostic must leave something to look at"
+    for m in markers:
+        assert m["skelName"] == name
+        assert isinstance(m["node"], int)
+        assert m["dx"] == "degree"
+        assert len(m["position"]) == 3
+        assert m["radius"] > 0
+
+
+def test_re_running_a_diagnostic_replaces_its_own_markers_only(bin_client):
+    """Turning a threshold and re-running must answer *what does this cut do*,
+    not stack three answers on top of each other — while leaving the other
+    diagnostics', and the user's own, markers alone."""
+    client, name, _mesh, _skel = bin_client
+
+    client.post(
+        "/diagnose",
+        json={"name": name, "kind": "degree", "params": {"minDegree": 1}},
+    )
+    wide = client.get("/annotations").json()["markers"]
+    assert len(wide) > 0, "fixture produced no candidates to check with"
+
+    client.post("/diagnose", json={"name": name, "kind": "tips"})
+    both = client.get("/annotations").json()["markers"]
+    assert len([m for m in both if m["dx"] == "degree"]) == len(wide)
+
+    client.post(
+        "/diagnose",
+        json={"name": name, "kind": "degree", "params": {"minDegree": 99}},
+    )
+    after = client.get("/annotations").json()["markers"]
+    assert [m for m in after if m["dx"] == "degree"] == []
+    assert len([m for m in after if m["dx"] == "tips"]) == len(
+        [m for m in both if m["dx"] == "tips"]
+    )
+
+
+def test_a_diagnostic_refuses_a_skeleton_that_is_not_the_loaded_mesh(
+    mismatch_client,
+):
+    """Deciding a junction is wrong needs the surface it came from.  Computing
+    the list mesh-free is possible but pointless: the answer exists only to be
+    checked against a mesh, so an unpaired one is refused rather than shown."""
+    client, name = mismatch_client("bigger.obj")
+    r = client.post("/diagnose", json={"name": name, "kind": "degree"})
+    assert r.status_code == 409
+    assert "does not belong to the loaded mesh" in r.json()["error"]
+
+
+def test_a_marker_lands_exactly_on_the_node_it_marks(tmp_path, monkeypatch):
+    """Everything the client draws is centroid-relative.
+
+    `_mesh_to_buffers` subtracts the centroid from the vertices and
+    `_skeleton_to_buffers` subtracts the same one from the nodes, so the two
+    overlay.  A marker built from raw skeleton coordinates is off by a whole
+    centroid — on a CAVE cell that is hundreds of microns, far outside the
+    mesh, and it reads as "the diagnostic found nothing there" rather than
+    as a coordinate bug.
+
+    The mesh is deliberately built **away from the origin**.  Every other
+    fixture here is a trimesh primitive centred on it, where the centroid is
+    zero and subtracting it is a no-op — this test passes on the broken code
+    against any of them.
+    """
+    from starlette.testclient import TestClient
+
+    from skeliner import skeletonize
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+    mesh = trimesh.creation.cylinder(radius=40.0, height=1200.0, sections=24)
+    mesh = mesh.subdivide().subdivide()
+    mesh.apply_translation([480_000.0, -310_000.0, 205_000.0])
+    assert np.linalg.norm(mesh.vertices.mean(axis=0)) > 1e5, (
+        "the fixture must sit away from the origin or a missing centroid "
+        "subtraction is invisible"
+    )
+    skel = skeletonize(mesh, verbose=False)
+
+    app = _create_app(preload_mesh=mesh, port=8917)
+    with TestClient(app) as client:
+        path = tmp_path / "skeleton.npz"
+        skel.to_npz(path)
+        client.post("/upload", files={"file": ("skeleton.npz", path.read_bytes())})
+        name = next(iter(client.get("/skeletons").json()))
+
+        r = client.post(
+            "/diagnose",
+            json={"name": name, "kind": "degree", "params": {"minDegree": 1}},
+        )
+        assert r.json()["n"] > 0, "fixture produced no candidates to check with"
+
+        drawn = client.get("/skeletons").json()[name]["nodes"]
+        markers = client.get("/annotations").json()["markers"]
+        assert markers
+
+        for m in markers:
+            nid = m["node"]
+            expected = drawn[3 * nid : 3 * nid + 3]
+            assert m["position"] == pytest.approx(expected, abs=1.0), (
+                f"marker for node {nid} is not where that node is drawn"
+            )
+
+
+def test_a_loop_is_drawn_so_it_can_be_traced(tmp_path, monkeypatch):
+    """A loop is the one candidate whose *edges* are the answer.
+
+    It is a single connected thing you follow round to find where the tree
+    closed it wrongly, so drawing it is the whole point — unlike ninety
+    scattered twigs, which pooled into one annotation can be neither focused
+    nor acted on together and were dropped for that reason.
+
+    Also guards the coordinate frame: segments are drawn centroid-relative,
+    and a missed subtraction puts the loop a whole centroid from the cell.
+    """
+    from pathlib import Path
+
+    from starlette.testclient import TestClient
+
+    from skeliner import post, skeletonize
+    from skeliner.io import load_mesh
+    from skeliner.plot import viewer as viewer_mod
+
+    monkeypatch.setattr(viewer_mod, "_STATE_DIR", tmp_path, raising=False)
+    mesh = load_mesh(Path(__file__).parent / "data" / "60427.obj")
+    skel = skeletonize(mesh, verbose=False)
+    # Assert a connection the MST did not make — the only way a loop exists.
+    post.graft(skel, 2, 6)
+
+    app = _create_app(preload_mesh=mesh, port=8919)
+    with TestClient(app) as client:
+        path = tmp_path / "skeleton.npz"
+        skel.to_npz(path)
+        client.post("/upload", files={"file": ("skeleton.npz", path.read_bytes())})
+        name = next(iter(client.get("/skeletons").json()))
+
+        r = client.post("/diagnose", json={"name": name, "kind": "cycles"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["n"] == 1, "the graft should have opened exactly one loop"
+
+        ann = client.get("/annotations").json()
+        groups = [g for g in ann.get("edge_groups", []) if g.get("dx") == "cycles"]
+        assert groups, "the loop never reached the geometry"
+        assert any("the loop" in g["label"] for g in groups)
+        assert all(g.get("overlay") for g in groups), (
+            "a highlight tracing edges the skeleton already draws must sit on "
+            "top of it, or it is only visible once the skeleton is hidden"
+        )
+
+        drawn = np.asarray(client.get("/skeletons").json()[name]["nodes"]).reshape(
+            -1, 3
+        )
+        lo, hi = drawn.min(axis=0) - 1.0, drawn.max(axis=0) + 1.0
+        for g in groups:
+            assert g["segments"], "an empty group draws nothing"
+            for seg in g["segments"]:
+                for point in seg:
+                    p = np.asarray(point)
+                    assert ((p >= lo) & (p <= hi)).all(), (
+                        "segment drawn outside the skeleton — centroid not applied"
+                    )
+
+
+def test_an_unknown_diagnostic_is_named_rather_than_crashing(bin_client):
+    client, name, _mesh, _skel = bin_client
+    r = client.post("/diagnose", json={"name": name, "kind": "nonesuch"})
+    assert r.status_code == 400
+    assert "nonesuch" in r.json()["error"]
+
+
+# ── every annotation channel you can list, you can fly to ─────────────
+#
+# `markers` had a list row, a colour swatch, a visibility toggle and a
+# remove button — and no way to centre the camera on it, while `highlights`
+# and `edge_groups` had both a focus button and a double-click.  Nothing
+# failed; the channel was simply unreachable, which reads as "the list is
+# for reading".  It is also the channel a node-level diagnostic emits into,
+# so the omission was on the one that most needed it.
+
+
+def _focus_wiring():
+    """Which channels have a focus helper, and how it is reachable."""
+    import re
+    from pathlib import Path
+
+    from skeliner.plot import viewer as viewer_mod
+
+    html = Path(viewer_mod.__file__).with_name("viewer.html").read_text()
+    defined = set(re.findall(r"function (focusOn\w+)\(", html))
+    dblclick = set(re.findall(r'"dblclick",\s*\(\)\s*=>\s*(focusOn\w+)\(', html))
+    buttons = set(re.findall(r'"click",\s*\(\)\s*=>\s*(focusOn\w+)\(', html))
+    return html, defined, dblclick, buttons
+
+
+def test_every_listed_annotation_channel_can_be_centred_on():
+    html, defined, dblclick, buttons = _focus_wiring()
+
+    # The channels applyAnnotations renders, that also get a list row.
+    channels = {
+        "highlights": "focusOnAnnotation",
+        "edge_groups": "focusOnEdgeGroup",
+        "markers": "focusOnMarker",
+    }
+    for channel, fn in channels.items():
+        assert f"annotations.{channel}" in html, f"{channel} is no longer rendered"
+        assert fn in defined, f"{channel} has a list but no {fn}()"
+        assert fn in dblclick, f"{fn} is not reachable by double-clicking the row"
+        assert fn in buttons, f"{fn} has no focus button"
+
+
+def test_a_marker_can_name_the_node_it_marks():
+    """What makes a marker a diagnostic result rather than a pin: carrying
+    the node id lets focusing one select its bin, which is what arms the
+    edit verbs the row exists to lead to."""
+    html, _, _, _ = _focus_wiring()
+    body = html.split("function focusOnMarker(")[1].split("\n            }")[0]
+
+    assert "mk.node" in body, "focusOnMarker ignores the node a marker names"
+    assert "selectBin(mk.node)" in body, "focusing a node marker does not select it"
+    # Toggling would make focusing the same row twice deselect it.
+    assert "clearBinSelection()" in body, "selection is toggled rather than set"
+    assert 'panelMode !== "skeleton"' in body, (
+        "bin selection is attempted outside the mode that has a bin panel"
+    )
