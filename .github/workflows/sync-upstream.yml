@@ -9,20 +9,20 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      actions: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Add upstream remote and sync
+      # SYNC_TOKEN: fine-grained PAT with Contents + Workflows write. GITHUB_TOKEN can
+      # never push upstream changes to .github/workflows/, so it can't do this merge.
+      - name: Merge upstream main
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
-          git remote add upstream https://github.com/berenslab/skeliner.git || git remote set-url upstream https://github.com/berenslab/skeliner.git
-          git fetch upstream
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git merge --no-edit upstream/main
-          git push origin main
+          [ -n "$GH_TOKEN" ] || { echo "::error::SYNC_TOKEN secret is not set"; exit 1; }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main
+
+      # GitHub disables schedules after 60 days without repo activity; this prevents it.
+      - name: Keep schedule enabled
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/sync-upstream.yml/enable"
