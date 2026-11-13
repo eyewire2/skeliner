@@ -2,22 +2,74 @@
 
 [![PyPI version](https://badge.fury.io/py/skeliner.svg)](https://badge.fury.io/py/skeliner)
 
-A lightweight skeletonizer that converts neuron meshes into biophysical‑modelling‑ready morphologies. It extracts an acyclic center‑line skeleton, estimates per‑node radii, detects the soma, and bridges small gaps. It also provides robust contact‑site mapping between pairs of cells using meshes alone or assisted with their skeletons.
-
-![](.github/banner.png)
+A lightweight skeletonizer that converts neuron meshes into biophysical‑modelling‑ready morphologies. Built for [Eyewire II](https://eyewire.ai), in Rust, with Python binding.
 
 ## Features
 
 - Mesh Preprocessing
     - remove mesh anomolies such as parallel faces due to chunk merging failures, gaps (broken neurites), fusions (wrong connections)
-    - find and classify soma, organelles, neurites and fragments that should be descarded 
+    - find and classify soma, organelles, and neurites (and also fragments that should be descarded)
+
+<table>
+  <tr>
+    <td width="30%" align="center">
+      <img width="100%" alt="disconnected components" src=".github/media/pre/disconnected.png" />  <br />   
+      <sub>Disconnected Mesh</sub>
+    </td>
+    <td width="30%" align="center">
+      <img width="100%"  alt="detecing gaps" src=".github/media/pre/gaps.png" /> <br />
+      <sub>Gaps Detection</sub>
+    </td>
+    <td width="30%" align="center">
+      <img width="100%"  alt="bridging gaps" src=".github/media/pre/bridges.png" />
+      <sub>Gaps Bridging</sub>
+    </td>
+  </tr>
+</table>
+
+
+<table>
+  <tr>
+    <td width="30%" align="center">
+      <img width="100%" alt="original mesh" src=".github/media/pre/mesh.png" />  <br />   
+      <sub>Original Mesh</sub>
+    </td>
+    <td width="30%" align="center">
+      <img width="100%"  alt="detecting organelles" src=".github/media/pre/organelles.png" /> <br />
+      <sub>Organelles Detection</sub>
+    </td>
+    <td width="30%" align="center">
+      <img width="100%"  alt="classifying components" src=".github/media/pre/components.png" />
+      <sub>Mesh breakdown into components</sub>
+    </td>
+  </tr>
+</table>
+
+
 
 - Mesh → SWC skeletons
     - Center‑line, acyclic skeleton.
-    - Per‑node radii with multiple estimators (median/mean/trim) and an automatic recommendation.
+    - Per‑node radii with multiple estimators (centerline/median/mean/trim) and an automatic recommendation.
     - Ellipsoidal soma detection near the soma centroid.
     - Bridges disconnected mesh components back to the soma (gap‑closing) and prunes tiny peri‑soma artefacts.
     - SWC and NPZ export with metadata;
+
+<table>
+  <tr>
+    <td width="30%" align="center">
+      <img width="100%" alt="Origin components" src=".github/media/skel/mesh.png" />  <br />   
+      <sub>Origin Mesh</sub>
+    </td>
+    <td width="30%" align="center">
+      <img width="100%"  alt="detecing gaps" src=".github/media/skel/bins.png" /> <br />
+      <sub>Geodesic Binnings</sub>
+    </td>
+    <td width="30%" align="center">
+      <img width="100%"  alt="bridging gaps" src=".github/media/skel/skel.png" />
+      <sub>Skeleton</sub>
+    </td>
+  </tr>
+</table>
 
 - Pairwise contact sites (two cells)
     - Skeleton‑based seeding: fast KD‑tree search finds node↔node proximity pairs with tolerance; returns contact
@@ -26,8 +78,25 @@ A lightweight skeletonizer that converts neuron meshes into biophysical‑modell
       areas on A/B and their mean, plus compact AABBs for downstream use.
     - Optional skeleton‑only approximation of contact sites/areas when meshes are unavailable.
 
+<table>
+  <tr>
+    <td width="30%" align="center">
+      <img width="100%" alt="contact sites between two cells" src=".github/media/contacts/contacts.png" />  <br />   
+      <sub>All contacts sites of two cells</sub>
+    </td>
+    <td width="30%" align="center">
+      <img width="100%"  alt="zoomed in to the contact sites (opaque)" src=".github/media/contacts/zoom-in-opaque.png" /> <br />
+      <sub>Contact sites with mesh</sub>
+    </td>
+    <td width="30%" align="center">
+      <img width="100%"  alt="zommed in to the contact sites (transparent)" src=".github/media/contacts/zoom-in-transparent.png" />
+      <sub>Contact sites only</sub>
+    </td>
+  </tr>
+</table>
+
 - I/O, visualization, diagnostics and post-processing
-    - Read/write SWC and compact NPZ; load meshes via `trimesh`.
+    - Read/write SWC and compact NPZ;
     - 2D projections and 3D viewers for meshes, skeletons, and contact patches.
     - Various diagnostics and post-processing tools.
 
@@ -52,74 +121,22 @@ pip install -e "skeliner[dev]"
 
 ## Quickstart
 
-### Skeletonize a mesh and save SWC
+### Mesh preprocessing and skeletonization
+
+Since v0.4.0, the preprocessing pipeline is the recommended route, while the original raw mesh direct skeletonization route is kept as a faster but less accurate alternative. The mesh preprocessing will clean up most artifacts that would potentially degrade the quality of the skeletons, which includes identifying internal organelles surfaces, locating the soma, and also bridging disconnected paths. All these are done in one call automatically. The skeleton then can be estimated from the cleaned mesh and the identified components (organelles, soma, and neurites):
 
 ```python
 import skeliner as sk
 
-mesh = sk.io.load_mesh("cellA.obj")  # or trimesh.load_mesh directly
-skel = sk.skeletonize(mesh, unit="nm", verbose=True)
-
-# Choose the recommended radius column (median/mean/trim)
-print("Recommended radius:", skel.recommend_radius())
+mesh = sk.io.load_mesh("cellA.obj") 
+mesh, components = sk.preprocess(mesh, compact=True, verbose=True)
+skel = sk.skeletonize(mesh, components, unit="nm", verbose=True)
 
 # Save SWC (e.g. convert nm → µm on write)
 skel.to_swc("cellA.swc", scale=1e-3)
 # Also persist a compact NPZ for fast reload
 skel.to_npz("cellA.npz")
 ```
-
-### Calibrate skeleton radii
-
-The quick skeletonization process often yields biased radius estimates, for two reasons:
-
-1. The raw radius estimators compute the distance to the node center, which is biased too be too low for cylindrical
-   segments.
-2. The mesh may have internal strucutre, typically from mitochondria or other organelles, which reduces the apparent
-   radius.
-
-Problem (1) is adressed by using the distance to the midline rather than the center point.  
-Problem (2) is adressed using ray‑casting to remove inner vertices of the mesh.
-This is computationally expensive, so per default it is only done for nodes that have many vertices.
-This can be controlled via the `min_verts_q_outer` parameter.
-
-You can use `sk.post.calibrate_radii` to improve it:
-
-```python
-import skeliner as sk
-
-mesh = sk.io.load_mesh("cellA.obj")  # or trimesh.load_mesh directly
-skel = sk.skeletonize(mesh, unit="nm", verbose=True)
-
-# Calibrate radii against the mesh (takes a few minutes)
-sk.post.calibrate_radii(
-    skel=skel,
-    mesh=mesh,
-    min_n_outer=20,
-    min_frac_outer=0.33,
-    min_verts_q_outer=80.,  # Set to 0 to check all nodes for internal structure, set to 100 to skip this step
-    rays_num_outer=30,
-    rays_thresh_outer=0.2,
-    verbose=True,
-    aggregate='trim',
-    store_key="calibrated",
-)
-```
-
-### Mesh preprocessing
-
-It's highly recommended to run the auto mesh preprocessing pipeline before skeletonization, as the raw mesh full of 
-artifacts that might bias the geodedic binning. 
-
-```python
-import skeliner as sk
-
-mesh = sk.io.load_mesh("cellA.obj")  # or trimesh.load_mesh directly
-mesh, components = sk.preprocess(mesh, compact=True, verbose=True)
-skel_preproc = sk.skeletonize(mesh=mesh, components=components, verbose=True)
-```
-
-But it will of course take longer time to produce the skeleton. 
 
 ### Find contact sites between two cells (skeleton + mesh)
 
@@ -128,27 +145,14 @@ import skeliner as sk
 
 meshA = sk.io.load_mesh("cellA.obj")
 meshB = sk.io.load_mesh("cellB.obj")
-A = sk.skeletonize(meshA)
-B = sk.skeletonize(meshB)
 
-# 1) skeleton-based seeds (delta in the same unit as the skeletons/meshes)
-seeds = sk.pair.find_contact_seeds(A, B, exclude_soma=True)
-print("seed count:", seeds.n)
-
-# 2) mesh-based contact patches around the seed midpoints
-sites = sk.pair.map_contact_sites(meshA, meshB, seeds.pos, unit="nm^2")
+sites = sk.pair.scan_contact(meshA, meshB, unit="nm^2")
 print("contact patches:", len(sites.faces_A))
 print("mean areas (mesh units^2):", sites.area_mean)
 
 # Optional: visualize patches
-# sk.plot.view_contacts(meshA, meshB, sites, sides="A")
+# sk.view.view_contacts(meshA, meshB, sites, sides="A")
 ```
-
-<p align="center">
-  <img src=".github/media/contacts-meshes-with-patches.png" width="30%">
-  <img src=".github/media/contacts-one-mesh-with-patches.png" width="30%">
-  <img src=".github/media/contacts-no-meshes-patches-only.png" width="30%">
-</p>
 
 ### Threads
 
